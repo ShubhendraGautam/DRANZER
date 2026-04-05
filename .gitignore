@@ -1,0 +1,33 @@
+# Build artifacts
+src/*.o
+src/app.out
+libs/src/*.o
+libs/libattention.a
+build/
+
+# Generated files
+*.pth
+*.ckpt
+dranzer.pth
+checkpoints/
+
+# Logs and outputs
+logs.txt
+model_output.txt
+.train_log.txt
+.test_log.txt
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Editor settings
+.vscode/
+.idea/
+*.iml
+
+# Temporary files
+*.tmp
+.tmp
