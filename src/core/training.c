@@ -5,11 +5,12 @@
  * embeddings, then an optimizer step (optimizer.c).
  */
 
-#include "include/training.h"
-#include "include/transformer.h"
-#include "include/tensor_ops.h"
-#include "include/optimizer.h"
-#include "include/debug.h"
+#include "core/training.h"
+#include "core/transformer.h"
+#include "core/tensor_ops.h"
+#include "core/optimizer.h"
+#include "backends/gpu/gpu_matmul.h"
+#include "common/debug.h"
 #include <string.h>
 #include <math.h>
 
@@ -150,6 +151,9 @@ model_errors_t model_train_step(neural_model_t *model,
     if (opt_rc != MODEL_SUCCESS) {
         return opt_rc; /* e.g. lazy Adam moment-buffer allocation failed; params left untouched */
     }
+    /* Every weight just changed - any GPU-resident cached copy (gpu_matmul.c)
+     * is now stale and must be re-uploaded before its next use. */
+    gpu_matmul_invalidate_weights();
 
     model->training_steps++;
 

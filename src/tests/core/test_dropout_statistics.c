@@ -3,7 +3,7 @@
  * match the configured rate, and inverted scaling should keep the mean
  * activation roughly unchanged. Also checks that is_training=0 is a true
  * no-op (inference must never apply dropout). */
-#include "../include/tensor_ops.h"
+#include "core/tensor_ops.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

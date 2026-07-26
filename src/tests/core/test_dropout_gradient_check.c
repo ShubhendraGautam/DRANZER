@@ -7,7 +7,7 @@
  * the perturbed parameter, exactly like test_gradient_check.c's no-dropout
  * version. Optimizer forced to plain SGD, same reasoning as there too.
  */
-#include "../include/model.h"
+#include "core/model.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

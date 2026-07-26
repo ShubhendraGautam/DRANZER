@@ -11,7 +11,20 @@
  *
  * Lazily initializes a CUDA context on first call and keeps it alive for
  * reuse; NVIDIA-only, and does nothing useful on a machine without a
- * working CUDA driver - always check gpu_matmul_available() first. */
+ * working CUDA driver - always check gpu_matmul_available() first.
+ *
+ * Two caches keep repeated calls from paying for the same work twice,
+ * which is what made the first (naive) version of this file 20-80x
+ * *slower* than CPU at this project's typical model sizes:
+ *   - A and C get persistent scratch device buffers, grown on demand and
+ *     reused across calls, instead of a fresh cuMemAlloc/cuMemFree every
+ *     call (the dominant cost - allocation/deallocation on the driver is
+ *     far more expensive than the transfer itself for small buffers).
+ *   - B (the weight matrix in every call site this project actually has -
+ *     see transformer.c) gets a persistent device buffer keyed by its
+ *     host pointer, uploaded once and re-used until
+ *     gpu_matmul_invalidate_weights() is called - the model's weights
+ *     don't change between calls except when the optimizer updates them. */
 
 /* Returns 1 if a CUDA GPU is usable right now, 0 otherwise. Safe to call
  * repeatedly; only actually probes hardware once. */
@@ -22,8 +35,16 @@ int gpu_matmul_available(void);
  * either case, not treat this as fatal. */
 int gpu_matmul(const float *A, const float *B, float *C, size_t m, size_t k, size_t n);
 
-/* Releases the lazily-created CUDA context, if any. Optional - not
- * calling this just means the context lives until process exit. */
+/* Marks every cached GPU-resident weight buffer stale. Must be called
+ * once after anything changes ANY model weight (training.c calls this
+ * once per model_optimizer_step) - without it, gpu_matmul() would keep
+ * using pre-update weight values forever, which is a silent correctness
+ * bug, not a crash. Safe/cheap to call even if nothing is cached yet or
+ * no GPU is in use. */
+void gpu_matmul_invalidate_weights(void);
+
+/* Releases the lazily-created CUDA context and every cached buffer, if
+ * any. Optional - not calling this just means they live until process exit. */
 void gpu_matmul_shutdown(void);
 
 #endif // GPU_MATMUL_H

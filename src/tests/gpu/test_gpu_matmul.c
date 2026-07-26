@@ -5,8 +5,8 @@
  * a usable CUDA GPU - this test is inherently hardware-dependent, unlike
  * every other test in this suite, and its absence of a GPU is not a
  * regression. */
-#include "../include/tensor_ops.h"
-#include "../include/gpu_matmul.h"
+#include "core/tensor_ops.h"
+#include "backends/gpu/gpu_matmul.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

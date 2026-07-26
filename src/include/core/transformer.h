@@ -1,7 +1,7 @@
 #ifndef TRANSFORMER_H
 #define TRANSFORMER_H
 
-#include "model_types.h"
+#include "core/model_types.h"
 
 /* Multi-head self-attention forward pass for layer l. Reads
  * model->cache_hidden[l] as input, writes Q/K/V/probs/concat into that

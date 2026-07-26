@@ -4,7 +4,7 @@
  * of model_train_step; this module just reports them.
  */
 
-#include "include/metrics.h"
+#include "core/metrics.h"
 #include <stdio.h>
 
 void model_get_metrics(neural_model_t *model, learning_metrics_t *out_metrics) {

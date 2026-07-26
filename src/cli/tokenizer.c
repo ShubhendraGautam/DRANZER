@@ -1,6 +1,6 @@
-#include "include/tokenizer.h"
-#include "../libs/include/byte_pair_encoding.h"
-#include "include/debug.h"
+#include "cli/tokenizer.h"
+#include "byte_pair_encoding.h"
+#include "common/debug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

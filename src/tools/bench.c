@@ -1,9 +1,16 @@
 /*
  * Standalone benchmark tool: memory footprint and throughput (inference +
- * training) across a few representative model sizes, single-threaded by
- * default (OMP=1 builds will parallelize the matmul/attention internals,
- * but the driver loop itself makes no threading decisions) so the numbers
- * reflect what a single low-end CPU core can do.
+ * training) across a few representative model sizes, on CPU and - when a
+ * usable CUDA GPU is present - also with model->use_gpu = 1 (see
+ * transformer.c's dispatch_matmul()), so the two are directly comparable.
+ * Single-threaded by default (OMP=1 builds parallelize the matmul/
+ * attention internals, but the driver loop itself makes no threading
+ * decisions) so the CPU numbers reflect what a single low-end core can do.
+ *
+ * Every run appends its results to bench_results.csv (gitignored, like
+ * gpu_capability_cache/) so historical numbers accumulate for comparison
+ * across code changes or machines, instead of only ever living in
+ * whatever terminal happened to be open when the benchmark ran.
  *
  * Deliberately its own small file/binary (bench.out) rather than a mode
  * bolted onto main.c/cli.c - it links directly against the model modules
@@ -13,17 +20,25 @@
  * Run:    ./bench.out
  */
 
-#include "include/model.h"
+#include "core/model.h"
+#include "backends/gpu/gpu_matmul.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 typedef struct {
     const char *name;
     size_t vocab_size, embedding_dim, num_heads, num_layers, max_seq_len;
 } bench_config_t;
+
+typedef struct {
+    double inference_ms_per_token;
+    double training_ms_per_step;
+} bench_result_t;
 
 static double now_sec(void) {
     struct timespec ts;
@@ -41,7 +56,7 @@ static long peak_rss_kb(void) {
  * worst-case, steady-state cost once a generated sequence has filled its
  * context window - there's no KV cache here, so every generation step
  * reprocesses the whole context from scratch) and reports latency/throughput. */
-static void bench_inference(neural_model_t *model, const bench_config_t *cfg, int iters) {
+static double bench_inference(neural_model_t *model, const bench_config_t *cfg, int iters) {
     uint32_t *tokens = malloc(cfg->max_seq_len * sizeof(uint32_t));
     float *logits = malloc(cfg->vocab_size * sizeof(float));
     for (size_t i = 0; i < cfg->max_seq_len; i++) tokens[i] = (uint32_t)((i * 31 + 7) % cfg->vocab_size);
@@ -61,9 +76,15 @@ static void bench_inference(neural_model_t *model, const bench_config_t *cfg, in
 
     free(tokens);
     free(logits);
+    return per_token_ms;
 }
 
-static void bench_training(neural_model_t *model, const bench_config_t *cfg, int iters) {
+/* GPU forward dispatch only touches model_forward's matmuls (see
+ * transformer.c) - the backward pass and optimizer step inside
+ * model_train_step stay CPU-only regardless of model->use_gpu, so this
+ * measures "how much does GPU-accelerating just the forward half of a
+ * training step help", not a fully GPU-resident training step. */
+static double bench_training(neural_model_t *model, const bench_config_t *cfg, int iters) {
     uint32_t *tokens = malloc(cfg->max_seq_len * sizeof(uint32_t));
     for (size_t i = 0; i < cfg->max_seq_len; i++) tokens[i] = (uint32_t)((i * 17 + 3) % cfg->vocab_size);
     uint32_t target = (uint32_t)(cfg->vocab_size / 2);
@@ -82,9 +103,29 @@ static void bench_training(neural_model_t *model, const bench_config_t *cfg, int
            per_step_ms, 1000.0 / per_step_ms, cfg->max_seq_len * 1000.0 / per_step_ms);
 
     free(tokens);
+    return per_step_ms;
 }
 
-static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer, int infer_iters, int train_iters) {
+static void csv_log(FILE *csv, const char *timestamp, const bench_config_t *cfg,
+                     const char *optimizer_name, const char *mode, long param_floats,
+                     const bench_result_t *r, long rss_delta_kb) {
+    if (!csv) return;
+    fprintf(csv, "%s,%s,%zu,%zu,%zu,%zu,%zu,%s,%s,%ld,%.4f,%.4f,%.4f,%.4f,%.2f\n",
+            timestamp, cfg->name, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads,
+            cfg->num_layers, cfg->max_seq_len, optimizer_name, mode, param_floats,
+            r->inference_ms_per_token, 1000.0 / r->inference_ms_per_token,
+            r->training_ms_per_step, 1000.0 / r->training_ms_per_step,
+            rss_delta_kb / 1024.0);
+    fflush(csv);
+}
+
+static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer, int use_gpu,
+                        int infer_iters, int train_iters, FILE *csv, const char *timestamp) {
+    if (use_gpu && !gpu_matmul_available()) {
+        printf("--- %s: GPU requested but not available - skipping GPU run ---\n\n", cfg->name);
+        return;
+    }
+
     neural_model_t model = {0};
     long rss_before = peak_rss_kb();
 
@@ -94,22 +135,28 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer, in
         return;
     }
     model.optimizer_type = optimizer;
+    model.use_gpu = use_gpu;
 
-    printf("--- %s (vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu) optimizer=%s ---\n",
+    const char *optimizer_name = (optimizer == OPTIMIZER_ADAM) ? "adam" : "sgd";
+    printf("--- %s (vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu) optimizer=%s mode=%s ---\n",
            cfg->name, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads, cfg->num_layers,
-           cfg->max_seq_len, optimizer == OPTIMIZER_ADAM ? "adam" : "sgd");
+           cfg->max_seq_len, optimizer_name, use_gpu ? "GPU" : "CPU");
 
     size_t param_floats = model.total_param_count;
     printf("  parameters: %zu (%.2f MB weights only)\n",
            param_floats, param_floats * sizeof(float) / (1024.0 * 1024.0));
 
-    bench_inference(&model, cfg, infer_iters);
-    bench_training(&model, cfg, train_iters);
+    bench_result_t r;
+    r.inference_ms_per_token = bench_inference(&model, cfg, infer_iters);
+    r.training_ms_per_step = bench_training(&model, cfg, train_iters);
 
     long rss_after = peak_rss_kb();
     printf("  process peak RSS after this config: %.2f MB (delta from process start: %.2f MB)\n",
            rss_after / 1024.0, (rss_after - rss_before) / 1024.0);
     printf("\n");
+
+    csv_log(csv, timestamp, cfg, optimizer_name, use_gpu ? "gpu" : "cpu",
+            (long)param_floats, &r, rss_after - rss_before);
 
     model_free(&model);
 }
@@ -120,6 +167,24 @@ int main(void) {
 #else
     printf("Built WITHOUT OpenMP - single-threaded throughout (rebuild with `make bench OMP=1 CC=gcc` to compare).\n\n");
 #endif
+
+    int gpu_available = gpu_matmul_available();
+    printf(gpu_available
+           ? "CUDA GPU detected - each config runs on CPU and GPU (GPU dispatch covers model_forward's\n"
+             "matmuls only - see transformer.c's dispatch_matmul() - backward stays CPU-only regardless).\n\n"
+           : "No CUDA GPU detected - CPU-only run (see gpu_probe.out for why).\n\n");
+
+    const char *csv_path = "bench_results.csv";
+    int csv_existed = (access(csv_path, F_OK) == 0);
+    FILE *csv = fopen(csv_path, "a");
+    if (csv && !csv_existed) {
+        fprintf(csv, "timestamp,config,vocab_size,embedding_dim,num_heads,num_layers,max_seq_len,"
+                      "optimizer,mode,param_count,inference_ms_per_token,inference_tokens_per_sec,"
+                      "training_ms_per_step,training_steps_per_sec,rss_delta_mb\n");
+    }
+    char timestamp[32];
+    time_t now = time(NULL);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
 
     bench_config_t configs[] = {
         /* Matches this project's current main.c defaults. */
@@ -133,8 +198,21 @@ int main(void) {
     size_t num_configs = sizeof(configs) / sizeof(configs[0]);
 
     for (size_t i = 0; i < num_configs; i++) {
-        run_config(&configs[i], OPTIMIZER_SGD, 50, 20);
-        run_config(&configs[i], OPTIMIZER_ADAM, 50, 20);
+        run_config(&configs[i], OPTIMIZER_ADAM, 0, 50, 20, csv, timestamp);
+        /* GPU runs use fewer iterations: gpu_matmul() currently does a
+         * fresh alloc/upload/launch/download/free on every single call
+         * (see gpu_matmul.c) rather than reusing persistent device
+         * buffers, so per-call overhead is real and this keeps total
+         * benchmark time bounded while still measuring that overhead
+         * honestly rather than hiding it. */
+        if (gpu_available) {
+            run_config(&configs[i], OPTIMIZER_ADAM, 1, 10, 5, csv, timestamp);
+        }
+    }
+
+    if (csv) {
+        printf("Results appended to %s\n", csv_path);
+        fclose(csv);
     }
 
     return 0;

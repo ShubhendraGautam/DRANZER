@@ -3,7 +3,7 @@
  * logits for the same input as the original - guards against the flat
  * params-buffer layout (model.c/model_new) and its serialization
  * (serialization.c) ever drifting out of sync. */
-#include "../include/model.h"
+#include "core/model.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

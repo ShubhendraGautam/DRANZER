@@ -3,8 +3,8 @@
  * Handles multiple sequences efficiently
  */
 
-#include "include/batch.h"
-#include "include/debug.h"
+#include "cli/batch.h"
+#include "common/debug.h"
 #include <stdlib.h>
 #include <string.h>
 

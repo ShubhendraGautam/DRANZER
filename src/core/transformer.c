@@ -6,11 +6,30 @@
  * overall layer stack's forward.
  */
 
-#include "include/transformer.h"
-#include "include/tensor_ops.h"
-#include "include/debug.h"
+#include "core/transformer.h"
+#include "core/tensor_ops.h"
+#include "backends/gpu/gpu_matmul.h"
+#include "common/debug.h"
 #include <string.h>
 #include <math.h>
+
+/* Forward-pass matmul dispatch: GPU (hand-written PTX, gpu_matmul.c) when
+ * model->use_gpu is set and a CUDA GPU is actually usable, CPU otherwise.
+ * gpu_matmul_available() is checked at every call (not cached once) so a
+ * model can be constructed and used identically regardless of whether the
+ * machine has an NVIDIA GPU - the flag is simply a no-op without one.
+ * Backward-pass matmuls (matmul_backward_input/matmul_backward_weight,
+ * called directly from training.c) are CPU-only for now; see gpu_matmul.h
+ * for why the forward-only, opt-in scope was chosen first (host<->device
+ * transfer overhead needs to be measured against actual compute savings
+ * at this project's model sizes before it's worth extending). */
+static void dispatch_matmul(neural_model_t *model, float *A, float *B, float *C,
+                             size_t m, size_t k, size_t n) {
+    if (model->use_gpu && gpu_matmul_available() && gpu_matmul(A, B, C, m, k, n) == 0) {
+        return;
+    }
+    matrix_multiply(A, B, C, m, k, n);
+}
 
 void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len) {
     transformer_layer_t *layer = &model->layers[l];
@@ -25,9 +44,9 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
     float *probs = model->cache_probs[l];
     float *concat = model->cache_attn_concat[l];
 
-    matrix_multiply(sequence, layer->W_q, Q, seq_len, embedding_dim, embedding_dim);
-    matrix_multiply(sequence, layer->W_k, K, seq_len, embedding_dim, embedding_dim);
-    matrix_multiply(sequence, layer->W_v, V, seq_len, embedding_dim, embedding_dim);
+    dispatch_matmul(model, sequence, layer->W_q, Q, seq_len, embedding_dim, embedding_dim);
+    dispatch_matmul(model, sequence, layer->W_k, K, seq_len, embedding_dim, embedding_dim);
+    dispatch_matmul(model, sequence, layer->W_v, V, seq_len, embedding_dim, embedding_dim);
 
     memset(concat, 0, seq_len * embedding_dim * sizeof(float));
 
@@ -75,7 +94,7 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
         }
     }
 
-    matrix_multiply(concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
+    dispatch_matmul(model, concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
 }
 
 void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_len,
@@ -229,14 +248,14 @@ model_errors_t model_forward(neural_model_t *model,
 
         /* FFN sub-block: matmul -> bias -> ReLU -> matmul -> bias -> dropout -> residual -> LN */
         float *x1 = model->cache_attn_ln_out[l];
-        matrix_multiply(x1, layer->W_ff1, model->cache_ff_hidden[l], seq_len, embedding_dim, ffn_dim);
+        dispatch_matmul(model, x1, layer->W_ff1, model->cache_ff_hidden[l], seq_len, embedding_dim, ffn_dim);
         for (size_t i = 0; i < seq_len; i++) {
             for (size_t d = 0; d < ffn_dim; d++) {
                 float *v = &model->cache_ff_hidden[l][i * ffn_dim + d];
                 *v = relu(*v + layer->b_ff1[d]);
             }
         }
-        matrix_multiply(model->cache_ff_hidden[l], layer->W_ff2, model->ws_fwd_ff_raw,
+        dispatch_matmul(model, model->cache_ff_hidden[l], layer->W_ff2, model->ws_fwd_ff_raw,
                        seq_len, ffn_dim, embedding_dim);
         for (size_t i = 0; i < seq_len; i++) {
             for (size_t d = 0; d < embedding_dim; d++) {
@@ -255,7 +274,7 @@ model_errors_t model_forward(neural_model_t *model,
 
     /* 3. Output projection to vocabulary, from the last layer's last position */
     float *last_hidden = &model->cache_hidden[model->num_layers][(seq_len - 1) * embedding_dim];
-    matrix_multiply(last_hidden, model->output_projection, output_logits, 1, embedding_dim, model->vocab_size);
+    dispatch_matmul(model, last_hidden, model->output_projection, output_logits, 1, embedding_dim, model->vocab_size);
 
     for (size_t i = 0; i < model->vocab_size; i++) {
         output_logits[i] += model->output_bias[i];

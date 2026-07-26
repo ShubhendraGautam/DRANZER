@@ -3,8 +3,8 @@
  * Handles large files without loading entire content into RAM
  */
 
-#include "include/stream.h"
-#include "include/debug.h"
+#include "cli/stream.h"
+#include "common/debug.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

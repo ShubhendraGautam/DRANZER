@@ -6,9 +6,9 @@
  * the model needs no change here.
  */
 
-#include "include/serialization.h"
-#include "include/model.h"
-#include "include/debug.h"
+#include "core/serialization.h"
+#include "core/model.h"
+#include "common/debug.h"
 #include <stdlib.h>
 
 model_errors_t model_write_state(const neural_model_t *model, FILE *f) {

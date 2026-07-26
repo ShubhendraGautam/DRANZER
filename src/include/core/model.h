@@ -2,7 +2,7 @@
 #define MODEL_H
 
 /* Facade header: external callers (main.c, cli.c, checkpoint.c) just
- * `#include "model.h"` and get the full model API, without needing to
+ * `#include "core/model.h"` and get the full model API, without needing to
  * know it's actually implemented across several focused modules:
  *   model_types.h   - neural_model_t, transformer_layer_t, enums
  *   tensor_ops.*     - matmul/softmax/layernorm/dropout primitives
@@ -16,13 +16,13 @@
  * they actually need instead of this umbrella, to keep compile-time
  * coupling honest. */
 
-#include "model_types.h"
-#include "tensor_ops.h"
-#include "transformer.h"
-#include "optimizer.h"
-#include "training.h"
-#include "serialization.h"
-#include "metrics.h"
+#include "core/model_types.h"
+#include "core/tensor_ops.h"
+#include "core/transformer.h"
+#include "core/optimizer.h"
+#include "core/training.h"
+#include "core/serialization.h"
+#include "core/metrics.h"
 
 /**
  * Initialize a new neural model with random weights. Every trainable

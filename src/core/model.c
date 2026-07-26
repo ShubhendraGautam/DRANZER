@@ -13,8 +13,9 @@
  * the full module map.
  */
 
-#include "include/model.h"
-#include "include/debug.h"
+#include "core/model.h"
+#include "backends/gpu/gpu_matmul.h"
+#include "common/debug.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -97,6 +98,7 @@ model_errors_t model_new(neural_model_t *model,
     model->min_lr = 0.0f;
     model->dropout_rate = 0.0f;
     model->is_training = 0;
+    model->use_gpu = 0;
 
     size_t ffn_dim = embedding_dim * 4;
 
@@ -297,12 +299,25 @@ model_errors_t model_new(neural_model_t *model,
 
     DEBUG_PRINT("Neural model initialized successfully\n");
 
+    /* A freed model's params buffer can be reused by malloc for a
+     * *different* model at the same address (see model_free below) -
+     * invalidating here too means gpu_matmul.c's weight cache never
+     * mistakes this fresh model's weights for stale cached bytes left
+     * over from whatever previously occupied this memory. */
+    gpu_matmul_invalidate_weights();
+
     return MODEL_SUCCESS;
 }
 
 /* Free all model resources */
 void model_free(neural_model_t *model) {
     if (!model) return;
+
+    /* See model_new: this pointer's params buffer is about to be freed
+     * and may be handed back out by malloc for a different model later -
+     * bump the generation so gpu_matmul.c's weight cache re-uploads
+     * rather than trusting a coincidentally-matching pointer. */
+    gpu_matmul_invalidate_weights();
 
     free(model->params);
     free(model->grads);

@@ -1,7 +1,7 @@
 #ifndef OPTIMIZER_H
 #define OPTIMIZER_H
 
-#include "model_types.h"
+#include "core/model_types.h"
 
 /* Zero every gradient buffer before a fresh backward pass. Every trainable
  * parameter's gradient is a view into model->grads (see model_types.h), so

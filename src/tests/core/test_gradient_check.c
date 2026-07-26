@@ -7,7 +7,7 @@
  * layers. Forced to plain SGD with no clipping - see the comment on
  * reset_model() for why.
  */
-#include "../include/model.h"
+#include "core/model.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

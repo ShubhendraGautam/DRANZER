@@ -6,7 +6,7 @@
  * uses.
  */
 
-#include "include/gpu_capability_cache.h"
+#include "backends/gpu/gpu_capability_cache.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +77,16 @@ int gpu_capability_cache_save(const gpu_capability_t *cap, const char *dir) {
         fprintf(f, "opencl_platform_names = %s\n", cap->opencl.platform_names);
         fprintf(f, "opencl_device_count = %d\n", cap->opencl.total_device_count);
     }
+    fprintf(f, "\n");
+
+    fprintf(f, "has_perf = %d\n", cap->has_perf);
+    if (cap->has_perf) {
+        fprintf(f, "sm_count = %d\n", cap->sm_count);
+        fprintf(f, "clock_rate_khz = %d\n", cap->clock_rate_khz);
+        fprintf(f, "theoretical_peak_flops_fp32 = %.6e\n", cap->theoretical_peak_flops_fp32);
+        fprintf(f, "measured_bandwidth_gbps = %.6f\n", cap->measured_bandwidth_gbps);
+        fprintf(f, "measured_fma_gflops = %.6f\n", cap->measured_fma_gflops);
+    }
 
     fclose(f);
     return 0;
@@ -113,6 +123,13 @@ int gpu_capability_cache_load(const char *path, gpu_capability_t *out) {
         if (sscanf(line, "opencl_platform_count = %d", &out->opencl.platform_count) == 1) continue;
         if (sscanf(line, "opencl_platform_names = %255[^\n]", out->opencl.platform_names) == 1) continue;
         if (sscanf(line, "opencl_device_count = %d", &out->opencl.total_device_count) == 1) continue;
+
+        if (sscanf(line, "has_perf = %d", &out->has_perf) == 1) continue;
+        if (sscanf(line, "sm_count = %d", &out->sm_count) == 1) continue;
+        if (sscanf(line, "clock_rate_khz = %d", &out->clock_rate_khz) == 1) continue;
+        if (sscanf(line, "theoretical_peak_flops_fp32 = %lf", &out->theoretical_peak_flops_fp32) == 1) continue;
+        if (sscanf(line, "measured_bandwidth_gbps = %lf", &out->measured_bandwidth_gbps) == 1) continue;
+        if (sscanf(line, "measured_fma_gflops = %lf", &out->measured_fma_gflops) == 1) continue;
     }
 
     fclose(f);
@@ -152,5 +169,16 @@ void gpu_capability_print(const gpu_capability_t *cap) {
                cap->opencl.platform_count > 0 ? cap->opencl.platform_names : "");
     } else {
         printf("OpenCL: not available\n");
+    }
+
+    if (cap->has_perf) {
+        printf("SM count: %d, clock rate: %.0f MHz\n", cap->sm_count, cap->clock_rate_khz / 1000.0);
+        printf("Theoretical peak FP32: %.2f TFLOPS\n", cap->theoretical_peak_flops_fp32 / 1e12);
+        printf("Measured memory bandwidth: %.1f GB/s\n", cap->measured_bandwidth_gbps);
+        printf("Measured FP32 FMA throughput: %.2f GFLOPS (%.0f%% of theoretical peak)\n",
+               cap->measured_fma_gflops,
+               100.0 * (cap->measured_fma_gflops * 1e9) / cap->theoretical_peak_flops_fp32);
+    } else {
+        printf("Performance data: not available\n");
     }
 }

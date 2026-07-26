@@ -3,8 +3,8 @@
  * Saves/loads model state at intervals during training
  */
 
-#include "include/checkpoint.h"
-#include "include/debug.h"
+#include "cli/checkpoint.h"
+#include "common/debug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

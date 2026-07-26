@@ -8,7 +8,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "model.h"
+#include "core/model.h"
 
 typedef struct {
     uint32_t training_step;

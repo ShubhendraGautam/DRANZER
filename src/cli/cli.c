@@ -2,8 +2,8 @@
  * Command-line argument parsing implementation
  */
 
-#include "include/cli.h"
-#include "include/debug.h"
+#include "cli/cli.h"
+#include "common/debug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,7 +106,9 @@ void cli_print_help(const char *program_name) {
     printf("  --temperature T           Temperature 0.0-2.0 (default: 0.8)\n\n");
     
     printf("GENERAL OPTIONS:\n");
-    printf("  --gpu                     Use GPU acceleration if available\n");
+    printf("  --gpu                     Offload forward-pass matmuls to a CUDA GPU if usable (see `make bench`\n");
+    printf("                            for when this actually helps - a clear win at larger model sizes,\n");
+    printf("                            slower than CPU at this project's small defaults)\n");
     printf("  --debug                   Enable debug output\n");
     printf("  --help                    Show this help message\n\n");
     

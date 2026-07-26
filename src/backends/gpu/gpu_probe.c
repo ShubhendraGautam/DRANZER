@@ -18,10 +18,13 @@
  * it has nothing to do with the model or the CLI.
  */
 
-#include "include/gpu_probe.h"
-#include "include/gpu_capability_cache.h"
-#include "include/gpu_cuda.h"
-#include "include/gpu_cuda_attrs.h"
+#include "backends/gpu/gpu_probe.h"
+#include "backends/gpu/gpu_capability_cache.h"
+#include "backends/gpu/gpu_cuda.h"
+#include "backends/gpu/gpu_cuda_attrs.h"
+#include "backends/gpu/gpu_nvml_telemetry.h"
+#include "backends/gpu/gpu_theoretical_perf.h"
+#include "backends/gpu/gpu_microbench.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -61,13 +64,48 @@ static int run_probe(void) {
     print_report("CUDA", &cuda);
     print_report("OpenCL", &opencl);
 
+    if (nvml.status == GPU_BACKEND_READY) {
+        printf("--- Live NVML telemetry ---\n");
+        gpu_nvml_telemetry_t telemetry;
+        gpu_nvml_telemetry_probe(&telemetry);
+        gpu_nvml_telemetry_print(&telemetry);
+        printf("\n");
+    }
+
+    int sm_count = 0, clock_rate_khz = 0;
     if (cuda.status == GPU_BACKEND_READY) {
         gpu_cuda_ctx_t *attr_ctx = gpu_cuda_init();
         if (attr_ctx) {
-            printf("--- CUDA device attributes (table-driven cuDeviceGetAttribute sweep) ---\n");
+            printf("--- CUDA device attributes (full cuDeviceGetAttribute sweep, codes 1-%d) ---\n",
+                   GPU_CUDA_ATTR_SWEEP_MAX);
             gpu_cuda_attrs_print_all(attr_ctx);
             printf("\n");
+
+            gpu_cuda_device_attribute(attr_ctx, 16, &sm_count);       /* MULTIPROCESSOR_COUNT */
+            gpu_cuda_device_attribute(attr_ctx, 13, &clock_rate_khz); /* CLOCK_RATE_KHZ */
+
             gpu_cuda_shutdown(attr_ctx);
+        }
+
+        printf("--- Theoretical peak FP32 performance ---\n");
+        gpu_theoretical_perf_t perf;
+        gpu_theoretical_perf_compute(sm_count, clock_rate_khz, cap.nvml.cc_major, cap.nvml.cc_minor, &perf);
+        gpu_theoretical_perf_print(&perf);
+        printf("\n");
+
+        printf("--- Empirical microbenchmark (hand-written PTX, actual measured throughput) ---\n");
+        gpu_microbench_result_t bench;
+        gpu_microbench_run(&bench);
+        gpu_microbench_print(&bench);
+        printf("\n");
+
+        if (perf.available && bench.available) {
+            cap.has_perf = 1;
+            cap.sm_count = sm_count;
+            cap.clock_rate_khz = clock_rate_khz;
+            cap.theoretical_peak_flops_fp32 = perf.peak_flops_fp32;
+            cap.measured_bandwidth_gbps = bench.bandwidth_gbps;
+            cap.measured_fma_gflops = bench.fma_gflops;
         }
     }
 

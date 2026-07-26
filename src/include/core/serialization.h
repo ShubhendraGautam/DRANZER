@@ -1,7 +1,7 @@
 #ifndef SERIALIZATION_H
 #define SERIALIZATION_H
 
-#include "model_types.h"
+#include "core/model_types.h"
 #include <stdio.h>
 
 /**

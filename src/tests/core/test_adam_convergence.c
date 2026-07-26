@@ -3,7 +3,7 @@
  * would - not a numerical-correctness proof (that's test_gradient_check.c's
  * job), just a regression guard against a mis-wired optimizer silently
  * training a model that never converges. */
-#include "../include/model.h"
+#include "core/model.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

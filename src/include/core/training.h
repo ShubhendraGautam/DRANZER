@@ -1,7 +1,7 @@
 #ifndef TRAINING_H
 #define TRAINING_H
 
-#include "model_types.h"
+#include "core/model_types.h"
 
 /* Train the model on a sequence: forward pass, cross-entropy loss, full
  * backpropagation through every layer (attention, FFN, layer norms,

@@ -16,7 +16,7 @@
  * declared directly (matching the stable public OpenCL 1.2 ABI) rather
  * than requiring the opencl-headers package to be installed. */
 
-#include "include/gpu_probe.h"
+#include "backends/gpu/gpu_probe.h"
 #include <dlfcn.h>
 #include <dirent.h>
 #include <stdio.h>

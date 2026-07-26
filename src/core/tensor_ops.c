@@ -3,7 +3,7 @@
  * positional encoding. No knowledge of neural_model_t - see tensor_ops.h.
  */
 
-#include "include/tensor_ops.h"
+#include "core/tensor_ops.h"
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>

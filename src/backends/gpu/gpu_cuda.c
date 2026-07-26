@@ -4,7 +4,7 @@
  * resolves each symbol with dlsym - see gpu_cuda.h for why.
  */
 
-#include "include/gpu_cuda.h"
+#include "backends/gpu/gpu_cuda.h"
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>

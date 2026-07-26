@@ -5,16 +5,16 @@
  * Phase 3: Batch processing, configuration files, sampling strategies, training checkpoints
  */
 
-#include "../libs/include/byte_pair_encoding.h"
-#include "include/tokenizer.h"
-#include "include/model.h"
-#include "include/debug.h"
-#include "include/config.h"
-#include "include/sampling.h"
-#include "include/batch.h"
-#include "include/checkpoint.h"
-#include "include/cli.h"
-#include "include/stream.h"
+#include "byte_pair_encoding.h"
+#include "cli/tokenizer.h"
+#include "core/model.h"
+#include "common/debug.h"
+#include "cli/config.h"
+#include "cli/sampling.h"
+#include "cli/batch.h"
+#include "cli/checkpoint.h"
+#include "cli/cli.h"
+#include "cli/stream.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,6 +149,7 @@ int mode_train(const cli_args_t *args) {
     model.warmup_steps = args->warmup_steps;
     model.total_steps = args->total_steps;
     model.base_lr = args->learning_rate;
+    model.use_gpu = args->use_gpu;
 
     printf("   Model initialized:\n");
     printf("   - Vocabulary: %zu tokens\n", model.vocab_size);
@@ -157,6 +158,9 @@ int mode_train(const cli_args_t *args) {
     printf("   - Layers: %zu\n", model.num_layers);
     printf("   - Optimizer: %s (grad-clip=%.2f, weight-decay=%.4f, dropout=%.2f)\n",
            args->optimizer, model.grad_clip_norm, model.weight_decay, model.dropout_rate);
+    if (model.use_gpu) {
+        printf("   - GPU: requested (--gpu) - used automatically for forward-pass matmuls if a CUDA GPU is usable, CPU otherwise\n");
+    }
     printf("   ✓ Model ready for training\n");
 
     /* ===== STEP 3: Streaming Training Loop ===== */
@@ -341,7 +345,8 @@ int mode_infer(const cli_args_t *args) {
         fprintf(stderr, "Error: Failed to load model (code: %d)\n", load_rc);
         return 1;
     }
-    
+    model.use_gpu = args->use_gpu;
+
     printf("   ✓ Model loaded\n");
     printf("   - Vocab: %zu tokens\n", model.vocab_size);
     printf("   - Embedding: %zu\n", model.embedding_dim);
@@ -396,7 +401,8 @@ int mode_generate(const cli_args_t *args) {
         fprintf(stderr, "Error: Failed to load model (code: %d)\n", gen_load_rc);
         return 1;
     }
-    
+    model.use_gpu = args->use_gpu;
+
     printf("   ✓ Model loaded\n");
 
     printf("[2] Tokenizing prompt: \"%s\"\n", args->prompt);

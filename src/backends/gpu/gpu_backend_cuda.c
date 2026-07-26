@@ -16,7 +16,7 @@
  * compile a kernel at all. Reporting only "CUDA: found" in that case would
  * be actively misleading. */
 
-#include "include/gpu_probe.h"
+#include "backends/gpu/gpu_probe.h"
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>

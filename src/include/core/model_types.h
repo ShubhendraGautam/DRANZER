@@ -94,6 +94,14 @@ typedef struct {
     float dropout_rate;
     int is_training;
 
+    // --- GPU offload (forward pass only - see transformer.c). Off by
+    // default; opt in with --gpu (main.c) or by setting this directly.
+    // Has no effect at all if no CUDA GPU is usable (gpu_matmul_available()
+    // is checked at every dispatch site, not just once), so this is safe
+    // to leave on unconditionally on a machine that might or might not
+    // have an NVIDIA GPU. ---
+    int use_gpu;
+
     // --- Flat parameter storage. Every trainable weight (token
     // embeddings, output head, every layer's weights) is a contiguous
     // slice of these two buffers; the named pointers throughout this

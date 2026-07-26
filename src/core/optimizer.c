@@ -5,8 +5,8 @@
  * new parameter array is added anywhere in the model.
  */
 
-#include "include/optimizer.h"
-#include "include/debug.h"
+#include "core/optimizer.h"
+#include "common/debug.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>

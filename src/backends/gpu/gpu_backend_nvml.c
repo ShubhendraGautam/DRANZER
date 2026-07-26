@@ -5,7 +5,7 @@
  * public; the structs/prototypes below are declared directly rather than
  * requiring the CUDA toolkit's nvml.h to be present. */
 
-#include "include/gpu_probe.h"
+#include "backends/gpu/gpu_probe.h"
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>

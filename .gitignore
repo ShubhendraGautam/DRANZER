@@ -1,5 +1,7 @@
 # Build artifacts
-src/*.o
+# src/ is split into core/, backends/{gpu,tpu}/, cli/, tools/ - **/*.o
+# catches object files at any depth under those, not just top-level.
+src/**/*.o
 src/bench.out
 src/gpu_probe.out
 src/app.out
@@ -13,6 +15,11 @@ build/
 
 # Probed-machine capability cache - hardware-specific, regenerated per run.
 src/gpu_capability_cache/
+
+# Benchmark results log - accumulates across runs on THIS machine; numbers
+# aren't comparable across different hardware, so not tracked by default.
+# Remove this line if you want to commit a specific machine's history.
+src/bench_results.csv
 
 # Generated files
 *.pth

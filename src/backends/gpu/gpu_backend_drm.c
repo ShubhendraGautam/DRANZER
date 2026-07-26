@@ -5,7 +5,7 @@
  * the most basic "is there a GPU here at all, as far as the kernel can
  * tell" signal, and needs nothing beyond standard directory listing. */
 
-#include "include/gpu_probe.h"
+#include "backends/gpu/gpu_probe.h"
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>

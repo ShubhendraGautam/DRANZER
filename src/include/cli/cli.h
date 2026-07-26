@@ -7,7 +7,7 @@
 #define CLI_H
 
 #include <stddef.h>
-#include "sampling.h"
+#include "cli/sampling.h"
 
 typedef enum {
     MODE_TRAIN,

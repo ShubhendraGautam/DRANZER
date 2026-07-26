@@ -1,7 +1,7 @@
 /* Checks the shape of model_lr_schedule_step's warmup+cosine schedule
  * (optimizer.c): linear ramp to base_lr over warmup_steps, monotonic
  * decay down to min_lr by total_steps, then flat at min_lr after. */
-#include "../include/model.h"
+#include "core/model.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

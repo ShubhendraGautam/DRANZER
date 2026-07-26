@@ -3,8 +3,8 @@
  * Provides simple self-attention computation for token sequences
  */
 
-#include "include/attention.h"
-#include "include/debug.h"
+#include "cli/attention.h"
+#include "common/debug.h"
 #include <stdlib.h>
 #include <math.h>
 #include <stdio.h>

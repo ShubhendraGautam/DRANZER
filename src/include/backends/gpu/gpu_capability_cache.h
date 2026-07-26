@@ -1,7 +1,7 @@
 #ifndef GPU_CAPABILITY_CACHE_H
 #define GPU_CAPABILITY_CACHE_H
 
-#include "gpu_probe.h"
+#include "backends/gpu/gpu_probe.h"
 #include <time.h>
 
 /* A GPU's full capability profile, gathered from the public NVML/CUDA
@@ -17,6 +17,18 @@ typedef struct {
     gpu_opencl_facts_t opencl;
     int has_opencl;
     time_t probed_at;
+
+    /* Derived/measured performance data (gpu_theoretical_perf.h,
+     * gpu_microbench.h) - the microbenchmark is the only part of a probe
+     * that takes real wall-clock time, so caching it is what lets a
+     * researcher look up "what does this GPU actually achieve" without
+     * re-running it. */
+    int has_perf;
+    int sm_count;
+    int clock_rate_khz;
+    double theoretical_peak_flops_fp32;
+    double measured_bandwidth_gbps;
+    double measured_fma_gflops;
 } gpu_capability_t;
 
 /* Builds the path this capability record would be saved to/loaded from:

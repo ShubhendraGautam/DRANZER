@@ -1,7 +1,7 @@
 #ifndef METRICS_H
 #define METRICS_H
 
-#include "model_types.h"
+#include "core/model_types.h"
 
 /**
  * Get learning metrics (loss history, stats)

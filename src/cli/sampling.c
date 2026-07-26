@@ -3,8 +3,8 @@
  * Implements top-k, top-p (nucleus), and beam search
  */
 
-#include "include/sampling.h"
-#include "include/debug.h"
+#include "cli/sampling.h"
+#include "common/debug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

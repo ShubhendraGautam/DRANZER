@@ -3,8 +3,8 @@
  * Handles JSON-format configuration for reproducible training
  */
 
-#include "include/config.h"
-#include "include/debug.h"
+#include "cli/config.h"
+#include "common/debug.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
