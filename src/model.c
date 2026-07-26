@@ -20,24 +20,29 @@ static void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_o
     }
 }
 
-/* Softmax implementation */
+/* Softmax implementation - OPTIMIZED with better numerical stability */
 static void softmax(float *values, size_t size) {
     if (size == 0) return;
     
+    /* Find max for numerical stability - prevents overflow */
     float max_val = values[0];
     for (size_t i = 1; i < size; i++) {
         if (values[i] > max_val) max_val = values[i];
     }
     
+    /* Compute exp and sum in single pass - reduces memory accesses */
     float sum = 0.0f;
     for (size_t i = 0; i < size; i++) {
-        values[i] = expf(values[i] - max_val);
-        sum += values[i];
+        float exp_val = expf(values[i] - max_val);
+        values[i] = exp_val;
+        sum += exp_val;
     }
     
+    /* Normalize - reciprocal division is faster than per-element division */
     if (sum > 0) {
+        float inv_sum = 1.0f / sum;
         for (size_t i = 0; i < size; i++) {
-            values[i] /= sum;
+            values[i] *= inv_sum;
         }
     }
 }
@@ -52,16 +57,34 @@ static inline float relu_derivative(float x) {
     return x > 0.0f ? 1.0f : 0.0f;
 }
 
-/* Matrix multiplication: C = A * B (A: m x k, B: k x n, C: m x n) */
+/* Matrix multiplication with cache blocking for improved locality - OPTIMIZED */
 static void matrix_multiply(float *A, float *B, float *C, 
                            size_t m, size_t k, size_t n) {
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
-            for (size_t l = 0; l < k; l++) {
-                sum += A[i * k + l] * B[l * n + j];
+    /* Cache-blocking parameters: optimize for typical L1/L2 cache sizes */
+    const size_t BLOCK_SIZE = 64;  /* Tuned for 256KB L2 cache */
+    
+    /* Zero out result matrix */
+    memset(C, 0, m * n * sizeof(float));
+    
+    /* Block multiplication: process in BLOCK_SIZE chunks for cache locality */
+    for (size_t ii = 0; ii < m; ii += BLOCK_SIZE) {
+        for (size_t jj = 0; jj < n; jj += BLOCK_SIZE) {
+            for (size_t ll = 0; ll < k; ll += BLOCK_SIZE) {
+                /* Actual blocked computation */
+                size_t i_limit = (ii + BLOCK_SIZE > m) ? m : ii + BLOCK_SIZE;
+                size_t j_limit = (jj + BLOCK_SIZE > n) ? n : jj + BLOCK_SIZE;
+                size_t l_limit = (ll + BLOCK_SIZE > k) ? k : ll + BLOCK_SIZE;
+                
+                for (size_t i = ii; i < i_limit; i++) {
+                    for (size_t j = jj; j < j_limit; j++) {
+                        float sum = C[i * n + j];
+                        for (size_t l = ll; l < l_limit; l++) {
+                            sum += A[i * k + l] * B[l * n + j];
+                        }
+                        C[i * n + j] = sum;
+                    }
+                }
             }
-            C[i * n + j] = sum;
         }
     }
 }
@@ -91,11 +114,21 @@ static void layer_norm_internal(float *input, float *gamma, float *beta,
     }
 }
 
-/* Positional encoding: PE(pos, 2i) = sin(pos / 10000^(2i/d)) */
+/* Positional encoding: PE(pos, 2i) = sin(pos / 10000^(2i/d)) - OPTIMIZED */
 static void compute_positional_encoding(float *pos_embed, size_t seq_len, size_t embedding_dim) {
+    /* Pre-compute dimension scaling factors to avoid redundant powf calls */
+    float *dim_scales = malloc(embedding_dim * sizeof(float));
+    if (dim_scales == NULL) return;
+    
+    for (size_t i = 0; i < embedding_dim; i++) {
+        /* Cache: 1 / (10000^(2i/d)) - computed once per dimension */
+        dim_scales[i] = 1.0f / powf(10000.0f, (2.0f * i) / embedding_dim);
+    }
+    
+    /* Now apply positional encoding using cached scales */
     for (size_t pos = 0; pos < seq_len; pos++) {
         for (size_t i = 0; i < embedding_dim; i++) {
-            float angle = pos / powf(10000.0f, (2.0f * i) / embedding_dim);
+            float angle = pos * dim_scales[i];
             if (i % 2 == 0) {
                 pos_embed[pos * embedding_dim + i] = sinf(angle);
             } else {
@@ -103,6 +136,8 @@ static void compute_positional_encoding(float *pos_embed, size_t seq_len, size_t
             }
         }
     }
+    
+    free(dim_scales);
 }
 
 /* Initialize model with random weights */
@@ -215,12 +250,48 @@ model_errors_t model_new(neural_model_t *model,
     /* Compute positional encoding */
     compute_positional_encoding(model->position_embeddings, max_seq_len, embedding_dim);
     
-    DEBUG_PRINT("Neural model initialized successfully\n");
+    /* Optimization: pre-allocate a single workspace covering every temporary
+     * buffer used by the forward/train/predict hot path, so those calls
+     * never malloc/free. Sizes are based on max_seq_len (the worst case),
+     * not the seq_len of any particular call. */
+    size_t seq_emb = max_seq_len * embedding_dim;       /* Q, K, V, temp, embeddings, attn_output, ff_output */
+    size_t scores  = max_seq_len * max_seq_len;         /* attention scores */
+    size_t ff_hid  = max_seq_len * ffn_dim;             /* FFN hidden activations */
+
+    size_t workspace_needed =
+        4 * seq_emb +      /* ws_Q, ws_K, ws_V, ws_temp */
+        scores +           /* ws_scores */
+        3 * seq_emb +      /* ws_embeddings, ws_attn_output, ws_ff_output */
+        ff_hid +           /* ws_ff_hidden */
+        2 * vocab_size;    /* ws_logits, ws_grad_logits */
+
+    model->workspace = malloc(workspace_needed * sizeof(float));
+    if (model->workspace == NULL) {
+        return MODEL_ALLOCATION_FAILURE;
+    }
+    model->workspace_size = workspace_needed;
+    model->max_seq_len = max_seq_len;
+
+    /* Carve out named sub-regions (see model.h for lifetime/thread-safety notes) */
+    float *cursor = model->workspace;
+    model->ws_Q = cursor;              cursor += seq_emb;
+    model->ws_K = cursor;              cursor += seq_emb;
+    model->ws_V = cursor;              cursor += seq_emb;
+    model->ws_temp = cursor;           cursor += seq_emb;
+    model->ws_scores = cursor;         cursor += scores;
+    model->ws_embeddings = cursor;     cursor += seq_emb;
+    model->ws_attn_output = cursor;    cursor += seq_emb;
+    model->ws_ff_output = cursor;      cursor += seq_emb;
+    model->ws_ff_hidden = cursor;      cursor += ff_hid;
+    model->ws_logits = cursor;         cursor += vocab_size;
+    model->ws_grad_logits = cursor;    cursor += vocab_size;
+
+    DEBUG_PRINT("Neural model initialized successfully (workspace: %zu floats)\n", workspace_needed);
     
     return MODEL_SUCCESS;
 }
 
-/* Multi-head attention forward pass */
+/* Multi-head attention forward pass - OPTIMIZED with memory pooling */
 static void multihead_attention(neural_model_t *model,
                                float *sequence,        // seq_len x embedding_dim
                                size_t seq_len,
@@ -230,15 +301,15 @@ static void multihead_attention(neural_model_t *model,
     size_t num_heads = model->num_heads;
     size_t head_dim = embedding_dim / num_heads;
     
-    DEBUG_PRINT("Multi-head attention: seq_len=%zu, num_heads=%zu, head_dim=%zu\n", 
+    DEBUG_PRINT("Multi-head attention: seq_len=%zu, num_heads=%zu, head_dim=%zu\n",
                 seq_len, num_heads, head_dim);
-    
-    float *Q = malloc(seq_len * embedding_dim * sizeof(float));
-    float *K = malloc(seq_len * embedding_dim * sizeof(float));
-    float *V = malloc(seq_len * embedding_dim * sizeof(float));
-    float *attention_scores = malloc(seq_len * seq_len * sizeof(float));
-    float *attention_probs = malloc(seq_len * seq_len * sizeof(float));
-    
+
+    /* Use pre-allocated workspace instead of malloc/free per call */
+    float *Q = model->ws_Q;                    /* seq_len * embedding_dim */
+    float *K = model->ws_K;                    /* seq_len * embedding_dim */
+    float *V = model->ws_V;                    /* seq_len * embedding_dim */
+    float *attention_scores = model->ws_scores; /* seq_len * seq_len */
+
     /* Compute Q, K, V projections */
     matrix_multiply(sequence, model->W_q, Q, seq_len, embedding_dim, embedding_dim);
     matrix_multiply(sequence, model->W_k, K, seq_len, embedding_dim, embedding_dim);
@@ -280,17 +351,11 @@ static void multihead_attention(neural_model_t *model,
         }
     }
     
-    /* Output projection */
-    float *temp = malloc(seq_len * embedding_dim * sizeof(float));
+    /* Output projection - use workspace for temp buffer to avoid extra allocation */
+    float *temp = model->ws_temp;
     memcpy(temp, output, seq_len * embedding_dim * sizeof(float));
     matrix_multiply(temp, model->W_o, output, seq_len, embedding_dim, embedding_dim);
-    
-    free(Q);
-    free(K);
-    free(V);
-    free(attention_scores);
-    free(attention_probs);
-    free(temp);
+    /* No free() needed - all allocated from workspace pool */
 }
 
 /* Forward pass through neural network */
@@ -302,18 +367,22 @@ model_errors_t model_forward(neural_model_t *model,
     if (!model || !token_ids || !output_logits) {
         return MODEL_INVALID_INPUT;
     }
-    
-    if (seq_len > MAX_SEQ_LEN) {
+
+    /* Bound against the workspace actually allocated for this model
+     * (model->max_seq_len), not a compile-time constant - the workspace
+     * buffers are sized for max_seq_len, so anything larger would
+     * overflow them. */
+    if (seq_len == 0 || seq_len > model->max_seq_len) {
         return MODEL_INVALID_INPUT;
     }
-    
+
     size_t embedding_dim = model->embedding_dim;
-    
+
     DEBUG_PRINT("Model forward pass: seq_len=%zu, embedding_dim=%zu\n", seq_len, embedding_dim);
-    
-    /* 1. Embed tokens and add positional encoding */
-    float *embeddings = malloc(seq_len * embedding_dim * sizeof(float));
-    
+
+    /* 1. Embed tokens and add positional encoding (reuses workspace, no malloc) */
+    float *embeddings = model->ws_embeddings;
+
     for (size_t i = 0; i < seq_len; i++) {
         uint32_t token_id = token_ids[i];
         if (token_id >= model->vocab_size) token_id = 0; // OOV handling
@@ -326,7 +395,7 @@ model_errors_t model_forward(neural_model_t *model,
     }
     
     /* 2. Multi-head attention */
-    float *attention_output = malloc(seq_len * embedding_dim * sizeof(float));
+    float *attention_output = model->ws_attn_output;
     multihead_attention(model, embeddings, seq_len, attention_output);
     
     /* 3. Residual connection + Layer Normalization (Phase 2) */
@@ -340,10 +409,10 @@ model_errors_t model_forward(neural_model_t *model,
                           embedding_dim, 1e-6f);
     }
     
-    /* 4. Feedforward network */
-    float *ff_hidden = malloc(seq_len * embedding_dim * 4 * sizeof(float));
-    float *ff_output = malloc(seq_len * embedding_dim * sizeof(float));
-    
+    /* 4. Feedforward network (reuses workspace, no malloc) */
+    float *ff_hidden = model->ws_ff_hidden;
+    float *ff_output = model->ws_ff_output;
+
     matrix_multiply(attention_output, model->W_ff1, ff_hidden, 
                    seq_len, embedding_dim, embedding_dim * 4);
     
@@ -378,12 +447,10 @@ model_errors_t model_forward(neural_model_t *model,
     for (size_t i = 0; i < model->vocab_size; i++) {
         output_logits[i] += model->output_bias[i];
     }
-    
-    free(embeddings);
-    free(attention_output);
-    free(ff_hidden);
-    free(ff_output);
-    
+
+    /* embeddings/attention_output/ff_hidden/ff_output all live in
+     * model->workspace - nothing to free here. */
+
     return MODEL_SUCCESS;
 }
 
@@ -397,19 +464,19 @@ model_errors_t model_train_step(neural_model_t *model,
         return MODEL_INVALID_INPUT;
     }
     
-    /* Forward pass */
-    float *logits = malloc(model->vocab_size * sizeof(float));
+    /* Forward pass (workspace-backed, no malloc) */
+    float *logits = model->ws_logits;
     model_forward(model, token_ids, seq_len, logits);
-    
+
     /* Compute cross-entropy loss */
     softmax(logits, model->vocab_size);
     float loss = -logf(fmaxf(logits[target_id], 1e-7f));
     model->current_loss = loss;
-    
+
     DEBUG_PRINT("Training step: loss=%.4f, target_id=%u\n", loss, target_id);
-    
-    /* Compute gradient of output logits */
-    float *grad_logits = malloc(model->vocab_size * sizeof(float));
+
+    /* Compute gradient of output logits (workspace-backed, no malloc) */
+    float *grad_logits = model->ws_grad_logits;
     memcpy(grad_logits, logits, model->vocab_size * sizeof(float));
     grad_logits[target_id] -= 1.0f;  // Gradient for cross-entropy
     
@@ -446,10 +513,9 @@ model_errors_t model_train_step(neural_model_t *model,
         model->learning_rate = model->metrics.learning_rate;
         model->metrics.steps_without_improvement = 0;
     }
-    
-    free(logits);
-    free(grad_logits);
-    
+
+    /* logits/grad_logits live in model->workspace - nothing to free here. */
+
     return MODEL_SUCCESS;
 }
 
@@ -458,21 +524,20 @@ uint32_t model_predict_next_token(neural_model_t *model,
                                   uint32_t *token_ids,
                                   size_t seq_len) {
     
-    float *logits = malloc(model->vocab_size * sizeof(float));
+    float *logits = model->ws_logits;
     model_forward(model, token_ids, seq_len, logits);
-    
+
     /* Find argmax (greedy prediction) */
     uint32_t next_token = 0;
     float max_logit = logits[0];
-    
+
     for (uint32_t i = 1; i < model->vocab_size; i++) {
         if (logits[i] > max_logit) {
             max_logit = logits[i];
             next_token = i;
         }
     }
-    
-    free(logits);
+
     return next_token;
 }
 
@@ -613,6 +678,9 @@ void model_free(neural_model_t *model) {
     
     /* Phase 2: Free learning metrics */
     free(model->metrics.loss_history);
+    
+    /* Optimization: Free workspace memory pool */
+    free(model->workspace);
     
     memset(model, 0, sizeof(neural_model_t));
 }

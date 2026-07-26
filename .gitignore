@@ -4,6 +4,7 @@ src/app.out
 libs/src/*.o
 libs/libattention.a
 build/
+tests/
 
 # Generated files
 *.pth

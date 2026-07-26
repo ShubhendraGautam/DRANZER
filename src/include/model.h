@@ -84,6 +84,22 @@ typedef struct {
     // Phase 2: Learning metrics
     learning_metrics_t metrics;
     
+    // Optimization: Workspace memory pooling for reuse (avoid repeated malloc/free)
+    float *workspace;           // Single backing allocation for all forward/train temporaries
+    size_t workspace_size;      // Total allocated workspace size (floats)
+    size_t max_seq_len;         // Max sequence length for workspace sizing
+
+    // Named sub-regions of `workspace`, computed once in model_new().
+    // Reused on every forward/train/predict call instead of malloc+free,
+    // which matters on low-end hardware where heap allocation is slower
+    // and more prone to fragmentation under sustained training loops.
+    // Do NOT free these individually - they are freed together with
+    // `workspace`. Because they're shared, model_forward/model_train_step/
+    // model_predict_next_token are not reentrant or thread-safe.
+    float *ws_Q, *ws_K, *ws_V, *ws_scores, *ws_temp;   // attention temporaries
+    float *ws_embeddings, *ws_attn_output, *ws_ff_hidden, *ws_ff_output; // forward pass temporaries
+    float *ws_logits, *ws_grad_logits;                 // training/inference temporaries
+
 } neural_model_t;
 
 /**

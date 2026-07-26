@@ -1,16 +1,19 @@
 CC = clang
 AR = ar
-CFLAGS = -I include/ -g
+# -O2 (not -O0/-g by default): the tokenizer/hashmap library was previously
+# built unoptimized, which hurts on slow/low-end CPUs. No -march here, so
+# the archive stays portable across machines.
+CFLAGS = -I include/ -O2
 
 # Enable debug output with: make DEBUG=1
 ifdef DEBUG
-    CFLAGS += -DDEBUG
+    CFLAGS += -g -DDEBUG
     $(info DEBUG mode enabled)
 endif
 
 # Enable AddressSanitizer with: make ASAN=1
 ifdef ASAN
-    CFLAGS += -fsanitize=address -fno-omit-frame-pointer -O1
+    CFLAGS += -fsanitize=address -fno-omit-frame-pointer -O1 -g
     $(info AddressSanitizer enabled)
 endif
 

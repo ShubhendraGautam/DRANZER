@@ -15,7 +15,7 @@ void cli_get_defaults(cli_args_t *out_args) {
     memset(out_args, 0, sizeof(cli_args_t));
     
     out_args->mode = MODE_TRAIN;
-    strcpy(out_args->input_file, "test.txt");
+    strcpy(out_args->input_file, "../tests/chunk_aa");
     strcpy(out_args->model_path, "dranzer.pth");
     strcpy(out_args->checkpoint_dir, "checkpoints");
     

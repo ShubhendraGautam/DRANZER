@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Simple softmax implementation */
+/* Simple softmax implementation - OPTIMIZED */
 static void softmax(float *values, size_t size) {
     if (size == 0) return;
 
@@ -20,17 +20,19 @@ static void softmax(float *values, size_t size) {
         if (values[i] > max_val) max_val = values[i];
     }
 
-    // Compute exp and sum
+    // Compute exp and sum in single pass
     float sum = 0.0f;
     for (size_t i = 0; i < size; i++) {
-        values[i] = expf(values[i] - max_val);
-        sum += values[i];
+        float exp_val = expf(values[i] - max_val);
+        values[i] = exp_val;
+        sum += exp_val;
     }
 
-    // Normalize
+    // Normalize using reciprocal (faster than division)
     if (sum > 0) {
+        float inv_sum = 1.0f / sum;
         for (size_t i = 0; i < size; i++) {
-            values[i] /= sum;
+            values[i] *= inv_sum;
         }
     }
 }

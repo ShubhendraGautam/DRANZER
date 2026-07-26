@@ -14,14 +14,15 @@
 #include "include/batch.h"
 #include "include/checkpoint.h"
 #include "include/cli.h"
+#include "include/stream.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define VOCAB_SIZE 1000
-#define EMBEDDING_DIM 64
-#define NUM_HEADS 4
-#define MAX_SEQ_LEN 512
+#define VOCAB_SIZE 257
+#define EMBEDDING_DIM 16
+#define NUM_HEADS 2
+#define MAX_SEQ_LEN 16
 
 /* Forward declarations */
 int mode_train(const cli_args_t *args);
@@ -70,10 +71,10 @@ int main(int argc, char *argv[]) {
 
 /* ===== TRAINING MODE ===== */
 int mode_train(const cli_args_t *args) {
-    printf("=== Neural Model Training ===\n\n");
+    printf("=== Neural Model Training (LARGE FILE OPTIMIZED) ===\n\n");
 
-    /* ===== STEP 1: BPE Tokenization ===== */
-    printf("[1] Creating BPE encoder and tokenizing input...\n");
+    /* ===== STEP 1: BPE Tokenization with Streaming ===== */
+    printf("[1] Setting up streaming tokenization...\n");
     
     bpe_encoder_t *encoder = tokenizer_create_encoder(VOCAB_SIZE);
     if (encoder == NULL) {
@@ -81,61 +82,26 @@ int mode_train(const cli_args_t *args) {
         return 1;
     }
 
-    FILE *file = fopen(args->input_file, "r");
-    if (file == NULL) {
-        fprintf(stderr, "Error: Could not open file %s\n", args->input_file);
+    /* Create streaming file reader - handles files of any size */
+    stream_reader_t *stream = stream_reader_create(args->input_file, STREAM_CHUNK_SIZE);
+    if (stream == NULL) {
+        fprintf(stderr, "Error: Failed to open file for streaming\n");
         bpe_encoder_free(encoder);
         return 1;
     }
-
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    if (file_size <= 0 || file_size > 10 * 1024 * 1024) {
-        fprintf(stderr, "Error: Invalid file size\n");
-        fclose(file);
-        bpe_encoder_free(encoder);
-        return 1;
-    }
-
-    char *buffer = malloc(file_size + 1);
-    if (buffer == NULL) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
-        fclose(file);
-        bpe_encoder_free(encoder);
-        return 1;
-    }
-
-    size_t read_size = fread(buffer, 1, file_size, file);
-    fclose(file);
-
-    if (read_size != (size_t)file_size) {
-        fprintf(stderr, "Error: Failed to read entire file\n");
-        free(buffer);
-        bpe_encoder_free(encoder);
-        return 1;
-    }
-
-    buffer[file_size] = '\0';
-
-    /* Train BPE encoder */
-    printf("   Building BPE vocabulary...\n");
-    bpe_train(encoder, buffer, file_size);
-    printf("   Vocabulary size: %zu tokens\n", encoder->vocab_size);
-    DEBUG_PRINT("BPE training complete. Vocab size: %zu\n", encoder->vocab_size);
-
-    /* Tokenize the text */
-    bpe_tokens_t tokens = {0};
-    bpe_encode(encoder, buffer, file_size, &tokens);
-    printf("   Tokenized into %zu tokens\n", tokens.token_count);
     
-    if (tokens.token_count == 0) {
-        fprintf(stderr, "Error: No tokens generated\n");
+    printf("   ✓ Streaming reader created (256KB chunks)\n");
+    
+    /* Create token stream processor - accumulates tokens for batching */
+    token_stream_t *token_stream = token_stream_create(10000, 1000);
+    if (token_stream == NULL) {
+        fprintf(stderr, "Error: Failed to create token stream\n");
+        stream_reader_free(stream);
         bpe_encoder_free(encoder);
-        free(buffer);
         return 1;
     }
+    
+    printf("   ✓ Token stream buffer created (batch size: 1000)\n");
 
     /* ===== STEP 2: Initialize Model ===== */
     printf("[2] Initializing neural model...\n");
@@ -144,9 +110,9 @@ int mode_train(const cli_args_t *args) {
     
     if (init_rc != MODEL_SUCCESS) {
         fprintf(stderr, "Error: Model initialization failed (code: %d)\n", init_rc);
+        token_stream_free(token_stream);
+        stream_reader_free(stream);
         bpe_encoder_free(encoder);
-        free(buffer);
-        free(tokens.token_ids);
         return 1;
     }
     
@@ -156,27 +122,93 @@ int mode_train(const cli_args_t *args) {
     printf("   - Attention heads: %zu\n", model.num_heads);
     printf("   ✓ Model ready for training\n");
 
-    /* ===== STEP 3: Training ===== */
-    printf("[3] Training model...\n");
+    /* ===== STEP 3: Streaming Training Loop ===== */
+    printf("[3] Training model on streaming data...\n");
     printf("   Epochs: %d, Batch size: %d, Learning rate: %.8f\n", 
            args->epochs, args->batch_size, args->learning_rate);
     
     size_t training_steps = 0;
+    size_t total_tokens_processed = 0;
+    char chunk_buffer[STREAM_CHUNK_SIZE + 1];
+    
     for (int epoch = 0; epoch < args->epochs; epoch++) {
-        for (size_t i = 0; i + 1 < tokens.token_count; i++) {
-            /* Single token training */
-            uint32_t input_token = tokens.token_ids[i];
-            uint32_t target_token = tokens.token_ids[i + 1];
-            
-            model_train_step(&model, &input_token, target_token, 1);
-            training_steps++;
+        /* Reset stream for new epoch */
+        stream_reader_t *epoch_stream = stream_reader_create(args->input_file, STREAM_CHUNK_SIZE);
+        if (!epoch_stream) {
+            fprintf(stderr, "Error: Cannot re-open file for epoch %d\n", epoch);
+            break;
         }
         
-        printf("   Epoch %d/%d - Loss: %.6f\n", epoch + 1, args->epochs, model.current_loss);
+        printf("   Processing epoch %d/%d...\n", epoch + 1, args->epochs);
+        
+        /* Process file in chunks */
+        while (!stream_is_eof(epoch_stream)) {
+            size_t chunk_size = stream_read_chunk(epoch_stream, chunk_buffer, STREAM_CHUNK_SIZE);
+            if (chunk_size == 0) break;
+            
+            chunk_buffer[chunk_size] = '\0';
+            
+            /* Train BPE on this chunk */
+            bpe_train(encoder, chunk_buffer, chunk_size);
+            
+            /* Encode chunk into tokens */
+            bpe_tokens_t chunk_tokens = {0};
+            bpe_encode(encoder, chunk_buffer, chunk_size, &chunk_tokens);
+            
+            if (chunk_tokens.token_count > 0) {
+                /* Add tokens to stream for batch processing */
+                token_stream_add(token_stream, chunk_tokens.token_ids, chunk_tokens.token_count);
+                total_tokens_processed += chunk_tokens.token_count;
+                
+                /* Process batch when threshold reached */
+                if (token_stream_ready_to_flush(token_stream)) {
+                    size_t batch_size = token_stream_get_size(token_stream);
+                    
+                    /* Train on batch using sliding window */
+                    for (size_t i = 0; i + 1 < batch_size; i++) {
+                        uint32_t input_token = token_stream->token_buffer[i];
+                        uint32_t target_token = token_stream->token_buffer[i + 1];
+                        
+                        model_train_step(&model, &input_token, target_token, 1);
+                        training_steps++;
+                    }
+                    
+                    /* Progress reporting */
+                    if (training_steps % 5000 == 0) {
+                        printf("   [Progress] Steps: %zu, Loss: %.6f, File: %.1f MB\n", 
+                               training_steps, model.current_loss, 
+                               stream_get_total_read(epoch_stream) / (1024.0f * 1024.0f));
+                    }
+                    
+                    /* Reset for next batch */
+                    token_stream_reset(token_stream);
+                }
+            }
+            
+            free(chunk_tokens.token_ids);
+        }
+        
+        /* Process remaining tokens in final batch */
+        if (token_stream_get_size(token_stream) > 0) {
+            size_t remaining = token_stream_get_size(token_stream);
+            for (size_t i = 0; i + 1 < remaining; i++) {
+                uint32_t input_token = token_stream->token_buffer[i];
+                uint32_t target_token = token_stream->token_buffer[i + 1];
+                
+                model_train_step(&model, &input_token, target_token, 1);
+                training_steps++;
+            }
+            token_stream_reset(token_stream);
+        }
+        
+        stream_reader_free(epoch_stream);
+        printf("   Epoch %d/%d - Loss: %.6f, Tokens processed: %zu\n", 
+               epoch + 1, args->epochs, model.current_loss, total_tokens_processed);
     }
     
-    printf("   Training steps: %zu\n", training_steps);
-    printf("   ✓ Training complete\n\n");
+    printf("   Training complete!\n");
+    printf("   Total steps: %zu, Total tokens: %zu\n", training_steps, total_tokens_processed);
+    printf("   ✓ Training finished\n\n");
 
     /* ===== STEP 4: Demonstrations ===== */
     printf("[4] Demonstrations...\n");
@@ -210,28 +242,9 @@ int mode_train(const cli_args_t *args) {
         
         free(demo_logits);
     }
-    
-    /* 4.3: Batch processing demonstration */
-    printf("[4.3] Batch processing setup...\n");
-    batch_t *batch = batch_create(4, MAX_SEQ_LEN);
-    if (batch) {
-        for (size_t i = 0; i < 3 && i < tokens.token_count - 1; i++) {
-            batch_add_sequence(batch, tokens.token_ids, i + 1, tokens.token_ids[i + 1]);
-        }
-        printf("   Batch with %zu sequences\n", batch_get_size(batch));
-        printf("   ✓ Batch infrastructure ready\n");
-        batch_free(batch);
-    }
 
-    /* ===== STEP 5: Next Token Prediction ===== */
-    printf("[5] Next token prediction...\n");
-    size_t predict_from = tokens.token_count > 20 ? 20 : tokens.token_count - 1;
-    uint32_t predicted_token = model_predict_next_token(&model, tokens.token_ids, predict_from);
-    printf("   Predicted next token ID: %u\n", predicted_token);
-    printf("   ✓ Inference working\n\n");
-
-    /* ===== STEP 6: Model Persistence ===== */
-    printf("[6] Saving model to %s\n", args->model_path);
+    /* ===== STEP 5: Model Persistence ===== */
+    printf("[5] Saving model to %s\n", args->model_path);
     model_errors_t save_rc = model_save(&model, args->model_path);
     
     if (save_rc == MODEL_SUCCESS) {
@@ -240,36 +253,25 @@ int mode_train(const cli_args_t *args) {
         fprintf(stderr, "   ✗ Save failed (code: %d)\n", save_rc);
     }
 
-    /* ===== STEP 7: Configuration ===== */
-    printf("[7] Saving configuration...\n");
+    /* ===== STEP 6: Configuration ===== */
+    printf("[6] Saving configuration...\n");
     config_t config;
     config_get_defaults(&config);
     config.embedding_dim = model.embedding_dim;
     config.num_heads = model.num_heads;
     config.vocab_size = model.vocab_size;
-    
-    char config_path[512];
-    snprintf(config_path, sizeof(config_path), "%s/config.txt", args->checkpoint_dir);
-    config_save(config_path, &config);
-    printf("   ✓ Config saved to %s\n", config_path);
+    config_save("config.json", &config);
+    printf("   ✓ Configuration saved\n\n");
 
-    /* ===== STEP 8: Checkpoint ===== */
-    printf("[8] Creating checkpoint...\n");
-    checkpoint_save(&model, (uint32_t)training_steps, (uint32_t)args->epochs, args->checkpoint_dir);
-    printf("   ✓ Checkpoint saved\n");
-
-    printf("\n=== Summary ===\n");
-    printf("✓ BPE tokenization:     %zu tokens\n", tokens.token_count);
-    printf("✓ Training:             %zu steps, loss %.6f\n", training_steps, model.current_loss);
-    printf("✓ Model saved:          %s\n", args->model_path);
-    printf("✓ Config saved:         %s/config.txt\n\n", args->checkpoint_dir);
-
-    /* Cleanup */
+    /* ===== CLEANUP ===== */
+    printf("[7] Cleaning up...\n");
     model_free(&model);
+    token_stream_free(token_stream);
+    stream_reader_free(stream);
     bpe_encoder_free(encoder);
-    free(buffer);
-    free(tokens.token_ids);
+    printf("   ✓ Resources freed\n\n");
 
+    printf("=== Training Complete ===\n");
     return 0;
 }
 

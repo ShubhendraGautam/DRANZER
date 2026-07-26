@@ -1,16 +1,35 @@
 CC = clang
-CFLAGS = -I include/ -I ../libs/include/ -g
+# -ffast-math is portable (no special CPU features required) and helps on
+# weak FPUs. Deliberately NOT using -march=native by default: a binary
+# built with it only runs on the exact CPU that compiled it and raises
+# SIGILL ("illegal instruction") on any other machine - including most
+# low-end/older hardware you'd want to deploy this to.
+CFLAGS = -I include/ -I ../libs/include/ -O3 -ffast-math
 LDFLAGS = -lm
+
+# Tune for the exact CPU you're building on: make NATIVE=1
+# Fastest option, but the resulting binary is NOT portable to other machines.
+ifdef NATIVE
+    CFLAGS += -march=native
+    $(info Native CPU tuning enabled (NATIVE=1) - binary will only run on this build machine's CPU)
+endif
+
+# Optimize for code size instead of speed: make SIZE=1
+# Useful on storage- or icache-constrained low-end/embedded devices.
+ifdef SIZE
+    CFLAGS := $(filter-out -O3,$(CFLAGS)) -Os
+    $(info Size-optimized build enabled (SIZE=1))
+endif
 
 # Enable debug output with: make DEBUG=1
 ifdef DEBUG
-    CFLAGS += -DDEBUG
+    CFLAGS += -g -DDEBUG
     $(info DEBUG mode enabled)
 endif
 
 # Enable AddressSanitizer with: make ASAN=1
 ifdef ASAN
-    CFLAGS += -fsanitize=address -fno-omit-frame-pointer -O1
+    CFLAGS += -fsanitize=address -fno-omit-frame-pointer -O1 -g
     $(info AddressSanitizer enabled)
 endif
 
@@ -18,7 +37,7 @@ endif
 MAIN_SOURCE = main.c
 
 # Source files for src directory
-SRC = $(MAIN_SOURCE) tokenizer.c attention.c model.c config.c sampling.c batch.c checkpoint.c cli.c
+SRC = $(MAIN_SOURCE) tokenizer.c attention.c model.c config.c sampling.c batch.c checkpoint.c cli.c stream.c
 OBJ = $(SRC:.c=.o)
 
 TARGET = app.out
