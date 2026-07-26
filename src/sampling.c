@@ -162,18 +162,28 @@ uint32_t sample_topp(float *logits, size_t vocab_size, float p) {
     return selected;
 }
 
-/* Initialize beam search */
+/* Initialize beam search. On allocation failure, returns a beam_search_t
+ * with num_beams == 0 - callers must check for that before use. */
 beam_search_t beam_search_init(size_t beam_width, uint32_t initial_token) {
     beam_search_t bs = {0};
     bs.beam_width = beam_width;
-    bs.num_beams = 1;
     bs.beams = malloc(beam_width * sizeof(beam_t));
-    
+    if (!bs.beams) {
+        return bs;
+    }
+
     bs.beams[0].tokens = malloc(512); /* Max length */
+    if (!bs.beams[0].tokens) {
+        free(bs.beams);
+        bs.beams = NULL;
+        return bs;
+    }
+
+    bs.num_beams = 1;
     bs.beams[0].tokens[0] = initial_token;
     bs.beams[0].length = 1;
     bs.beams[0].score = 0.0f;
-    
+
     return bs;
 }
 

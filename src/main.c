@@ -22,7 +22,15 @@
 #define VOCAB_SIZE 257
 #define EMBEDDING_DIM 16
 #define NUM_HEADS 2
-#define MAX_SEQ_LEN 16
+#define NUM_LAYERS 2
+#define MAX_SEQ_LEN 32
+/* How many preceding tokens each training step conditions on. Kept below
+ * MAX_SEQ_LEN so infer/generate (which use the same model->max_seq_len
+ * bound) has headroom beyond what training ever exercises. Real
+ * cross-token attention needs seq_len > 1 - with a single token, softmax
+ * over one key is always 1.0 regardless of Q/K, so W_q/W_k would get
+ * almost no useful gradient signal. */
+#define TRAIN_WINDOW 16
 
 /* Forward declarations */
 int mode_train(const cli_args_t *args);
@@ -106,8 +114,8 @@ int mode_train(const cli_args_t *args) {
     /* ===== STEP 2: Initialize Model ===== */
     printf("[2] Initializing neural model...\n");
     neural_model_t model = {0};
-    model_errors_t init_rc = model_new(&model, VOCAB_SIZE, EMBEDDING_DIM, NUM_HEADS, MAX_SEQ_LEN);
-    
+    model_errors_t init_rc = model_new(&model, VOCAB_SIZE, EMBEDDING_DIM, NUM_HEADS, NUM_LAYERS, MAX_SEQ_LEN);
+
     if (init_rc != MODEL_SUCCESS) {
         fprintf(stderr, "Error: Model initialization failed (code: %d)\n", init_rc);
         token_stream_free(token_stream);
@@ -115,11 +123,20 @@ int mode_train(const cli_args_t *args) {
         bpe_encoder_free(encoder);
         return 1;
     }
-    
+
+    /* --input's learning rate was previously parsed and only ever printed,
+     * never applied - now that training actually updates every parameter
+     * (not just output_bias), the learning rate materially affects
+     * stability, so it needs to actually reach the model. */
+    model.learning_rate = args->learning_rate;
+    model.metrics.learning_rate = args->learning_rate;
+    model.metrics.initial_learning_rate = args->learning_rate;
+
     printf("   Model initialized:\n");
     printf("   - Vocabulary: %zu tokens\n", model.vocab_size);
     printf("   - Embedding dim: %zu\n", model.embedding_dim);
     printf("   - Attention heads: %zu\n", model.num_heads);
+    printf("   - Layers: %zu\n", model.num_layers);
     printf("   ✓ Model ready for training\n");
 
     /* ===== STEP 3: Streaming Training Loop ===== */
@@ -163,20 +180,27 @@ int mode_train(const cli_args_t *args) {
                 /* Process batch when threshold reached */
                 if (token_stream_ready_to_flush(token_stream)) {
                     size_t batch_size = token_stream_get_size(token_stream);
-                    
-                    /* Train on batch using sliding window */
+
+                    /* Train on batch using a sliding context window: token
+                     * i+1 is predicted from up to TRAIN_WINDOW preceding
+                     * tokens (fewer near the start of the batch). */
                     for (size_t i = 0; i + 1 < batch_size; i++) {
-                        uint32_t input_token = token_stream->token_buffer[i];
+                        size_t window_len = (i + 1 < TRAIN_WINDOW) ? (i + 1) : TRAIN_WINDOW;
+                        uint32_t *window = &token_stream->token_buffer[i + 1 - window_len];
                         uint32_t target_token = token_stream->token_buffer[i + 1];
-                        
-                        model_train_step(&model, &input_token, target_token, 1);
+
+                        model_train_step(&model, window, target_token, window_len);
                         training_steps++;
                     }
                     
-                    /* Progress reporting */
+                    /* Progress reporting. Uses the running average loss
+                     * (model.metrics.avg_loss), not the last single step's
+                     * loss - now that every parameter trains (not just
+                     * output_bias), a single step's loss is noisy enough
+                     * to be a misleading progress signal on its own. */
                     if (training_steps % 5000 == 0) {
-                        printf("   [Progress] Steps: %zu, Loss: %.6f, File: %.1f MB\n", 
-                               training_steps, model.current_loss, 
+                        printf("   [Progress] Steps: %zu, Avg Loss: %.6f, File: %.1f MB\n",
+                               training_steps, model.metrics.avg_loss,
                                stream_get_total_read(epoch_stream) / (1024.0f * 1024.0f));
                     }
                     
@@ -192,18 +216,19 @@ int mode_train(const cli_args_t *args) {
         if (token_stream_get_size(token_stream) > 0) {
             size_t remaining = token_stream_get_size(token_stream);
             for (size_t i = 0; i + 1 < remaining; i++) {
-                uint32_t input_token = token_stream->token_buffer[i];
+                size_t window_len = (i + 1 < TRAIN_WINDOW) ? (i + 1) : TRAIN_WINDOW;
+                uint32_t *window = &token_stream->token_buffer[i + 1 - window_len];
                 uint32_t target_token = token_stream->token_buffer[i + 1];
-                
-                model_train_step(&model, &input_token, target_token, 1);
+
+                model_train_step(&model, window, target_token, window_len);
                 training_steps++;
             }
             token_stream_reset(token_stream);
         }
         
         stream_reader_free(epoch_stream);
-        printf("   Epoch %d/%d - Loss: %.6f, Tokens processed: %zu\n", 
-               epoch + 1, args->epochs, model.current_loss, total_tokens_processed);
+        printf("   Epoch %d/%d - Avg Loss: %.6f, Tokens processed: %zu\n",
+               epoch + 1, args->epochs, model.metrics.avg_loss, total_tokens_processed);
     }
     
     printf("   Training complete!\n");
