@@ -1,10 +1,18 @@
 # Build artifacts
 src/*.o
+src/bench.out
+src/gpu_probe.out
 src/app.out
 libs/src/*.o
 libs/libattention.a
 build/
-tests/
+
+# Top-level corpus data only - NOT src/tests/ (test source code, tracked).
+# Anchored with a leading slash so it doesn't also match src/tests/.
+/tests/
+
+# Probed-machine capability cache - hardware-specific, regenerated per run.
+src/gpu_capability_cache/
 
 # Generated files
 *.pth

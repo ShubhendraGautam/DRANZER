@@ -16,6 +16,7 @@ void config_get_defaults(config_t *out_config) {
     out_config->vocab_size = 1000;
     out_config->embedding_dim = 64;
     out_config->num_heads = 4;
+    out_config->num_layers = 2;
     out_config->max_seq_len = 512;
     out_config->learning_rate = 0.001f;
     
@@ -47,6 +48,8 @@ int config_load(const char *filename, config_t *out_config) {
         if (sscanf(line, "vocab_size = %zu", &out_config->vocab_size)) continue;
         if (sscanf(line, "embedding_dim = %zu", &out_config->embedding_dim)) continue;
         if (sscanf(line, "num_heads = %zu", &out_config->num_heads)) continue;
+        if (sscanf(line, "num_layers = %zu", &out_config->num_layers)) continue;
+        if (sscanf(line, "max_seq_len = %zu", &out_config->max_seq_len)) continue;
         if (sscanf(line, "learning_rate = %f", &out_config->learning_rate)) continue;
         if (sscanf(line, "batch_size = %zu", &out_config->batch_size)) continue;
         if (sscanf(line, "checkpoint_interval = %zu", &out_config->checkpoint_interval)) continue;
@@ -75,6 +78,7 @@ int config_save(const char *filename, const config_t *config) {
     fprintf(f, "vocab_size = %zu\n", config->vocab_size);
     fprintf(f, "embedding_dim = %zu\n", config->embedding_dim);
     fprintf(f, "num_heads = %zu\n", config->num_heads);
+    fprintf(f, "num_layers = %zu\n", config->num_layers);
     fprintf(f, "max_seq_len = %zu\n\n", config->max_seq_len);
     
     fprintf(f, "# Training Settings\n");
@@ -102,6 +106,7 @@ void config_print(const config_t *config) {
     printf("  Vocabulary size: %zu\n", config->vocab_size);
     printf("  Embedding dimension: %zu\n", config->embedding_dim);
     printf("  Attention heads: %zu\n", config->num_heads);
+    printf("  Layers: %zu\n", config->num_layers);
     printf("  Max sequence length: %zu\n", config->max_seq_len);
     printf("\nTraining Settings:\n");
     printf("  Learning rate: %.8f\n", config->learning_rate);

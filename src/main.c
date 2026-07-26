@@ -19,18 +19,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VOCAB_SIZE 257
-#define EMBEDDING_DIM 16
-#define NUM_HEADS 2
-#define NUM_LAYERS 2
-#define MAX_SEQ_LEN 32
-/* How many preceding tokens each training step conditions on. Kept below
- * MAX_SEQ_LEN so infer/generate (which use the same model->max_seq_len
- * bound) has headroom beyond what training ever exercises. Real
- * cross-token attention needs seq_len > 1 - with a single token, softmax
- * over one key is always 1.0 regardless of Q/K, so W_q/W_k would get
- * almost no useful gradient signal. */
-#define TRAIN_WINDOW 16
+/* Model architecture hyperparameters (vocab size, embedding dim, heads,
+ * layers, max sequence length, training context window) are CLI flags now
+ * (see cli.h/cli.c) rather than hardcoded here - --train-window is kept
+ * below --max-seq-len (clamped in mode_train) so infer/generate, which use
+ * the same model->max_seq_len bound, has headroom beyond what training
+ * ever exercises. Real cross-token attention needs seq_len > 1 - with a
+ * single token, softmax over one key is always 1.0 regardless of Q/K, so
+ * W_q/W_k would get almost no useful gradient signal. */
 
 /* Forward declarations */
 int mode_train(const cli_args_t *args);
@@ -84,7 +80,7 @@ int mode_train(const cli_args_t *args) {
     /* ===== STEP 1: BPE Tokenization with Streaming ===== */
     printf("[1] Setting up streaming tokenization...\n");
     
-    bpe_encoder_t *encoder = tokenizer_create_encoder(VOCAB_SIZE);
+    bpe_encoder_t *encoder = tokenizer_create_encoder(args->vocab_size);
     if (encoder == NULL) {
         fprintf(stderr, "Error: Failed to create encoder\n");
         return 1;
@@ -114,7 +110,8 @@ int mode_train(const cli_args_t *args) {
     /* ===== STEP 2: Initialize Model ===== */
     printf("[2] Initializing neural model...\n");
     neural_model_t model = {0};
-    model_errors_t init_rc = model_new(&model, VOCAB_SIZE, EMBEDDING_DIM, NUM_HEADS, NUM_LAYERS, MAX_SEQ_LEN);
+    model_errors_t init_rc = model_new(&model, args->vocab_size, args->embedding_dim,
+                                        args->num_heads, args->num_layers, args->max_seq_len);
 
     if (init_rc != MODEL_SUCCESS) {
         fprintf(stderr, "Error: Model initialization failed (code: %d)\n", init_rc);
@@ -122,6 +119,15 @@ int mode_train(const cli_args_t *args) {
         stream_reader_free(stream);
         bpe_encoder_free(encoder);
         return 1;
+    }
+
+    /* Training's sliding context window can't exceed what the model's
+     * workspace/caches were sized for. */
+    size_t train_window = args->train_window;
+    if (train_window > args->max_seq_len) {
+        fprintf(stderr, "Warning: --train-window %zu > --max-seq-len %zu, clamping to %zu\n",
+                train_window, args->max_seq_len, args->max_seq_len);
+        train_window = args->max_seq_len;
     }
 
     /* --input's learning rate was previously parsed and only ever printed,
@@ -132,11 +138,25 @@ int mode_train(const cli_args_t *args) {
     model.metrics.learning_rate = args->learning_rate;
     model.metrics.initial_learning_rate = args->learning_rate;
 
+    /* Optimizer/regularization: model_new already defaults to AdamW with
+     * grad-norm clipping at 1.0 and no dropout/schedule, matching this
+     * function's CLI defaults - these overrides only matter when the
+     * caller passes non-default flags. */
+    model.optimizer_type = (strcmp(args->optimizer, "sgd") == 0) ? OPTIMIZER_SGD : OPTIMIZER_ADAM;
+    model.dropout_rate = args->dropout_rate;
+    model.grad_clip_norm = args->grad_clip_norm;
+    model.weight_decay = args->weight_decay;
+    model.warmup_steps = args->warmup_steps;
+    model.total_steps = args->total_steps;
+    model.base_lr = args->learning_rate;
+
     printf("   Model initialized:\n");
     printf("   - Vocabulary: %zu tokens\n", model.vocab_size);
     printf("   - Embedding dim: %zu\n", model.embedding_dim);
     printf("   - Attention heads: %zu\n", model.num_heads);
     printf("   - Layers: %zu\n", model.num_layers);
+    printf("   - Optimizer: %s (grad-clip=%.2f, weight-decay=%.4f, dropout=%.2f)\n",
+           args->optimizer, model.grad_clip_norm, model.weight_decay, model.dropout_rate);
     printf("   ✓ Model ready for training\n");
 
     /* ===== STEP 3: Streaming Training Loop ===== */
@@ -182,10 +202,10 @@ int mode_train(const cli_args_t *args) {
                     size_t batch_size = token_stream_get_size(token_stream);
 
                     /* Train on batch using a sliding context window: token
-                     * i+1 is predicted from up to TRAIN_WINDOW preceding
+                     * i+1 is predicted from up to train_window preceding
                      * tokens (fewer near the start of the batch). */
                     for (size_t i = 0; i + 1 < batch_size; i++) {
-                        size_t window_len = (i + 1 < TRAIN_WINDOW) ? (i + 1) : TRAIN_WINDOW;
+                        size_t window_len = (i + 1 < train_window) ? (i + 1) : train_window;
                         uint32_t *window = &token_stream->token_buffer[i + 1 - window_len];
                         uint32_t target_token = token_stream->token_buffer[i + 1];
 
@@ -216,7 +236,7 @@ int mode_train(const cli_args_t *args) {
         if (token_stream_get_size(token_stream) > 0) {
             size_t remaining = token_stream_get_size(token_stream);
             for (size_t i = 0; i + 1 < remaining; i++) {
-                size_t window_len = (i + 1 < TRAIN_WINDOW) ? (i + 1) : TRAIN_WINDOW;
+                size_t window_len = (i + 1 < train_window) ? (i + 1) : train_window;
                 uint32_t *window = &token_stream->token_buffer[i + 1 - window_len];
                 uint32_t target_token = token_stream->token_buffer[i + 1];
 
@@ -284,7 +304,10 @@ int mode_train(const cli_args_t *args) {
     config_get_defaults(&config);
     config.embedding_dim = model.embedding_dim;
     config.num_heads = model.num_heads;
+    config.num_layers = model.num_layers;
     config.vocab_size = model.vocab_size;
+    config.max_seq_len = model.max_seq_len;
+    config.learning_rate = args->learning_rate;
     config_save("config.json", &config);
     printf("   ✓ Configuration saved\n\n");
 
@@ -405,7 +428,7 @@ int mode_generate(const cli_args_t *args) {
     size_t current_len = tokens.token_count;
     
     /* Generate new tokens */
-    for (int i = 0; i < args->generate_length && current_len < MAX_SEQ_LEN; i++) {
+    for (int i = 0; i < args->generate_length && current_len < model.max_seq_len; i++) {
         /* Simple greedy generation for demo */
         uint32_t next_token = model_predict_next_token(&model, generated, current_len);
         generated[current_len++] = next_token;

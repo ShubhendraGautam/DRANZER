@@ -18,12 +18,31 @@ void cli_get_defaults(cli_args_t *out_args) {
     strcpy(out_args->input_file, "../tests/chunk_aa");
     strcpy(out_args->model_path, "dranzer.pth");
     strcpy(out_args->checkpoint_dir, "checkpoints");
-    
+
+    /* Model architecture defaults - match the values this project used as
+     * hardcoded main.c #defines before these became CLI flags. */
+    out_args->vocab_size = 257;
+    out_args->embedding_dim = 16;
+    out_args->num_heads = 2;
+    out_args->num_layers = 2;
+    out_args->max_seq_len = 32;
+    out_args->train_window = 16;
+
     /* Training defaults */
     out_args->epochs = 1;
     out_args->batch_size = 1;
     out_args->learning_rate = 0.001f;
     out_args->checkpoint_interval = 10;
+
+    /* Optimizer / regularization defaults - match model_new's own
+     * defaults so a caller that skips these flags gets the same behavior
+     * as a caller that constructs a neural_model_t directly. */
+    strcpy(out_args->optimizer, "adam");
+    out_args->dropout_rate = 0.0f;
+    out_args->grad_clip_norm = 1.0f;
+    out_args->weight_decay = 0.01f;
+    out_args->warmup_steps = 0;
+    out_args->total_steps = 0;
     
     /* Inference defaults */
     out_args->generate_length = 50;
@@ -61,6 +80,22 @@ void cli_print_help(const char *program_name) {
     printf("  --model FILE              Model path (default: dranzer.pth)\n");
     printf("  --checkpoint-dir DIR      Checkpoint directory (default: checkpoints)\n");
     printf("  --checkpoint-interval N   Save checkpoint every N steps (default: 10)\n\n");
+
+    printf("MODEL ARCHITECTURE OPTIONS:\n");
+    printf("  --vocab-size N            Vocabulary size (default: 257)\n");
+    printf("  --embedding-dim N         Embedding dimension; must divide evenly by --num-heads (default: 16)\n");
+    printf("  --num-heads N             Attention heads (default: 2)\n");
+    printf("  --num-layers N            Stacked transformer layers (default: 2)\n");
+    printf("  --max-seq-len N           Max sequence length the model's workspace is sized for (default: 32)\n");
+    printf("  --train-window N          Sliding context window used during training; clamped to --max-seq-len (default: 16)\n\n");
+
+    printf("OPTIMIZER / REGULARIZATION OPTIONS:\n");
+    printf("  --optimizer NAME          Optimizer: adam, sgd (default: adam)\n");
+    printf("  --dropout RATE            Dropout rate 0.0-1.0 (default: 0.0, disabled)\n");
+    printf("  --grad-clip NORM          Global gradient-norm clip; 0 disables (default: 1.0)\n");
+    printf("  --weight-decay W          AdamW decoupled weight decay (default: 0.01)\n");
+    printf("  --warmup-steps N          Linear LR warmup length (default: 0)\n");
+    printf("  --total-steps N           LR schedule horizon; 0 disables warmup+cosine schedule (default: 0)\n\n");
     
     printf("INFERENCE/GENERATION OPTIONS:\n");
     printf("  --prompt TEXT             Input prompt for inference\n");
@@ -153,6 +188,42 @@ int cli_parse(int argc, char *argv[], cli_args_t *out_args) {
         else if (strcmp(arg, "--checkpoint-interval") == 0 && i + 1 < argc) {
             out_args->checkpoint_interval = atoi(argv[++i]);
         }
+        else if (strcmp(arg, "--vocab-size") == 0 && i + 1 < argc) {
+            out_args->vocab_size = (size_t)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--embedding-dim") == 0 && i + 1 < argc) {
+            out_args->embedding_dim = (size_t)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--num-heads") == 0 && i + 1 < argc) {
+            out_args->num_heads = (size_t)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--num-layers") == 0 && i + 1 < argc) {
+            out_args->num_layers = (size_t)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--max-seq-len") == 0 && i + 1 < argc) {
+            out_args->max_seq_len = (size_t)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--train-window") == 0 && i + 1 < argc) {
+            out_args->train_window = (size_t)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--optimizer") == 0 && i + 1 < argc) {
+            strncpy(out_args->optimizer, argv[++i], sizeof(out_args->optimizer) - 1);
+        }
+        else if (strcmp(arg, "--dropout") == 0 && i + 1 < argc) {
+            out_args->dropout_rate = atof(argv[++i]);
+        }
+        else if (strcmp(arg, "--grad-clip") == 0 && i + 1 < argc) {
+            out_args->grad_clip_norm = atof(argv[++i]);
+        }
+        else if (strcmp(arg, "--weight-decay") == 0 && i + 1 < argc) {
+            out_args->weight_decay = atof(argv[++i]);
+        }
+        else if (strcmp(arg, "--warmup-steps") == 0 && i + 1 < argc) {
+            out_args->warmup_steps = (unsigned int)atoi(argv[++i]);
+        }
+        else if (strcmp(arg, "--total-steps") == 0 && i + 1 < argc) {
+            out_args->total_steps = (unsigned int)atoi(argv[++i]);
+        }
         else if (strcmp(arg, "--prompt") == 0 && i + 1 < argc) {
             strncpy(out_args->prompt, argv[++i], sizeof(out_args->prompt) - 1);
         }
@@ -195,10 +266,22 @@ void cli_print_args(const cli_args_t *args) {
             printf("  Input: %s\n", args->input_file);
             printf("  Model: %s\n", args->model_path);
             printf("  Checkpoints: %s\n", args->checkpoint_dir);
+            printf("  Architecture: vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu train_window=%zu\n",
+                   args->vocab_size, args->embedding_dim, args->num_heads, args->num_layers,
+                   args->max_seq_len, args->train_window);
             printf("  Epochs: %d\n", args->epochs);
             printf("  Batch size: %d\n", args->batch_size);
             printf("  Learning rate: %.8f\n", args->learning_rate);
             printf("  Checkpoint interval: %d steps\n", args->checkpoint_interval);
+            printf("  Optimizer: %s (grad-clip=%.2f, weight-decay=%.4f)\n",
+                   args->optimizer, args->grad_clip_norm, args->weight_decay);
+            printf("  Dropout: %.2f\n", args->dropout_rate);
+            if (args->total_steps > 0) {
+                printf("  LR schedule: warmup=%u steps, cosine decay to 0 over %u total steps\n",
+                       args->warmup_steps, args->total_steps);
+            } else {
+                printf("  LR schedule: plateau decay (no warmup/cosine horizon configured)\n");
+            }
             break;
             
         case MODE_INFER:

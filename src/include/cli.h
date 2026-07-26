@@ -24,11 +24,29 @@ typedef struct {
     char model_path[512];
     char checkpoint_dir[512];
     
+    /* Model architecture hyperparameters. Defaults match this project's
+     * original hardcoded main.c values, so omitting these flags entirely
+     * reproduces the previous behavior exactly. */
+    size_t vocab_size;
+    size_t embedding_dim;
+    size_t num_heads;
+    size_t num_layers;
+    size_t max_seq_len;
+    size_t train_window;   // sliding-window context length used during training; clamped to max_seq_len
+
     /* Training hyperparameters */
     int epochs;
     int batch_size;
     float learning_rate;
     int checkpoint_interval;
+
+    /* Optimizer / regularization (research-grade training controls) */
+    char optimizer[16];        // "adam" (default) or "sgd"
+    float dropout_rate;        // 0 disables dropout (default)
+    float grad_clip_norm;      // global grad-norm clip; 0 disables it
+    float weight_decay;        // decoupled weight decay (AdamW); 0 disables it
+    unsigned int warmup_steps; // linear LR warmup length; 0 + total_steps==0 disables the schedule
+    unsigned int total_steps;  // LR schedule horizon (warmup+cosine decay); 0 disables the schedule
     
     /* Inference parameters */
     char prompt[1024];

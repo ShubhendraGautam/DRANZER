@@ -5,7 +5,8 @@
 vocab_size = 257
 embedding_dim = 16
 num_heads = 2
-max_seq_len = 512
+num_layers = 2
+max_seq_len = 32
 
 # Training Settings
 learning_rate = 0.00100000

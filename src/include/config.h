@@ -14,6 +14,7 @@ typedef struct {
     size_t vocab_size;
     size_t embedding_dim;
     size_t num_heads;
+    size_t num_layers;
     size_t max_seq_len;
     float learning_rate;
     
