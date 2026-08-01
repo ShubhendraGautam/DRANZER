@@ -94,6 +94,9 @@ size_t token_stream_get_size(const token_stream_t *stream);
  */
 void token_stream_reset(token_stream_t *stream);
 
+/** Keep only the newest count tokens, preserving their order. */
+void token_stream_retain_tail(token_stream_t *stream, size_t count);
+
 /**
  * Free token stream
  */

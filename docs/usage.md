@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-This guide covers building DRANZER and using its `train`, `infer`, and `generate` modes.
+This guide covers building DRANZER and using its `train`, `eval`, `infer`, and `generate` modes.
 
 ## Requirements
 
@@ -56,6 +56,7 @@ A more explicit configuration:
 ```bash
 ./app.out train \
   --input ../test.txt \
+  --validation ../validation.txt \
   --model dranzer.pth \
   --epochs 10 \
   --learning-rate 0.0005 \
@@ -66,28 +67,90 @@ A more explicit configuration:
   --total-steps 5000
 ```
 
-Training saves the final model to the path selected by `--model`, the learned BPE vocabulary to
-`<model>.tokenizer`, and `config.json` in the current working directory. Use `--tokenizer FILE` to
-choose a different sidecar path. The checkpoint utility module exists, but periodic checkpoint
-saving and resume are not currently wired into the training CLI.
+Before initializing the model, training makes one streaming corpus pass to train and freeze the BPE
+vocabulary. Every epoch then uses the same token IDs and merge order. Training atomically saves a
+self-contained, versioned model bundle at `--model`. It includes canonical float32 weights,
+architecture, the frozen tokenizer, training metadata, and corpus provenance. `config.json` records
+the resolved settings and held-out metrics.
+
+Use `--tokenizer FILE` to choose a different sidecar. If that explicit file already exists, training
+loads and freezes it instead of learning a new vocabulary, and rejects a `--vocab-size` mismatch. If
+it does not exist, training creates it during the tokenizer pass. The sidecar is retained for
+tokenizer reuse and older tooling; evaluation and generation of the final bundle do not require it.
+See [Model bundle format](model-bundle.md) for the binary contract and compatibility policy.
+
+Fresh tokenizers preserve byte IDs 0–255 and reserve PAD=256, UNK=257, BOS=258, and EOS=259;
+learned merges begin at 260. Each input file is trained as `BOS, corpus tokens, EOS`, including
+across streaming chunk boundaries. See [Special-token contract](special-tokens.md) for exact train,
+evaluation, prompt, decoding, and legacy semantics.
+
+### Checkpoint and resume
+
+Training saves an atomic, self-contained checkpoint every `--checkpoint-interval` optimizer steps
+and once at normal completion. Resume a specific file or the newest retained checkpoint:
+
+```bash
+./app.out train --resume checkpoints/checkpoint_epoch_0_step_100.ckpt
+./app.out train --resume latest --checkpoint-dir checkpoints
+```
+
+The checkpoint embeds parameters, gradients, Adam moments, learning-rate scheduler and metric
+state, the model-owned dropout RNG, the frozen tokenizer, architecture and training controls, input
+provenance, and the exact epoch/update cursor. The original model and tokenizer sidecar are not
+needed to resume. `--epochs N` is the total target, so it can extend a run; it is not a number of
+additional epochs.
+
+Resume restores the recorded input unless `--input` is supplied. An explicit replacement must have
+the same byte count and FNV-1a fingerprint or training stops. `--checkpoint-dir` may redirect new
+checkpoints. All other trajectory-affecting controls come from the checkpoint.
+
+Exactness means bit-for-bit final training state when the same executable and execution backend are
+used. Resume replays the deterministic frozen-token stream up to its update cursor without running
+the model or consuming dropout RNG. Different compiler flags, CPU/GPU paths, libraries, or hardware
+may have different floating-point behavior and are outside that guarantee.
+
+Trajectory-changing overrides such as batch size, optimizer, dropout, seed, architecture, or
+shuffling are rejected during exact resume. `--epochs` may extend the target, and output model,
+tokenizer, checkpoint directory, checkpoint interval, and retention settings may be redirected.
+
+### Minibatches, accumulation, and shuffling
+
+`--batch-size N` now means N next-token examples per minibatch. DRANZER runs their forward/backward
+passes serially through its bounded model workspace, sums their gradients, divides by the actual
+sample count, and performs one optimizer update. A short final minibatch is averaged over its real
+size.
+
+`--gradient-accumulation N` combines N minibatches before that update, so the usual effective batch
+size is `batch-size × gradient-accumulation`. Partial final accumulation groups are also applied
+using their actual sample count. Learning-rate schedules, checkpoint intervals, `training_steps`,
+and loss-history entries count optimizer updates—not individual examples.
+
+`--shuffle` applies a deterministic Fisher–Yates permutation within each bounded minibatch. Its seed
+is derived from `--seed`, epoch, and minibatch index without consuming model/dropout RNG. This is an
+honest bounded streaming shuffle, not a global whole-corpus permutation.
 
 ### Training and model options
 
 | Option | Default | Meaning |
 |---|---:|---|
-| `--input FILE` | `../tests/chunk_aa` | Training corpus; passing it explicitly is recommended |
+| `--input FILE` | `../test.txt` | Training corpus; passing it explicitly is recommended |
+| `--validation FILE` | none | Explicit held-out corpus evaluated after every epoch |
 | `--model FILE` | `dranzer.pth` | Model output/input path |
-| `--tokenizer FILE` | `<model>.tokenizer` | Learned BPE vocabulary path |
+| `--tokenizer FILE` | `<model>.tokenizer` | Frozen BPE path; an existing explicit file is reused |
 | `--epochs N` | `1` | Number of passes over the input |
-| `--batch-size N` | `1` | Token stream batch setting |
+| `--batch-size N` | `1` | Examples averaged in each true minibatch |
+| `--gradient-accumulation N` | `1` | Minibatches combined per optimizer update |
+| `--shuffle` | off | Deterministically shuffle examples within each minibatch |
 | `--learning-rate LR` | `0.001` | Initial learning rate |
-| `--checkpoint-dir DIR` | `checkpoints` | Reserved checkpoint directory |
-| `--checkpoint-interval N` | `10` | Reserved checkpoint interval |
-| `--vocab-size N` | `257` | Token vocabulary size |
+| `--checkpoint-dir DIR` | `checkpoints` | Checkpoint output directory |
+| `--checkpoint-interval N` | `10` | Save every N optimizer steps; `0` disables checkpoints |
+| `--keep-checkpoints N` | `3` | Retain the newest N files; `0` keeps all |
+| `--resume FILE` | none | Resume a checkpoint exactly; `latest` selects the newest in the directory |
+| `--vocab-size N` | `260` | Total vocabulary including four controls; learned merges start at 260 |
 | `--embedding-dim N` | `16` | Hidden width; must divide evenly by the head count |
 | `--num-heads N` | `2` | Attention heads per layer |
 | `--num-layers N` | `2` | Transformer block count |
-| `--max-seq-len N` | `32` | Allocated context capacity |
+| `--max-seq-len N` | `32` | Retained training and ring-KV attention window |
 | `--train-window N` | `16` | Sliding training context, clamped to max sequence length |
 | `--optimizer NAME` | `adam` | `adam` or `sgd` |
 | `--dropout RATE` | `0.0` | Sublayer-output dropout rate |
@@ -95,6 +158,30 @@ saving and resume are not currently wired into the training CLI.
 | `--weight-decay W` | `0.01` | Decoupled AdamW weight decay |
 | `--warmup-steps N` | `0` | Linear learning-rate warmup length |
 | `--total-steps N` | `0` | Warmup/cosine horizon; `0` uses plateau decay |
+
+## Evaluation
+
+Evaluate a saved model on an explicit held-out corpus:
+
+```bash
+./app.out eval \
+  --model dranzer.pth \
+  --input ../validation.txt \
+  --eval-window 16
+```
+
+`eval` reports the corpus byte fingerprint, token and next-token prediction counts, average
+cross-entropy, perplexity, elapsed time, and throughput. `--input` is required; DRANZER never hides
+an automatic validation split. An evaluation window of `0` (the default) uses the model's maximum
+sequence length.
+
+Evaluation disables dropout and does not update parameters, gradients, Adam moments, learning-rate
+state, loss history, or training counters. Supplying `--validation FILE` to `train` runs the same
+evaluator after every epoch with the training context window. The final validation metrics and
+held-out corpus fingerprint are saved in `config.json`.
+
+For current tokenizers the reported token count includes one BOS and one EOS, and the prediction
+count includes the corpus's final EOS target. Legacy tokenizers retain their historical counts.
 
 ## Inference
 
@@ -104,9 +191,10 @@ Inference loads a trained model and predicts its next token:
 ./app.out infer --model dranzer.pth --prompt "Once upon a time"
 ```
 
-`--prompt` is required. Inference loads the tokenizer sidecar associated with the model and applies
-the selected decoding strategy to the next-token logits. Add `--gpu` to request GPU matmul; the
-runtime falls back to CPU when a usable CUDA device is not present.
+`--prompt` is required. Inference prepends BOS and uses the tokenizer embedded in a current model bundle, then applies
+the selected decoding strategy to the next-token logits. Legacy weight files still use their
+associated sidecar or byte-vocabulary fallback. Add `--gpu` to request GPU matmul; the runtime falls
+back to CPU when a usable CUDA device is not present.
 
 ## Generation
 
@@ -118,12 +206,21 @@ runtime falls back to CPU when a usable CUDA device is not present.
   --sampling topp \
   --top-p 0.9 \
   --temperature 0.8 \
+  --repetition-penalty 1.15 \
+  --min-length 5 \
+  --stop "END" \
   --seed 42
 ```
 
-Generation stops when it reaches either `--length` new tokens or the model's `--max-seq-len`
-capacity. Prompt tokens are processed once to populate a per-layer KV cache; each subsequent step
-computes only the new query, key, value, and hidden state.
+Generation stops when it reaches `--length` new tokens, and current models stop earlier when they
+sample EOS or a repeated `--stop TEXT` value. `--max-seq-len` is a sliding attention window: once
+full, the oldest key/value row is evicted while generation continues with absolute sinusoidal
+positions.
+Stop markers are withheld. PAD, UNK, BOS, and unassigned vocabulary slots cannot be sampled as
+output, and all control tokens are omitted while decoding. Prompt tokens are processed once to
+populate a per-layer KV cache; each subsequent step computes only the new query, key, value, and
+hidden state. Output is decoded and flushed incrementally. Positions beyond the training window are
+an explicit extrapolation, so longer output is supported mechanically but is not a quality promise.
 
 Available decoding strategies:
 
@@ -141,7 +238,13 @@ makes top-k and top-p runs reproducible and defaults to `1`.
 |---|---:|---|
 | `--length N` | `50` | Maximum number of new tokens |
 | `--temperature T` | `0.8` | Non-greedy logit scaling, from `0.0` to `2.0` |
+| `--repetition-penalty P` | `1.0` | Sign-aware penalty for tokens already seen; must be at least `1.0` |
+| `--min-length N` | `0` | Content tokens required before EOS or a stop marker may terminate |
+| `--stop TEXT` | none | Tokenized stop marker; may be repeated eight times and is not printed |
 | `--seed N` | `1` | Reproducible random seed for sampling |
+
+See [Generation runtime](generation.md) for callback semantics, stop-prefix buffering, operation
+order, and the token-based matching contract.
 
 ## General options
 
@@ -155,13 +258,18 @@ makes top-k and top-p runs reproducible and defaults to `1`.
 
 | File | Purpose |
 |---|---|
-| `dranzer.pth` | Serialized model weights and training state |
-| `dranzer.pth.tokenizer` | Learned BPE tokens and merge order |
+| `dranzer.pth` | Versioned model, frozen tokenizer, architecture, and provenance bundle |
+| `dranzer.pth.tokenizer` | Compatibility/reuse sidecar; not required to load a current bundle |
 | `config.json` | Saved architecture and training configuration |
+| `checkpoints/*.ckpt` | Atomic, complete training snapshots used by `--resume` |
+| `checkpoints/run_*.manifest` | Unique read-only resolved run settings and explicit overrides |
 | `bench_results.csv` | Machine-local benchmark history, created by `bench.out` |
 | `gpu_capability_cache/` | Hardware probe cache, created when a GPU can be identified |
 
 Paths are relative to the directory from which the executable is run.
+Every training invocation creates a new manifest with exclusive-create semantics; an existing
+manifest is never overwritten. Unknown options, missing values, malformed or overflowing numbers,
+invalid enums, and out-of-range values are rejected before a run begins.
 
 ## Troubleshooting
 

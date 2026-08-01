@@ -9,8 +9,12 @@
 #include <stddef.h>
 #include "cli/sampling.h"
 
+#define CLI_MAX_STOP_SEQUENCES 8
+#define CLI_MAX_STOP_SEQUENCE_LENGTH 256
+
 typedef enum {
     MODE_TRAIN,
+    MODE_EVAL,
     MODE_INFER,
     MODE_GENERATE,
 } cli_mode_t;
@@ -20,10 +24,12 @@ typedef struct {
     cli_mode_t mode;
     
     /* Input/Output */
-    char input_file[512];
-    char model_path[512];
-    char tokenizer_path[512]; /* empty = derive <model_path>.tokenizer */
-    char checkpoint_dir[512];
+    char input_file[1024];
+    char validation_file[1024]; /* optional explicit held-out corpus */
+    char model_path[1024];
+    char tokenizer_path[1024]; /* empty = derive <model_path>.tokenizer */
+    char checkpoint_dir[1024];
+    char resume_path[1024];   /* empty = fresh run; "latest" resolves in checkpoint_dir */
     
     /* Model architecture hyperparameters. Defaults match this project's
      * original hardcoded main.c values, so omitting these flags entirely
@@ -34,12 +40,16 @@ typedef struct {
     size_t num_layers;
     size_t max_seq_len;
     size_t train_window;   // sliding-window context length used during training; clamped to max_seq_len
+    size_t eval_window;    // 0 = loaded model's max_seq_len
 
     /* Training hyperparameters */
     int epochs;
     int batch_size;
     float learning_rate;
     int checkpoint_interval;
+    int keep_checkpoints;
+    int gradient_accumulation_steps;
+    int shuffle;
 
     /* Optimizer / regularization (research-grade training controls) */
     char optimizer[16];        // "adam" (default) or "sgd"
@@ -56,12 +66,23 @@ typedef struct {
     int top_k;
     float top_p;
     float temperature;
+    float repetition_penalty;
+    int minimum_generation_length;
+    char stop_sequences[CLI_MAX_STOP_SEQUENCES][CLI_MAX_STOP_SEQUENCE_LENGTH];
+    size_t stop_sequence_count;
     unsigned int seed;
     
     /* Flags */
     int use_gpu;
+    int input_explicit;
+    int epochs_explicit;
+    int checkpoint_dir_explicit;
     int debug;
     int help;
+
+    /* Comma-separated option names explicitly supplied by the caller.
+     * The immutable run manifest pairs this with all resolved values. */
+    char explicit_options[2048];
     
 } cli_args_t;
 
@@ -88,5 +109,8 @@ void cli_print_args(const cli_args_t *args);
  * Get default CLI arguments
  */
 void cli_get_defaults(cli_args_t *out_args);
+
+/* True when option was supplied explicitly (exact comma-delimited match). */
+int cli_option_was_explicit(const cli_args_t *args, const char *option);
 
 #endif // CLI_H

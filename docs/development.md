@@ -14,9 +14,10 @@ make -C src clean all test CC=clang
 make -C src clean all test CC=gcc
 ```
 
-`make test` discovers every `src/tests/core/test_*.c`, `src/tests/gpu/test_*.c`, and future
-`src/tests/tpu/test_*.c` file. Each source becomes an independent executable. The target runs all
-tests and returns a nonzero status if any build or test fails.
+`make test` discovers every `src/tests/core/test_*.c`, `src/tests/cli/test_*.c`,
+`src/tests/gpu/test_*.c`, and future `src/tests/tpu/test_*.c` file. Each source becomes an
+independent executable. The target runs all tests and returns a nonzero status if any build or test
+fails.
 
 ## Test suite
 
@@ -27,9 +28,21 @@ tests and returns a nonzero status if any build or test fails.
 | `test_dropout_statistics.c` | Drop rate, mean preservation, and inference behavior |
 | `test_adam_convergence.c` | AdamW convergence and lazy moment allocation |
 | `test_lr_schedule.c` | Warmup, cosine decay, and minimum learning rate |
+| `test_minibatch_accumulation.c` | Averaged sample gradients and one true minibatch optimizer update |
 | `test_serialization_roundtrip.c` | Identical logits before and after save/load |
-| `test_kv_cache.c` | Incremental logits versus full-prefix logits at every position |
+| `test_model_bundle.c` | Canonical round-trip, corruption sweep, bounds, and legacy fixture |
+| `test_scalar_reference.c` | Tiled/full-model/cached-decode agreement with portable scalar matmul |
+| `test_batch_behavior.c` | Bounded deterministic shuffle and batch capacity checks |
+| `test_checkpoint_resume.c` | Complete-state round-trip, continued trajectory, latest selection, and retention |
+| `test_cli_strict.c` | Unknown/missing/malformed/overflowing CLI input rejection |
+| `test_kv_cache.c` | Full-prefix equivalence, reset, absolute positions, and multi-wrap ring layout |
+| `test_evaluation_state.c` | Evaluation leaves parameters, optimizer, scheduler, and metrics unchanged |
+| `test_config_provenance.c` | Frozen-tokenizer and corpus metadata configuration round-trip |
+| `test_evaluation_overfit.c` | Tiny-corpus overfit improvement on a separate held-out file |
+| `test_frozen_tokenizer_training.c` | Stable token IDs before and after model optimization |
+| `test_generation_controls.c` | Stream callbacks, stop withholding, minimum length, penalties, and vocabulary masking |
 | `test_sampling.c` | Greedy/top-k behavior and correct top-p candidate selection |
+| `test_special_tokens.c` | Stable IDs, persistence, legacy fixture, control masking, and EOS stop |
 | `test_tokenizer_serialization.c` | Learned vocabulary, encoding, and decoding round-trip |
 | `test_gpu_matmul.c` | GPU matmul versus CPU reference |
 | `test_gpu_model_forward.c` | Full GPU-dispatched forward pass versus CPU |
@@ -37,6 +50,16 @@ tests and returns a nonzero status if any build or test fails.
 | `test_gpu_training_step.c` | CPU/GPU agreement across repeated training updates |
 
 GPU tests return success with a clear `SKIP` message when CUDA hardware is unavailable.
+
+The suite also runs two shell-level integration gates:
+
+- `test_eval_cli.sh` exercises train-time validation and standalone evaluation, deletes the
+  tokenizer sidecar to prove the bundle is self-contained, rejects tokenizer overrides, and
+  verifies the model artifact is unchanged.
+- `test_resume_cli.sh` interrupts a shuffled, minibatched, gradient-accumulated,
+  dropout-and-scheduled-AdamW run at a real periodic checkpoint, removes the model and tokenizer
+  sidecar, resumes, and requires byte-identical final model and checkpoint files. It also covers
+  terminal `--resume latest` and rejects trajectory-changing overrides.
 
 ## Build variants
 
@@ -88,12 +111,25 @@ The benchmark runs representative tiny, small, and medium model configurations. 
 - peak resident memory;
 - full-context inference latency and throughput;
 - training-step latency and throughput;
-- full-prefix versus KV-cached autoregressive decode latency;
+- prompt-prefill, growing KV decode, and full-ring sliding decode latency as separate metrics;
 - CPU and, when available, GPU execution.
 
-Results append to `bench_results.csv`, which is intentionally ignored by Git because measurements
+Results append to `bench_results_v2.csv`, which is intentionally ignored by Git because measurements
 from different machines are not directly comparable. Use a stable machine, compiler, thread count,
-and power state for before/after performance work.
+and power state for before/after performance work. Each row records the exact build command,
+compiler, OS/kernel/architecture, CPU model, online CPU count, OpenMP version, and maximum thread
+count alongside its measurements.
+
+To isolate the portable matrix-multiplication kernel from the rest of the model, compare it with
+the scalar reference on decode, prefill, and training shapes:
+
+```bash
+./bench.out --matmul-only --tier small
+```
+
+This mode always measures both paths, checks their output, and writes latency, GFLOP/s, speedup,
+error, iteration counts, and the same machine/build metadata to `matmul_results_v1.csv`. Use
+`--quick` only to validate the workflow; omit `--tier` to cover every model tier.
 
 The initial single-threaded GCC measurement on an Intel i5-11320H showed the following steady-state
 decode results (last eight context positions, prompt prefill excluded):
@@ -104,8 +140,9 @@ decode results (last eight context positions, prompt prefill excluded):
 | small | 4.493 ms/token | 0.111 ms/token | 40.42× |
 | medium | 419.839 ms/token | 6.207 ms/token | 67.64× |
 
-Treat these as a reproducible example, not a cross-machine promise; `bench.out` reports the same
-comparison for the machine on which it runs.
+Treat these as a reproducible historical example, not a cross-machine promise. `bench.out` reports
+the same pre-eviction comparison plus independent prompt-prefill and steady-state ring metrics;
+all three are stored separately in the version-2 CSV.
 
 For an OpenMP comparison:
 
@@ -114,6 +151,22 @@ make clean
 make bench OMP=1 CC=gcc
 OMP_NUM_THREADS=4 ./bench.out
 ```
+
+### Profiling workflow
+
+Build a frame-pointer-enabled benchmark and select one bounded tier before changing a kernel:
+
+```bash
+make -C src profile CC=gcc
+perf stat --repeat 3 ./src/bench_profile.out --tier small
+perf record -g -o perf.data -- ./src/bench_profile.out --tier small
+perf report -i perf.data
+```
+
+Use `--quick` for a smoke run, not a performance claim. Use `--scalar` to force the portable
+unblocked C matmul through the full model; omitting it selects the normal CPU dispatch path. The
+scalar path and dispatch path are compared directly by `test_scalar_reference.c`. `perf` is a Linux
+developer dependency, not a build or runtime dependency; `make profile` succeeds without it.
 
 ## Hardware probing
 
@@ -150,6 +203,10 @@ The application and GPU-facing binaries link `libdl` because runtime GPU APIs ar
 `dlopen()`. The normal CPU build does not require vendor headers or SDK libraries.
 
 ## Review checklist
+
+Feature work is championed in the ordered [design and maturity checklist](design-checklist.md).
+Only one roadmap goal should be active at a time, and its acceptance gate must be satisfied before
+advancing to the next goal.
 
 - Does a behavioral change include a focused regression test?
 - Do both GCC and Clang builds pass?

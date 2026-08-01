@@ -93,6 +93,7 @@ typedef struct {
     // whenever dropout_rate == 0 or is_training == 0 (e.g. at inference). ---
     float dropout_rate;
     int is_training;
+    uint64_t rng_state;      // model-owned dropout RNG, persisted by training checkpoints
 
     // --- GPU offload (forward pass only - see transformer.c). Off by
     // default; opt in with --gpu (main.c) or by setting this directly.
@@ -101,6 +102,7 @@ typedef struct {
     // to leave on unconditionally on a machine that might or might not
     // have an NVIDIA GPU. ---
     int use_gpu;
+    int use_scalar_matmul; /* force the portable reference CPU path */
 
     // --- Flat parameter storage. Every trainable weight (token
     // embeddings, output head, every layer's weights) is a contiguous

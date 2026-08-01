@@ -11,6 +11,14 @@
 #include <omp.h>
 #endif
 
+#ifndef DRANZER_MATMUL_BLOCK_SIZE
+#define DRANZER_MATMUL_BLOCK_SIZE 64
+#endif
+
+#if DRANZER_MATMUL_BLOCK_SIZE < 1
+#error "DRANZER_MATMUL_BLOCK_SIZE must be positive"
+#endif
+
 void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out) {
     float limit = sqrtf(6.0f / (fan_in + fan_out));
     for (size_t i = 0; i < size; i++) {
@@ -53,30 +61,47 @@ void softmax_backward(float *probs, float *dL_dprobs, size_t size) {
 
 void matrix_multiply(float *restrict A, float *restrict B, float *restrict C,
                       size_t m, size_t k, size_t n) {
-    const size_t BLOCK_SIZE = 64;
+    const size_t block_size = DRANZER_MATMUL_BLOCK_SIZE;
 
     memset(C, 0, m * n * sizeof(float));
 
     #ifdef _OPENMP
     #pragma omp parallel for collapse(2) schedule(static)
     #endif
-    for (size_t ii = 0; ii < m; ii += BLOCK_SIZE) {
-        for (size_t jj = 0; jj < n; jj += BLOCK_SIZE) {
-            for (size_t ll = 0; ll < k; ll += BLOCK_SIZE) {
-                size_t i_limit = (ii + BLOCK_SIZE > m) ? m : ii + BLOCK_SIZE;
-                size_t j_limit = (jj + BLOCK_SIZE > n) ? n : jj + BLOCK_SIZE;
-                size_t l_limit = (ll + BLOCK_SIZE > k) ? k : ll + BLOCK_SIZE;
+    for (size_t ii = 0; ii < m; ii += block_size) {
+        for (size_t jj = 0; jj < n; jj += block_size) {
+            for (size_t ll = 0; ll < k; ll += block_size) {
+                size_t i_limit = (ii + block_size > m) ? m : ii + block_size;
+                size_t j_limit = (jj + block_size > n) ? n : jj + block_size;
+                size_t l_limit = (ll + block_size > k) ? k : ll + block_size;
 
+                /* Keep one output/B tile hot while walking k, but make j
+                 * the innermost loop. C and B are then contiguous, which
+                 * permits portable compiler vectorization and avoids the
+                 * cache-line-sized B stride of the former i/j/l order.
+                 * Each C element still accumulates l in increasing order. */
                 for (size_t i = ii; i < i_limit; i++) {
-                    for (size_t j = jj; j < j_limit; j++) {
-                        float sum = C[i * n + j];
-                        for (size_t l = ll; l < l_limit; l++) {
-                            sum += A[i * k + l] * B[l * n + j];
+                    for (size_t l = ll; l < l_limit; l++) {
+                        float a = A[i * k + l];
+                        for (size_t j = jj; j < j_limit; j++) {
+                            C[i * n + j] += a * B[l * n + j];
                         }
-                        C[i * n + j] = sum;
                     }
                 }
             }
+        }
+    }
+}
+
+void matrix_multiply_scalar(const float *A, const float *B, float *C,
+                            size_t m, size_t k, size_t n) {
+    for (size_t i = 0; i < m; i++) {
+        for (size_t j = 0; j < n; j++) {
+            float sum = 0.0f;
+            for (size_t l = 0; l < k; l++) {
+                sum += A[i * k + l] * B[l * n + j];
+            }
+            C[i * n + j] = sum;
         }
     }
 }
@@ -221,6 +246,18 @@ int compute_positional_encoding(float *pos_embed, size_t seq_len, size_t embeddi
     return 0;
 }
 
+int compute_positional_encoding_at(float *pos_embed, size_t position,
+                                   size_t embedding_dim) {
+    if (!pos_embed || embedding_dim == 0) return -1;
+    for (size_t i = 0; i < embedding_dim; i++) {
+        float scale = 1.0f / powf(10000.0f,
+                                  (2.0f * (float)i) / (float)embedding_dim);
+        float angle = (float)position * scale;
+        pos_embed[i] = (i % 2 == 0) ? sinf(angle) : cosf(angle);
+    }
+    return 0;
+}
+
 void dropout_forward(float *x, float *mask_out, size_t total_size, float rate, int is_training) {
     if (!is_training || rate <= 0.0f) {
         for (size_t i = 0; i < total_size; i++) mask_out[i] = 1.0f;
@@ -231,6 +268,36 @@ void dropout_forward(float *x, float *mask_out, size_t total_size, float rate, i
     float inv_keep = 1.0f / keep_prob;
     for (size_t i = 0; i < total_size; i++) {
         float keep = ((float)rand() / (float)RAND_MAX) < keep_prob ? 1.0f : 0.0f;
+        mask_out[i] = keep;
+        x[i] = x[i] * keep * inv_keep;
+    }
+}
+
+static uint64_t rng_next(uint64_t *state) {
+    uint64_t x = *state ? *state : UINT64_C(0x9e3779b97f4a7c15);
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    return x * UINT64_C(2685821657736338717);
+}
+
+void dropout_forward_rng(float *x, float *mask_out, size_t total_size, float rate,
+                         int is_training, uint64_t *rng_state) {
+    if (!rng_state) {
+        dropout_forward(x, mask_out, total_size, rate, is_training);
+        return;
+    }
+    if (!is_training || rate <= 0.0f) {
+        for (size_t i = 0; i < total_size; i++) mask_out[i] = 1.0f;
+        return;
+    }
+
+    float keep_prob = 1.0f - rate;
+    float inv_keep = 1.0f / keep_prob;
+    for (size_t i = 0; i < total_size; i++) {
+        double unit = (double)(rng_next(rng_state) >> 11) * (1.0 / 9007199254740992.0);
+        float keep = unit < (double)keep_prob ? 1.0f : 0.0f;
         mask_out[i] = keep;
         x[i] = x[i] * keep * inv_keep;
     }

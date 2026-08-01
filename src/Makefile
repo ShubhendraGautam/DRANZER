@@ -76,8 +76,8 @@ MAIN_SOURCE = cli/main.c
 # with zero fuss if no NVIDIA GPU is present - see
 # core/transformer.c's dispatch_matmul(). Needs -ldl.
 SRC = $(MAIN_SOURCE) \
-      cli/tokenizer.c cli/attention.c cli/config.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
-      core/model.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/serialization.c core/metrics.c \
+      cli/tokenizer.c cli/evaluation.c cli/generation.c cli/attention.c cli/config.c cli/manifest.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
+      core/model.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
       backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 OBJ = $(SRC:.c=.o)
 
@@ -87,10 +87,16 @@ TARGET = app.out
 # model modules it actually needs, not cli/*.o. A separate binary on
 # purpose: it has nothing to do with training-run orchestration.
 BENCH_SRC = tools/bench.c \
-            core/model.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/serialization.c core/metrics.c \
+            core/model.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
             backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 BENCH_TARGET = bench.out
+PROFILE_TARGET = bench_profile.out
+
+# Preserve the exact compile/link command in benchmark metadata. Single
+# quotes are consumed by the shell; the embedded double quotes become part
+# of the -D string literal seen by C.
+BENCH_METADATA_FLAGS = -DDRANZER_BUILD_COMMAND='"$(CC) $(CFLAGS) $(LDFLAGS)"'
 
 # GPU capability probe (dlopen-based DRM/NVML/CUDA/OpenCL detection) -
 # Linux-only, needs libdl but nothing else (no CUDA/OpenCL SDK required to
@@ -122,17 +128,30 @@ $(TARGET): $(OBJ) $(LIB)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+tools/bench.o: tools/bench.c
+	$(CC) $(CFLAGS) $(BENCH_METADATA_FLAGS) -c $< -o $@
+
 bench: $(BENCH_TARGET)
 
 $(BENCH_TARGET): $(BENCH_OBJ)
 	$(CC) $(BENCH_OBJ) $(CFLAGS) $(LDFLAGS) -ldl -o $(BENCH_TARGET)
+
+# Frame-pointer build for Linux perf. Use bench tier selection to keep a
+# profiling session bounded, e.g. `perf record -g -- ./bench_profile.out
+# --tier small`. This target compiles directly to avoid reusing objects made
+# with incompatible optimization/debug flags.
+profile:
+	$(CC) $(CFLAGS) -g -fno-omit-frame-pointer \
+		-DDRANZER_BUILD_COMMAND='"$(CC) $(CFLAGS) -g -fno-omit-frame-pointer $(LDFLAGS)"' \
+		$(BENCH_SRC) $(LDFLAGS) -ldl -o $(PROFILE_TARGET)
+	@echo "Profile build ready: perf record -g -- ./$(PROFILE_TARGET) --tier small"
 
 gpu-probe: $(GPU_PROBE_TARGET)
 
 $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 	$(CC) $(GPU_PROBE_OBJ) $(CFLAGS) $(LDFLAGS) -ldl -o $(GPU_PROBE_TARGET)
 
-# Test suite: every tests/{core,gpu}/test_*.c is its own small,
+# Test suite: every tests/{core,cli,gpu}/test_*.c is its own small,
 # independent correctness check (gradient checks, optimizer/schedule/
 # dropout sanity, serialization roundtrip, GPU-vs-CPU comparisons) - see
 # tests/ for what each one verifies and why. Each is built and run in
@@ -143,12 +162,12 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # they compile and link on any Linux machine and simply report
 # "unavailable" if no NVIDIA driver is present - see
 # tests/gpu/test_gpu_matmul.c's self-skip. Needs -ldl.
-TEST_MODEL_OBJ = core/model.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/serialization.o core/metrics.o \
-                 backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/sampling.o cli/tokenizer.o
+TEST_MODEL_OBJ = core/model.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
+                 backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
 TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/cli/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/tpu/test_*.c)
 TEST_BINS = $(TEST_SRCS:.c=.out)
 
-test: $(LIB) $(TEST_MODEL_OBJ)
+test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
 	@failed=0; \
 	for src in $(TEST_SRCS); do \
 		bin=$${src%.c}.out; \
@@ -159,9 +178,11 @@ test: $(LIB) $(TEST_MODEL_OBJ)
 		echo ""; \
 	done; \
 	if [ $$failed -ne 0 ]; then echo "=== SOME TESTS FAILED ==="; exit 1; else echo "=== ALL TESTS PASSED ==="; fi
+	@bash tests/integration/test_eval_cli.sh ./$(TARGET)
+	@bash tests/integration/test_resume_cli.sh ./$(TARGET)
 
 clean:
-	rm -f $(OBJ) $(BENCH_OBJ) $(GPU_PROBE_OBJ) $(TARGET) $(BENCH_TARGET) $(GPU_PROBE_TARGET) $(TEST_BINS)
+	rm -f $(OBJ) $(BENCH_OBJ) $(GPU_PROBE_OBJ) $(TARGET) $(BENCH_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(TEST_BINS)
 	$(MAKE) -C $(LIB_DIR) clean
 
-.PHONY: all clean bench test gpu-probe
+.PHONY: all clean bench profile test gpu-probe

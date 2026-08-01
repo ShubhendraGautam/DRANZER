@@ -19,20 +19,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Number of floats needed for one transformer_layer_t's parameters, given
- * embedding_dim (ffn_dim is always embedding_dim*4). */
-static size_t layer_param_count(size_t embedding_dim) {
-    size_t ffn_dim = embedding_dim * 4;
-    size_t emb2 = embedding_dim * embedding_dim;
-    return 4 * emb2                          /* W_q, W_k, W_v, W_o */
-         + 2 * embedding_dim                 /* ln_gamma_attn, ln_beta_attn */
-         + embedding_dim * ffn_dim + ffn_dim  /* W_ff1, b_ff1 */
-         + ffn_dim * embedding_dim + embedding_dim /* W_ff2, b_ff2 */
-         + 2 * embedding_dim;                /* ln_gamma_ffn, ln_beta_ffn */
+static int checked_multiply(size_t left, size_t right, size_t *out) {
+    if (left != 0 && right > SIZE_MAX / left) return 0;
+    *out = left * right;
+    return 1;
+}
+
+static int checked_add(size_t left, size_t right, size_t *out) {
+    if (right > SIZE_MAX - left) return 0;
+    *out = left + right;
+    return 1;
 }
 
 /* Carves one transformer_layer_t's worth of views out of the params/grads
- * cursors, advancing both by layer_param_count(embedding_dim) floats. */
+ * cursors. model_new validates the complete count before calling this. */
 static void layout_layer(transformer_layer_t *layer, float **pc, float **gc,
                           size_t embedding_dim) {
     size_t ffn_dim = embedding_dim * 4;
@@ -66,8 +66,40 @@ model_errors_t model_new(neural_model_t *model,
                          size_t num_heads,
                          size_t num_layers,
                          size_t max_seq_len) {
-    if (model == NULL || num_heads == 0 || embedding_dim % num_heads != 0 ||
+    if (model == NULL || vocab_size == 0 || embedding_dim == 0 ||
+        num_heads == 0 || embedding_dim % num_heads != 0 ||
         num_layers == 0 || max_seq_len == 0) {
+        return MODEL_INVALID_INPUT;
+    }
+
+    size_t ffn_dim, emb2, layer_params, layer_square_term, layer_linear_term;
+    size_t vocab_emb, global_count, doubled_vocab_emb, layered_params;
+    size_t total_param_count, seq_emb, ffn_cache, max_seq_squared, probs_cache;
+    size_t hidden_pointer_count;
+    if (!checked_multiply(embedding_dim, 4, &ffn_dim) ||
+        !checked_multiply(embedding_dim, embedding_dim, &emb2) ||
+        !checked_multiply(emb2, 12, &layer_square_term) ||
+        !checked_multiply(embedding_dim, 9, &layer_linear_term) ||
+        !checked_add(layer_square_term, layer_linear_term, &layer_params) ||
+        !checked_multiply(vocab_size, embedding_dim, &vocab_emb) ||
+        !checked_multiply(vocab_emb, 2, &doubled_vocab_emb) ||
+        !checked_add(doubled_vocab_emb, vocab_size, &global_count) ||
+        !checked_multiply(num_layers, layer_params, &layered_params) ||
+        !checked_add(global_count, layered_params, &total_param_count) ||
+        !checked_multiply(max_seq_len, embedding_dim, &seq_emb) ||
+        !checked_multiply(max_seq_len, ffn_dim, &ffn_cache) ||
+        !checked_multiply(max_seq_len, max_seq_len, &max_seq_squared) ||
+        !checked_multiply(num_heads, max_seq_squared, &probs_cache) ||
+        !checked_add(num_layers, 1, &hidden_pointer_count) ||
+        total_param_count > SIZE_MAX / sizeof(float) ||
+        seq_emb > SIZE_MAX / sizeof(float) ||
+        ffn_cache > SIZE_MAX / sizeof(float) ||
+        probs_cache > SIZE_MAX / sizeof(float) ||
+        vocab_size > SIZE_MAX / sizeof(float) ||
+        max_seq_len > SIZE_MAX / sizeof(float) ||
+        num_layers > SIZE_MAX / sizeof(float *) ||
+        hidden_pointer_count > SIZE_MAX / sizeof(float *) ||
+        num_layers > SIZE_MAX / sizeof(transformer_layer_t)) {
         return MODEL_INVALID_INPUT;
     }
 
@@ -98,9 +130,9 @@ model_errors_t model_new(neural_model_t *model,
     model->min_lr = 0.0f;
     model->dropout_rate = 0.0f;
     model->is_training = 0;
+    model->rng_state = UINT64_C(0x9e3779b97f4a7c15);
     model->use_gpu = 0;
-
-    size_t ffn_dim = embedding_dim * 4;
+    model->use_scalar_matmul = 0;
 
     /* --- Flat parameter storage: one buffer for every trainable weight,
      * one for every gradient. Every named pointer below (token_embeddings,
@@ -113,10 +145,7 @@ model_errors_t model_new(neural_model_t *model,
      * SGD (model->optimizer_type = OPTIMIZER_SGD) shouldn't pay for two
      * more full-size float buffers it'll never touch. optimizer.c
      * allocates them lazily, the first time an Adam step actually runs. */
-    size_t global_count = vocab_size * embedding_dim  /* token_embeddings */
-                         + embedding_dim * vocab_size  /* output_projection */
-                         + vocab_size;                 /* output_bias */
-    model->total_param_count = global_count + num_layers * layer_param_count(embedding_dim);
+    model->total_param_count = total_param_count;
 
     model->params = malloc(model->total_param_count * sizeof(float));
     model->grads = calloc(model->total_param_count, sizeof(float));
@@ -179,10 +208,6 @@ model_errors_t model_new(neural_model_t *model,
     /* --- Forward-pass activation cache (for backward). Sized for
      * max_seq_len - the worst case - and reused for every training step
      * regardless of that step's actual seq_len. --- */
-    size_t seq_emb = max_seq_len * embedding_dim;
-    size_t ffn_cache = max_seq_len * ffn_dim;
-    size_t probs_cache = num_heads * max_seq_len * max_seq_len;
-
     model->cache_hidden = malloc((num_layers + 1) * sizeof(float *));
     model->cache_Q = malloc(num_layers * sizeof(float *));
     model->cache_K = malloc(num_layers * sizeof(float *));
@@ -307,6 +332,11 @@ model_errors_t model_new(neural_model_t *model,
     gpu_matmul_invalidate_weights();
 
     return MODEL_SUCCESS;
+}
+
+void model_seed_rng(neural_model_t *model, uint64_t seed) {
+    if (!model) return;
+    model->rng_state = seed ? seed : UINT64_C(0x9e3779b97f4a7c15);
 }
 
 /* Free all model resources */

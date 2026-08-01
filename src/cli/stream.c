@@ -163,6 +163,16 @@ void token_stream_reset(token_stream_t *stream) {
     stream->size = 0;
 }
 
+void token_stream_retain_tail(token_stream_t *stream, size_t count) {
+    if (!stream || count >= stream->size) return;
+    if (count > 0) {
+        memmove(stream->token_buffer,
+                stream->token_buffer + stream->size - count,
+                count * sizeof(*stream->token_buffer));
+    }
+    stream->size = count;
+}
+
 /* Free token stream */
 void token_stream_free(token_stream_t *stream) {
     if (!stream) return;

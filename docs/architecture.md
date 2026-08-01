@@ -35,6 +35,17 @@ concatenated and projected back to model width.
 
 ## Training path
 
+The CLI first makes a dedicated corpus pass to train the BPE vocabulary, records a deterministic
+corpus fingerprint, and freezes the encoder before model initialization. A frozen encoder rejects
+further `bpe_train()` calls, so token IDs and merge order cannot change during optimizer updates.
+Passing an existing explicit tokenizer path reuses that frozen vocabulary after a model-vocabulary
+compatibility check.
+
+New tokenizers keep byte IDs 0–255, reserve PAD/UNK/BOS/EOS at 256–259, and learn merges from 260.
+Training and evaluation both model one file as `BOS, encoded bytes, EOS`; training retains its
+sliding context across file chunks. Legacy tokenizers are tagged separately and keep merges at 256
+without acquiring new boundary semantics.
+
 `model_train_step()` performs four phases:
 
 1. Run the normal forward pass while retaining activations needed by backward.
@@ -42,10 +53,62 @@ concatenated and projected back to model width.
 3. Backpropagate through the output head, every transformer block, and token embeddings.
 4. Clip gradients and apply AdamW or SGD.
 
+The CLI's minibatch path separates phases 2–3 from phase 4. It zeroes gradients once, calls
+`model_accumulate_gradients()` for each example across the configured minibatches and accumulation
+steps, then calls `model_apply_accumulated_gradients()` once. That function divides by the actual
+sample count before clipping and optimization. The legacy `model_train_step()` is the same path
+with a sample count of one.
+
+Examples remain streamed and only one minibatch of context windows is stored. Optional shuffling is
+therefore deliberately minibatch-local. Its stateless seed derives from run seed, epoch, and
+minibatch index, keeping data order reproducible without coupling it to model dropout RNG.
+
 The backward pass covers attention projections, causal softmax attention, layer normalization,
 feed-forward layers, residual branches, dropout, embeddings, and the output projection. Numerical
 gradient tests protect this path from implementations that appear to train but use incorrect
 derivatives.
+
+## Evaluation path
+
+`model_evaluate_step()` runs the normal forward path with dropout disabled and computes stable
+log-sum-exp cross-entropy. It restores the model's prior training mode and never invokes backward,
+the optimizer, the learning-rate scheduler, or training-metric updates.
+
+The CLI corpus evaluator maintains a bounded sliding context across streaming file chunks and
+accumulates loss in double precision. Both standalone `eval` and `train --validation` use this same
+path, so reported held-out cross-entropy and perplexity have identical semantics.
+
+## Checkpoint and resume path
+
+Training dropout draws from RNG state owned by each model rather than the process-global C RNG.
+The checkpoint stream stores that state together with parameters, gradients, optimizer moments,
+scheduler counters, loss history, architecture, run configuration, corpus provenance, and the
+frozen BPE encoder. A magic value, format version, and terminal footer reject incomplete or
+unsupported files.
+
+Each checkpoint cursor is an epoch number plus the count of completed next-token updates within
+that epoch. On resume, the CLI streams and tokenizes from the start of the recorded epoch, skips
+exactly that many predictions without invoking the model, then continues optimization. This keeps
+memory bounded while preserving the model RNG and optimizer trajectory. The input byte count and
+FNV-1a fingerprint must match before replay begins.
+
+Writes go to a process-specific temporary file in the destination directory, are flushed and
+synced, and become visible through one atomic rename. Afterward, retention removes all but the
+configured number of newest checkpoints. Exact bitwise continuation is guaranteed for the same
+executable and CPU/GPU execution path.
+
+## Model bundle path
+
+Normal training output uses a separate versioned bundle contract for evaluation and inference. It
+stores canonical little-endian binary32 parameters, model dimensions, frozen BPE merge order,
+training step/loss metadata, seed, and corpus provenance. Independent weight and tokenizer
+checksums, exact-length/footer checks, shape arithmetic, and pre-allocation bounds reject malformed
+input. The CLI prefers this embedded tokenizer and falls back read-only to legacy host-native
+weights plus sidecars when bundle magic is absent.
+
+Bundles are smaller than checkpoints because they omit optimizer, gradient, scheduler, RNG, and
+cursor state. The exact layout and compatibility rules are documented in
+[Model bundle format](model-bundle.md).
 
 ## Incremental generation
 
@@ -57,13 +120,33 @@ through the stack.
 Prompt processing fills the cache once. Subsequent decode work grows linearly with the cached
 context for attention, while transformer projections and feed-forward layers process only the new
 token. `test_kv_cache.c` compares logits from this path against full-prefix logits at every
-position.
+position before the first eviction, then checks multiple ring wraps against the same logical cache
+normalized to a linear layout.
+
+At capacity, the oldest key/value row in every layer is overwritten and the ring start advances.
+The cache retains the newest `max_seq_len` contextualized rows; retained higher-layer rows are not
+recomputed after older context is evicted. Token positions continue absolutely. Rows inside the
+original window use the model's stored sinusoidal table, while later rows evaluate the identical
+formula on demand. This makes long decoding explicit and bounded in KV memory, while acknowledging
+that positions beyond the training window are extrapolated.
+
+The model-visible prompt begins with BOS in special-token mode. Before each sample the runtime
+applies repetition controls and masks PAD, UNK, BOS, and unassigned vocabulary slots. EOS becomes
+eligible after the configured minimum length. One shared decode loop handles EOS, caller stop
+sequences, and callback cancellation. It emits safe decoded token pieces immediately while holding
+only a possible stop-sequence prefix; control IDs and matching stop markers are never emitted. See
+[Generation runtime](generation.md) for the interface contract.
 
 ## Parameter and activation memory
 
 All trainable parameters live in one contiguous `params` allocation. Gradients use an identical
 contiguous layout in `grads`; Adam moment buffers use that layout as well and are allocated lazily.
 Named fields such as `W_q` and `output_projection` are views into those buffers.
+
+Forward matmuls normally use the CPU dispatch path (or opt-in GPU path). Setting
+`model.use_scalar_matmul` forces a portable unblocked C reference through full-prefix and cached
+decode. This remains independently selectable so later tiled/SIMD kernels can be checked at the
+model level, not only on isolated matrices.
 
 This layout provides three useful properties:
 
@@ -109,11 +192,17 @@ operations, layer normalization, softmax, optimizer, and tokenizer remain on the
 | `core/tensor_ops.c` | Matmul, softmax, layer norm, dropout, and positional encoding |
 | `core/transformer.c` | Causal attention, transformer blocks, forward pass, backend dispatch |
 | `core/training.c` | Cross-entropy and full backward-pass orchestration |
+| `core/evaluation.c` | Side-effect-free next-token cross-entropy |
 | `core/optimizer.c` | SGD, AdamW, clipping, and learning-rate schedules |
-| `core/serialization.c` | Model save/load format |
+| `core/bundle.c` | Canonical model/tokenizer artifact and strict validation |
+| `core/serialization.c` | Legacy model I/O and shared checkpoint model state |
 | `core/metrics.c` | Loss history and running metrics |
-| `cli/main.c` | Train, infer, and generate modes |
+| `cli/main.c` | Train, eval, infer, and generate orchestration |
 | `cli/tokenizer.c` | Adapter around the BPE utility library |
+| `cli/evaluation.c` | Streaming corpus metrics and perplexity reporting |
+| `cli/generation.c` | Prompt policy, generation controls, callbacks, stop matching, and cached decode loop |
+| `cli/checkpoint.c` | Atomic complete-state checkpoints, resume loading, and retention |
+| `cli/manifest.c` | Exclusive-create, read-only resolved run manifests |
 | `cli/sampling.c` | Temperature, greedy, top-k, top-p, and beam-search helpers |
 | `backends/gpu/gpu_cuda.c` | Minimal dynamically loaded CUDA Driver API wrapper |
 | `backends/gpu/gpu_matmul.c` | Hand-written PTX matmul and device-side caches |
@@ -126,7 +215,7 @@ Headers live under `src/include/` and mirror the source hierarchy. External call
 
 - Fixed sinusoidal positional encodings
 - ReLU feed-forward network with width `4 × embedding_dim`
-- KV-cached generation bounded by a fixed maximum sequence length
+- Ring-KV-cached generation with a fixed retained window and absolute sinusoidal positions
 - Last-position next-token prediction
 - Linux-focused runtime and hardware probing
 - Optional NVIDIA-only GPU acceleration for forward matmuls

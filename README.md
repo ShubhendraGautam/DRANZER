@@ -18,8 +18,10 @@ toolkit required.
 
 - Multi-layer, causal, multi-head self-attention with residual connections and layer normalization
 - Full hand-written backpropagation, checked against numerical gradients
-- AdamW, SGD, gradient clipping, dropout, and warmup/cosine learning-rate scheduling
-- Persisted BPE vocabularies and KV-cached greedy/top-k/top-p decoding (15.8–67.6× faster in the bundled CPU benchmark)
+- AdamW/SGD, true minibatch gradient averaging, accumulation, dropout, clipping, and LR schedules
+- Frozen tokenization with BOS/EOS, held-out perplexity, and exact resumable training checkpoints
+- Single-file model bundles and ring-KV-cached greedy/top-k/top-p decoding
+- Incremental generation callbacks, streamed CLI output, stop sequences, and repetition controls
 - Portable CPU execution plus optional OpenMP parallelism
 - Optional NVIDIA GPU offload with persistent buffers and a validated weight cache
 - Built-in tests, benchmarks, hardware probing, serialization, and GitHub Actions CI
@@ -36,7 +38,11 @@ make
 # Train on the included sample
 ./app.out train --input ../test.txt --epochs 3
 
+# Continue the most recent checkpoint exactly
+./app.out train --resume latest --checkpoint-dir checkpoints
+
 # Use the saved model
+./app.out eval --model dranzer.pth --input ../test.txt
 ./app.out infer --prompt "hello"
 ./app.out generate --prompt "hello" --length 20 --sampling topp --top-p 0.9 --seed 42
 ```
@@ -65,6 +71,7 @@ make -C src test                         # correctness suite
 make -C src clean all CC=gcc OMP=1      # OpenMP build
 make -C src clean test CC=clang ASAN=1  # memory-safety checks
 make -C src bench && ./src/bench.out     # model benchmarks
+make -C src profile CC=gcc               # frame-pointer build for perf
 make -C src gpu-probe && ./src/gpu_probe.out
 ```
 
@@ -76,16 +83,20 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 |---|---|
 | [Usage and CLI](docs/usage.md) | Installation, build variants, commands, flags, and troubleshooting |
 | [Architecture](docs/architecture.md) | Model flow, memory layout, modules, and repository structure |
+| [Model bundle](docs/model-bundle.md) | Portable artifact layout, validation, and legacy compatibility |
+| [Special tokens](docs/special-tokens.md) | Stable IDs, sequence boundaries, EOS stopping, and legacy mode |
+| [Generation runtime](docs/generation.md) | Streaming callbacks, stop sequences, sampling controls, and result semantics |
 | [GPU backend](docs/gpu.md) | PTX execution, capability probing, caching, limitations, and measurements |
 | [Development](docs/development.md) | Tests, CI/nightly jobs, sanitizers, benchmarks, and contribution workflow |
+| [Design checklist](docs/design-checklist.md) | Prioritized maturity roadmap and acceptance gates |
 
 ## Scope
 
 DRANZER is an educational and systems-research implementation, not a production LLM runtime.
-Generation uses a per-layer KV cache but remains bounded by the model's fixed maximum sequence
-length. GPU offload is NVIDIA-only and covers forward-pass matrix multiplications; training's
-backward pass remains on the CPU. These boundaries are intentional and documented so performance
-claims stay honest.
+Generation can continue beyond the model context window by evicting the oldest per-layer KV rows;
+quality is still limited by that fixed retained context and by positions beyond those seen during
+training. GPU offload is NVIDIA-only and covers forward-pass matrix multiplications; training's
+backward pass remains on the CPU.
 
 ## License
 

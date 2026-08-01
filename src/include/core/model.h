@@ -9,7 +9,9 @@
  *   transformer.*    - attention + the stacked forward pass
  *   optimizer.*      - SGD/AdamW, grad clipping, LR schedule
  *   training.*       - model_train_step, model_predict_next_token
- *   serialization.*  - model_save/model_load and the shared write/read state
+ *   evaluation.*     - side-effect-free next-token cross-entropy
+ *   serialization.*  - legacy model_save/model_load and shared checkpoint state
+ *   bundle.*         - canonical model + frozen-tokenizer deployment artifact
  *   metrics.*        - learning_metrics_t accessors
  *   model.c          - just model_new/model_free (this header's own declarations)
  * Internal modules should prefer including only the narrower header(s)
@@ -21,6 +23,7 @@
 #include "core/transformer.h"
 #include "core/optimizer.h"
 #include "core/training.h"
+#include "core/evaluation.h"
 #include "core/serialization.h"
 #include "core/metrics.h"
 
@@ -43,6 +46,9 @@ model_errors_t model_new(neural_model_t *model,
                          size_t num_heads,
                          size_t num_layers,
                          size_t max_seq_len);
+
+/** Seed the model-owned training RNG used for dropout masks. */
+void model_seed_rng(neural_model_t *model, uint64_t seed);
 
 /**
  * Free all model resources

@@ -3,6 +3,7 @@
 # catches object files at any depth under those, not just top-level.
 src/**/*.o
 src/bench.out
+src/bench_profile.out
 src/gpu_probe.out
 src/app.out
 libs/src/*.o
@@ -19,7 +20,9 @@ src/gpu_capability_cache/
 # Benchmark results log - accumulates across runs on THIS machine; numbers
 # aren't comparable across different hardware, so not tracked by default.
 # Remove this line if you want to commit a specific machine's history.
-src/bench_results.csv
+bench_results*.csv
+matmul_results*.csv
+perf.data*
 
 # Generated files
 *.pth

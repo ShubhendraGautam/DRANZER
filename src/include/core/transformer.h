@@ -5,12 +5,14 @@
 
 /* Per-generation key/value cache and scratch space for incremental
  * autoregressive decoding. One instance belongs to one model and one
- * sequence. Keys and values are stored per layer for every position that
- * has already been consumed. */
+ * sequence. Keys and values are stored per layer for the newest `capacity`
+ * consumed positions. */
 typedef struct {
     const neural_model_t *model;
-    size_t length;
+    size_t length;       /* retained tokens, never greater than capacity */
     size_t capacity;
+    size_t start;        /* physical slot containing the oldest token */
+    size_t total_tokens; /* absolute tokens consumed since reset */
     size_t num_layers;
     size_t num_heads;
     size_t embedding_dim;
@@ -24,6 +26,7 @@ typedef struct {
     float *ff_hidden;
     float *ff_raw;
     float *scores;
+    float *position_embedding;
 } model_kv_cache_t;
 
 /* Multi-head self-attention forward pass for layer l. Reads
@@ -64,13 +67,17 @@ model_errors_t model_forward(neural_model_t *model,
  * the model passed at initialization and must be reset before starting a
  * new sequence. */
 model_errors_t model_kv_cache_init(model_kv_cache_t *cache, const neural_model_t *model);
+model_errors_t model_kv_cache_init_with_capacity(model_kv_cache_t *cache,
+                                                  const neural_model_t *model,
+                                                  size_t capacity);
 void model_kv_cache_reset(model_kv_cache_t *cache);
 void model_kv_cache_free(model_kv_cache_t *cache);
 
-/* Consume one token at cache->length, append its per-layer keys/values,
- * and return logits for the following token. This is inference-only:
- * dropout is intentionally disabled and no backward activations are
- * populated. */
+/* Consume one token at the next absolute position and return logits for the
+ * following token. Once capacity is full, the oldest per-layer key/value row
+ * is evicted from a ring buffer. Sinusoidal positions continue absolutely
+ * beyond the trained window. This is inference-only: dropout is disabled and
+ * no backward activations are populated. */
 model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cache,
                                    uint32_t token_id, float *output_logits);
 

@@ -20,13 +20,34 @@ typedef struct {
     
     /* Training hyperparameters */
     size_t batch_size;
+    size_t gradient_accumulation_steps;
+    int shuffle;
     size_t num_epochs;
     size_t checkpoint_interval;  // Save checkpoint every N steps
+    unsigned int seed;
+
+    /* Frozen tokenizer/corpus provenance */
+    size_t tokenizer_vocab_size;
+    int tokenizer_has_special_tokens;
+    uint32_t pad_token_id;
+    uint32_t unk_token_id;
+    uint32_t bos_token_id;
+    uint32_t eos_token_id;
+    uint64_t input_fingerprint;
+    size_t input_bytes;
+    uint64_t validation_fingerprint;
+    size_t validation_bytes;
+    size_t validation_tokens;
+    double validation_cross_entropy;
+    double validation_perplexity;
     
     /* Path settings */
-    char model_path[256];
-    char checkpoint_dir[256];
-    char config_path[256];
+    char model_path[1024];
+    char tokenizer_path[1024];
+    char input_path[1024];
+    char validation_path[1024];
+    char checkpoint_dir[1024];
+    char config_path[1024];
     
 } config_t;
 

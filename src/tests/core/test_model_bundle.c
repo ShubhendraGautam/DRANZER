@@ -1,0 +1,305 @@
+/* Versioned model bundle contract: canonical weights, embedded frozen
+ * tokenizer, metadata, legacy detection, and safe corruption rejection. */
+#include "byte_pair_encoding.h"
+#include "core/bundle.h"
+#include "core/model.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define VOCAB 264
+#define EMBEDDING 8
+#define HEADS 2
+#define LAYERS 1
+#define MAX_SEQUENCE 8
+#define BUNDLE_HEADER_SIZE 152
+
+static int write_blob(const char *path, const uint8_t *data, size_t size) {
+    FILE *file = fopen(path, "wb");
+    if (!file) return 0;
+    int ok = fwrite(data, 1, size, file) == size;
+    if (fclose(file) != 0) ok = 0;
+    return ok;
+}
+
+static uint8_t *read_blob(const char *path, size_t *out_size) {
+    FILE *file = fopen(path, "rb");
+    if (!file || fseek(file, 0, SEEK_END) != 0) {
+        if (file) fclose(file);
+        return NULL;
+    }
+    long length = ftell(file);
+    if (length < 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    uint8_t *data = malloc((size_t)length);
+    if (!data || fread(data, 1, (size_t)length, file) != (size_t)length) {
+        free(data);
+        fclose(file);
+        return NULL;
+    }
+    fclose(file);
+    *out_size = (size_t)length;
+    return data;
+}
+
+static void put_u64(uint8_t bytes[8], uint64_t value) {
+    for (size_t i = 0; i < 8; i++) bytes[i] = (uint8_t)(value >> (8 * i));
+}
+
+static void put_u32(uint8_t bytes[4], uint32_t value) {
+    for (size_t i = 0; i < 4; i++) bytes[i] = (uint8_t)(value >> (8 * i));
+}
+
+static void refresh_header_checksum(uint8_t *header) {
+    uint64_t checksum = UINT64_C(14695981039346656037);
+    memset(header + 76, 0, 4);
+    memset(header + 84, 0, 4);
+    for (size_t i = 0; i < BUNDLE_HEADER_SIZE; i++) {
+        checksum ^= header[i];
+        checksum *= UINT64_C(1099511628211);
+    }
+    put_u32(header + 76, (uint32_t)checksum);
+    put_u32(header + 84, (uint32_t)(checksum >> 32));
+}
+
+static bundle_errors_t load_and_release(const char *path) {
+    neural_model_t loaded = {0};
+    bpe_encoder_t *encoder = NULL;
+    model_bundle_metadata_t metadata = {0};
+    bundle_errors_t rc = model_bundle_load(&loaded, &encoder, &metadata, path);
+    if (rc == BUNDLE_SUCCESS) {
+        model_free(&loaded);
+        bpe_encoder_free(encoder);
+        free(encoder);
+    }
+    return rc;
+}
+
+int main(void) {
+    char bundle_path[160], corrupt_path[160], legacy_path[160];
+    snprintf(bundle_path, sizeof(bundle_path), "/tmp/dranzer-bundle-%ld.bin", (long)getpid());
+    snprintf(corrupt_path, sizeof(corrupt_path), "/tmp/dranzer-corrupt-%ld.bin", (long)getpid());
+    snprintf(legacy_path, sizeof(legacy_path), "/tmp/dranzer-legacy-%ld.pth", (long)getpid());
+    int failed = 0;
+    neural_model_t model = {0};
+    bpe_encoder_t encoder = {0};
+    bpe_tokens_t original_tokens = {0}, loaded_tokens = {0};
+    uint8_t *baseline = NULL;
+    size_t baseline_size = 0;
+    const char *training_text = "banana bandana banana cabana";
+    const char *probe_text = "banana cabana";
+
+    srand(73);
+    if (model_new(&model, VOCAB, EMBEDDING, HEADS, LAYERS, MAX_SEQUENCE) != MODEL_SUCCESS ||
+        bpe_encoder_new_with_special_tokens(&encoder, VOCAB) != BPE_SUCCESS ||
+        bpe_train(&encoder, training_text, strlen(training_text)) != BPE_SUCCESS ||
+        bpe_encoder_freeze(&encoder) != BPE_SUCCESS) {
+        fprintf(stderr, "bundle fixture setup failed\n");
+        failed = 1;
+        goto cleanup;
+    }
+    uint32_t context[] = {1, 2, 3, 4};
+    for (int i = 0; i < 3; i++) {
+        if (model_train_step(&model, context, 5, 4) != MODEL_SUCCESS) {
+            fprintf(stderr, "bundle fixture training failed\n");
+            failed = 1;
+            goto cleanup;
+        }
+    }
+    model_bundle_metadata_t metadata = {
+        .train_window = 4,
+        .seed = UINT64_C(0x123456789abcdef0),
+        .input_fingerprint = UINT64_C(0xfedcba9876543210),
+        .input_bytes = 987654,
+    };
+    if (model_bundle_save(&model, &encoder, &metadata, bundle_path) != BUNDLE_SUCCESS ||
+        bpe_encode(&encoder, probe_text, strlen(probe_text), &original_tokens) != BPE_SUCCESS) {
+        fprintf(stderr, "bundle save failed\n");
+        failed = 1;
+        goto cleanup;
+    }
+
+    neural_model_t loaded = {0};
+    bpe_encoder_t *loaded_encoder = NULL;
+    model_bundle_metadata_t loaded_metadata = {0};
+    if (model_bundle_load(&loaded, &loaded_encoder, &loaded_metadata, bundle_path) !=
+            BUNDLE_SUCCESS ||
+        !loaded_encoder || !bpe_encoder_is_frozen(loaded_encoder) ||
+        !bpe_encoder_has_special_tokens(loaded_encoder) ||
+        loaded.total_param_count != model.total_param_count ||
+        memcmp(loaded.params, model.params,
+               model.total_param_count * sizeof(float)) != 0 ||
+        loaded.training_steps != model.training_steps ||
+        memcmp(&loaded.current_loss, &model.current_loss, sizeof(float)) != 0 ||
+        loaded_metadata.train_window != metadata.train_window ||
+        loaded_metadata.seed != metadata.seed ||
+        loaded_metadata.input_fingerprint != metadata.input_fingerprint ||
+        loaded_metadata.input_bytes != metadata.input_bytes ||
+        loaded_encoder->max_vocab_size != encoder.max_vocab_size ||
+        loaded_encoder->vocab_size != encoder.vocab_size ||
+        bpe_encode(loaded_encoder, probe_text, strlen(probe_text), &loaded_tokens) != BPE_SUCCESS ||
+        loaded_tokens.token_count != original_tokens.token_count ||
+        memcmp(loaded_tokens.token_ids, original_tokens.token_ids,
+               original_tokens.token_count * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "bundle roundtrip changed model, tokenizer, or metadata\n");
+        failed = 1;
+    }
+    model_free(&loaded);
+    if (loaded_encoder) {
+        bpe_encoder_free(loaded_encoder);
+        free(loaded_encoder);
+    }
+    if (failed) goto cleanup;
+
+    baseline = read_blob(bundle_path, &baseline_size);
+    size_t weights_size = model.total_param_count * sizeof(float);
+    if (!baseline || baseline_size <= BUNDLE_HEADER_SIZE + weights_size + 8) {
+        fprintf(stderr, "could not inspect saved bundle\n");
+        failed = 1;
+        goto cleanup;
+    }
+
+    /* Weight and tokenizer payloads have independent checksums. */
+    baseline[BUNDLE_HEADER_SIZE + 3] ^= UINT8_C(0x40);
+    if (!write_blob(corrupt_path, baseline, baseline_size) ||
+        load_and_release(corrupt_path) != BUNDLE_CHECKSUM_ERROR) {
+        fprintf(stderr, "corrupt weight payload was not rejected by checksum\n");
+        failed = 1;
+        goto cleanup;
+    }
+    baseline[BUNDLE_HEADER_SIZE + 3] ^= UINT8_C(0x40);
+    baseline[BUNDLE_HEADER_SIZE + weights_size + 23] ^= UINT8_C(0x08);
+    if (!write_blob(corrupt_path, baseline, baseline_size) ||
+        load_and_release(corrupt_path) != BUNDLE_CHECKSUM_ERROR) {
+        fprintf(stderr, "corrupt tokenizer payload was not rejected by checksum\n");
+        failed = 1;
+        goto cleanup;
+    }
+    baseline[BUNDLE_HEADER_SIZE + weights_size + 23] ^= UINT8_C(0x08);
+
+    if (!write_blob(corrupt_path, baseline, baseline_size - 1) ||
+        load_and_release(corrupt_path) != BUNDLE_FORMAT_ERROR) {
+        fprintf(stderr, "truncated bundle was not rejected\n");
+        failed = 1;
+        goto cleanup;
+    }
+    baseline[8] = 2;
+    refresh_header_checksum(baseline);
+    if (!write_blob(corrupt_path, baseline, baseline_size) ||
+        load_and_release(corrupt_path) != BUNDLE_UNSUPPORTED) {
+        fprintf(stderr, "unknown bundle version was not rejected\n");
+        failed = 1;
+        goto cleanup;
+    }
+    baseline[8] = 1;
+    refresh_header_checksum(baseline);
+
+    /* A corrupted max-sequence header must fail shape validation before it
+     * can request a huge quadratic attention cache. */
+    memset(baseline + 56, 0xff, 8);
+    refresh_header_checksum(baseline);
+    if (!write_blob(corrupt_path, baseline, baseline_size) ||
+        load_and_release(corrupt_path) != BUNDLE_FORMAT_ERROR) {
+        fprintf(stderr, "unsafe model shape was not rejected\n");
+        failed = 1;
+        goto cleanup;
+    }
+    free(baseline);
+    baseline = read_blob(bundle_path, &baseline_size);
+    if (!baseline) { failed = 1; goto cleanup; }
+
+    /* Deterministic mutation sweep: every loader result is bounded and the
+     * sanitizer matrix verifies that all error paths release allocations. */
+    for (size_t i = 0; i < 96; i++) {
+        size_t offset = (i * (baseline_size - 1)) / 95;
+        baseline[offset] ^= (uint8_t)(1u << (i % 8));
+        if (!write_blob(corrupt_path, baseline, baseline_size)) {
+            failed = 1;
+            break;
+        }
+        bundle_errors_t rc = load_and_release(corrupt_path);
+        if (rc <= BUNDLE_SUCCESS || rc > BUNDLE_UNSUPPORTED) {
+            fprintf(stderr, "mutated bundle was accepted or produced invalid status\n");
+            failed = 1;
+            break;
+        }
+        baseline[offset] ^= (uint8_t)(1u << (i % 8));
+    }
+    if (failed) goto cleanup;
+
+    /* The portable tokenizer decoder refuses a sparse billion-entry table
+     * before allocating. */
+    uint8_t malicious_tokenizer[24] = {0};
+    put_u64(malicious_tokenizer, UINT64_C(0xffffffff));
+    put_u64(malicious_tokenizer + 8, 256);
+    malicious_tokenizer[16] = 1;
+    bpe_encoder_t rejected = {0};
+    if (bpe_encoder_deserialize_portable(
+            &rejected, malicious_tokenizer, sizeof(malicious_tokenizer)) != BPE_FORMAT_ERROR) {
+        fprintf(stderr, "oversized portable tokenizer was not rejected\n");
+        bpe_encoder_free(&rejected);
+        failed = 1;
+        goto cleanup;
+    }
+
+    /* Compatibility fixture: old host-native weight files are detected as
+     * non-bundles and remain readable by the legacy loader. */
+    if (model_save(&model, legacy_path) != MODEL_SUCCESS ||
+        load_and_release(legacy_path) != BUNDLE_NOT_BUNDLE) {
+        fprintf(stderr, "legacy artifact detection failed\n");
+        failed = 1;
+        goto cleanup;
+    }
+    neural_model_t legacy = {0};
+    if (model_load(&legacy, legacy_path) != MODEL_SUCCESS ||
+        legacy.total_param_count != model.total_param_count ||
+        memcmp(legacy.params, model.params,
+               model.total_param_count * sizeof(float)) != 0) {
+        fprintf(stderr, "legacy artifact no longer loads\n");
+        failed = 1;
+    }
+    model_free(&legacy);
+
+    /* Retained x86-64 little-endian fixture representing the exact
+     * host-native layout written before bundle support. Designated bytes
+     * keep it independent of the current legacy writer implementation. */
+    const uint16_t endian_probe = 1;
+    if (sizeof(size_t) == 8 && sizeof(float) == 4 &&
+        *(const uint8_t *)&endian_probe == 1) {
+        static const uint8_t release_fixture[152] = {
+            [0] = 1, [8] = 1, [16] = 1, [24] = 1, [32] = 1,
+            [40] = 7, [46] = 0x80, [47] = 0x3f, [48] = 24,
+        };
+        if (!write_blob(legacy_path, release_fixture, sizeof(release_fixture))) {
+            failed = 1;
+            goto cleanup;
+        }
+        neural_model_t fixture_model = {0};
+        if (load_and_release(legacy_path) != BUNDLE_NOT_BUNDLE ||
+            model_load(&fixture_model, legacy_path) != MODEL_SUCCESS ||
+            fixture_model.vocab_size != 1 || fixture_model.embedding_dim != 1 ||
+            fixture_model.num_heads != 1 || fixture_model.num_layers != 1 ||
+            fixture_model.max_seq_len != 1 || fixture_model.total_param_count != 24 ||
+            fixture_model.training_steps != 7 || fixture_model.current_loss != 1.0f) {
+            fprintf(stderr, "retained legacy release fixture no longer loads\n");
+            failed = 1;
+        }
+        model_free(&fixture_model);
+    }
+
+cleanup:
+    free(baseline);
+    bpe_tokens_free(&original_tokens);
+    bpe_tokens_free(&loaded_tokens);
+    bpe_encoder_free(&encoder);
+    model_free(&model);
+    remove(bundle_path);
+    remove(corrupt_path);
+    remove(legacy_path);
+    printf("\n%s\n", failed ? "MODEL BUNDLE CHECK FAILED" : "MODEL BUNDLE CHECK PASSED");
+    return failed ? 1 : 0;
+}

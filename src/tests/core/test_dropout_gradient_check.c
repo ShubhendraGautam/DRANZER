@@ -25,7 +25,7 @@
 #define DROPOUT_RATE 0.3f
 
 static float forward_loss(neural_model_t *model, uint32_t *tokens, size_t seq_len, uint32_t target) {
-    srand(MASK_SEED);
+    model_seed_rng(model, MASK_SEED);
     float logits[VOCAB];
     model_forward(model, tokens, seq_len, logits);
 
@@ -69,7 +69,7 @@ static int check_param(const char *name, float *param, uint32_t *tokens, size_t 
     float numerical_grad = (loss_plus - loss_minus) / (2.0f * EPS);
 
     model->learning_rate = LR;
-    srand(MASK_SEED);
+    model_seed_rng(model, MASK_SEED);
     model_train_step(model, tokens, target, seq_len);
     float new_value = *param;
     float analytical_grad = (original - new_value) / LR;

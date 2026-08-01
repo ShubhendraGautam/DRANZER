@@ -19,6 +19,21 @@ model_errors_t model_train_step(neural_model_t *model,
                                 uint32_t target_id,
                                 size_t seq_len);
 
+/* Add one example's backward pass to model->grads without changing any
+ * parameter, optimizer, scheduler, or metric state. Call
+ * model_zero_gradients() once at the beginning of an accumulation cycle. */
+model_errors_t model_accumulate_gradients(neural_model_t *model,
+                                          uint32_t *token_ids,
+                                          uint32_t target_id,
+                                          size_t seq_len,
+                                          float *out_loss);
+
+/* Average the accumulated gradients over sample_count, perform one
+ * optimizer update, and record average_loss as one optimizer-step metric. */
+model_errors_t model_apply_accumulated_gradients(neural_model_t *model,
+                                                  size_t sample_count,
+                                                  float average_loss);
+
 /**
  * Get predicted next token
  * @param model: The neural model

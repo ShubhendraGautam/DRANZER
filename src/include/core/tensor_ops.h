@@ -2,6 +2,7 @@
 #define TENSOR_OPS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Low-level numeric primitives shared across the model: matmul, softmax,
  * layer norm, ReLU, dropout, positional encoding. None of these know about
@@ -33,7 +34,10 @@ static inline float relu_derivative(float x) {
     return x > 0.0f ? 1.0f : 0.0f;
 }
 
-/* Matrix multiplication with cache blocking for improved locality.
+/* Matrix multiplication with cache blocking and a contiguous inner output
+ * loop for locality and portable compiler vectorization. The measured
+ * default tile is 64; developers can compare another positive size by
+ * defining DRANZER_MATMUL_BLOCK_SIZE at build time.
  * C (m x n) = A (m x k) @ B (k x n). Zeroes C first.
  *
  * Parallelized over (ii, jj) row/col blocks when built with OMP=1: each
@@ -44,7 +48,12 @@ static inline float relu_derivative(float x) {
  * threads; collapsing ii and jj together gives up to
  * ceil(m/BLOCK_SIZE)*ceil(n/BLOCK_SIZE) independent tasks instead. */
 void matrix_multiply(float *restrict A, float *restrict B, float *restrict C,
-                      size_t m, size_t k, size_t n);
+                     size_t m, size_t k, size_t n);
+
+/* Portable unblocked reference, kept independently selectable as optimized
+ * CPU kernels are introduced. */
+void matrix_multiply_scalar(const float *A, const float *B, float *C,
+                            size_t m, size_t k, size_t n);
 
 /* Backprop through C = A @ B (A: m x k, B: k x n, C: m x n).
  * Accumulates (+=) into dA; caller must zero dA first for a fresh gradient.
@@ -91,6 +100,10 @@ void layer_norm_backward(float *dL_dout, float *restrict xhat, float *restrict s
  * treat pos_embed as uninitialized in that case - it is not touched). */
 int compute_positional_encoding(float *pos_embed, size_t seq_len, size_t embedding_dim);
 
+/* Compute one sinusoidal row for an absolute position. */
+int compute_positional_encoding_at(float *pos_embed, size_t position,
+                                   size_t embedding_dim);
+
 /* Inverted dropout, one row (seq_len positions x `size` elements each).
  * When is_training is false or rate <= 0, this is a no-op identity (mask
  * left as all-ones so dropout_backward stays a correct no-op too). When
@@ -99,6 +112,11 @@ int compute_positional_encoding(float *pos_embed, size_t seq_len, size_t embeddi
  * unchanged - this is what lets inference skip dropout entirely without
  * rescaling. `mask_out` caches the 1.0/0.0 keep-mask for backward. */
 void dropout_forward(float *x, float *mask_out, size_t total_size, float rate, int is_training);
+
+/* Dropout using an explicit xorshift64* RNG state. Training uses this
+ * variant so checkpoints can resume the exact future mask sequence. */
+void dropout_forward_rng(float *x, float *mask_out, size_t total_size, float rate,
+                         int is_training, uint64_t *rng_state);
 
 /* Backprop through dropout_forward: dL_dx *= mask / (1 - rate), in place.
  * Must be called with the same `rate` used in the matching forward call. */

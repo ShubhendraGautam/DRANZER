@@ -14,10 +14,11 @@
 #include <string.h>
 #include <math.h>
 
-model_errors_t model_train_step(neural_model_t *model,
-                                uint32_t *token_ids,
-                                uint32_t target_id,
-                                size_t seq_len) {
+model_errors_t model_accumulate_gradients(neural_model_t *model,
+                                          uint32_t *token_ids,
+                                          uint32_t target_id,
+                                          size_t seq_len,
+                                          float *out_loss) {
 
     if (!model || !token_ids || target_id >= model->vocab_size) {
         return MODEL_INVALID_INPUT;
@@ -44,8 +45,10 @@ model_errors_t model_train_step(neural_model_t *model,
     memcpy(grad_logits, logits, model->vocab_size * sizeof(float));
     grad_logits[target_id] -= 1.0f; // Gradient for cross-entropy
 
-    /* ---- Backward pass ---- */
-    model_zero_gradients(model);
+    /* ---- Backward pass ----
+     * Gradients are added to the existing flat buffer. The caller decides
+     * where a minibatch/accumulation cycle begins by zeroing once, then
+     * applies the averaged result with model_apply_accumulated_gradients(). */
 
     float *last_hidden = &model->cache_hidden[model->num_layers][(seq_len - 1) * embedding_dim];
 
@@ -146,6 +149,20 @@ model_errors_t model_train_step(neural_model_t *model,
         }
     }
 
+    if (out_loss) *out_loss = loss;
+    return MODEL_SUCCESS;
+}
+
+model_errors_t model_apply_accumulated_gradients(neural_model_t *model,
+                                                  size_t sample_count,
+                                                  float average_loss) {
+    if (!model || sample_count == 0) return MODEL_INVALID_INPUT;
+
+    float inverse_count = 1.0f / (float)sample_count;
+    for (size_t i = 0; i < model->total_param_count; i++) {
+        model->grads[i] *= inverse_count;
+    }
+
     /* ---- Optimizer step (SGD or AdamW, with optional grad-norm clipping) ---- */
     model_errors_t opt_rc = model_optimizer_step(model);
     if (opt_rc != MODEL_SUCCESS) {
@@ -156,30 +173,46 @@ model_errors_t model_train_step(neural_model_t *model,
     gpu_matmul_invalidate_weights();
 
     model->training_steps++;
+    model->current_loss = average_loss;
 
     /* Phase 2: Update learning metrics */
     if (model->metrics.history_size < model->metrics.history_capacity) {
-        model->metrics.loss_history[model->metrics.history_size] = loss;
+        model->metrics.loss_history[model->metrics.history_size] = average_loss;
         model->metrics.history_size++;
     }
 
-    if (loss < model->metrics.best_loss) {
-        model->metrics.best_loss = loss;
+    if (average_loss < model->metrics.best_loss) {
+        model->metrics.best_loss = average_loss;
         model->metrics.steps_without_improvement = 0;
     } else {
         model->metrics.steps_without_improvement++;
     }
 
-    if (loss > model->metrics.worst_loss) {
-        model->metrics.worst_loss = loss;
+    if (average_loss > model->metrics.worst_loss) {
+        model->metrics.worst_loss = average_loss;
     }
 
-    model->metrics.avg_loss = (model->metrics.avg_loss * (model->training_steps - 1) + loss) / model->training_steps;
+    model->metrics.avg_loss =
+        (model->metrics.avg_loss * (model->training_steps - 1) + average_loss) /
+        model->training_steps;
 
     /* LR schedule (warmup+cosine if configured, else plateau decay) for the *next* step. */
     model_lr_schedule_step(model);
 
     return MODEL_SUCCESS;
+}
+
+model_errors_t model_train_step(neural_model_t *model,
+                                uint32_t *token_ids,
+                                uint32_t target_id,
+                                size_t seq_len) {
+    if (!model) return MODEL_INVALID_INPUT;
+    model_zero_gradients(model);
+    float loss = 0.0f;
+    model_errors_t rc = model_accumulate_gradients(
+        model, token_ids, target_id, seq_len, &loss);
+    if (rc != MODEL_SUCCESS) return rc;
+    return model_apply_accumulated_gradients(model, 1, loss);
 }
 
 /* Predict next token */

@@ -4,6 +4,12 @@
 #include "byte_pair_encoding.h"
 #include <stdio.h>
 
+typedef struct {
+    uint64_t fingerprint;
+    size_t byte_count;
+    size_t chunk_count;
+} tokenizer_corpus_stats_t;
+
 typedef enum {
     TOKENIZER_SUCCESS = 0,
     TOKENIZER_FILE_NOT_FOUND,
@@ -27,6 +33,9 @@ typedef struct {
  */
 bpe_encoder_t* tokenizer_create_encoder(size_t vocab_size);
 
+/** Create the current tokenizer mode with PAD/UNK/BOS/EOS reservations. */
+bpe_encoder_t* tokenizer_create_special_encoder(size_t vocab_size);
+
 /** Free an encoder returned by tokenizer_create_encoder/load_encoder. */
 void tokenizer_free_encoder(bpe_encoder_t *encoder);
 
@@ -36,6 +45,17 @@ tokenizer_errors_t tokenizer_load_encoder(const char *filename, bpe_encoder_t **
 
 /** Derive the default sidecar path: "<model path>.tokenizer". */
 tokenizer_errors_t tokenizer_default_path(const char *model_path, char *output, size_t output_size);
+
+/**
+ * Train an encoder during one streaming corpus pass, collect deterministic
+ * FNV-1a corpus statistics, and freeze the resulting vocabulary.
+ */
+tokenizer_errors_t tokenizer_train_encoder_file(bpe_encoder_t *encoder, const char *filename,
+                                                 tokenizer_corpus_stats_t *out_stats);
+
+/** Compute the same corpus statistics without modifying an encoder. */
+tokenizer_errors_t tokenizer_fingerprint_file(const char *filename,
+                                               tokenizer_corpus_stats_t *out_stats);
 
 /**
  * Tokenizes a text string using BPE.

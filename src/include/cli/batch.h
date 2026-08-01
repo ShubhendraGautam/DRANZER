@@ -15,6 +15,7 @@ typedef struct {
     size_t *sequence_lengths;    // Length of each sequence
     size_t batch_size;           // Number of sequences in batch
     size_t current_idx;          // Current position for iteration
+    size_t max_seq_len;          // Capacity of each token sequence
 } batch_t;
 
 /**
@@ -49,6 +50,10 @@ int batch_has_data(const batch_t *batch);
  * Get size of batch
  */
 size_t batch_get_size(const batch_t *batch);
+
+/* Deterministic in-place Fisher-Yates permutation of the populated
+ * examples. This RNG is local to the batch and never consumes model RNG. */
+void batch_shuffle(batch_t *batch, uint64_t seed);
 
 /**
  * Reset batch for reuse
