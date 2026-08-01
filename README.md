@@ -1,5 +1,8 @@
 # DRANZER — A Transformer Built From Scratch in C
 
+[![CI](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/ci.yml/badge.svg)](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/ci.yml)
+[![Nightly](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/nightly.yml/badge.svg)](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/nightly.yml)
+
 DRANZER is a decoder-only transformer language model implemented entirely in C - no ML framework,
 no autodiff library, no GPU SDK required to build or run it. Every piece of the standard deep
 learning stack is hand-written and independently verified rather than assumed correct: multi-head
@@ -443,6 +446,25 @@ cd src
 make test
 ```
 Builds and runs every file in `src/tests/` (each is an independent, focused check - see Project Structure above for what each one verifies) and exits non-zero if any fail. This is the project's correctness backstop: with hand-rolled backprop and no autodiff to lean on, a subtly wrong backward pass would otherwise produce a model that trains without actually learning correctly.
+
+### Continuous Integration
+
+GitHub Actions runs the complete build and test suite with both GCC and Clang on every push and
+pull request. The `Nightly` workflow also runs every day at 02:17 UTC (and can be started manually)
+with AddressSanitizer, GCC/OpenMP, and the size-optimized build; it builds and smoke-tests the CLI
+and GPU capability probe as well. GPU correctness tests self-skip on hosted runners without CUDA
+hardware, so they still run normally on any future GPU-backed runner. Dependabot checks weekly for
+updates to the actions used by these workflows.
+
+The same checks can be reproduced locally from the repository root:
+
+```bash
+make -C src clean all test CC=gcc
+make -C src clean all test CC=clang
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 make -C src clean all test CC=clang ASAN=1
+make -C src clean all test CC=gcc OMP=1
+make -C src clean all test bench gpu-probe CC=clang SIZE=1
+```
 
 ### Benchmarking
 

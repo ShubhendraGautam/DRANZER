@@ -1,0 +1,65 @@
+name: Nightly
+
+on:
+  schedule:
+    # 02:17 UTC avoids the high-contention top of the hour.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  address-sanitizer:
+    name: AddressSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and test with AddressSanitizer
+        run: make -C src clean all test CC=clang ASAN=1
+
+  openmp:
+    name: GCC with OpenMP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and test the parallel code paths
+        run: make -C src clean all test CC=gcc OMP=1
+
+  size-and-tools:
+    name: Size build and tool smoke tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and test the size-optimized configuration
+        run: make -C src clean all test bench gpu-probe CC=clang SIZE=1
+
+      - name: Smoke-test the command-line interface
+        run: ./src/app.out --help
+
+      - name: Smoke-test the hardware probe
+        run: ./src/gpu_probe.out
