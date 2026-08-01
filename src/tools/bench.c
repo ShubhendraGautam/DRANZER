@@ -79,6 +79,66 @@ static double bench_inference(neural_model_t *model, const bench_config_t *cfg, 
     return per_token_ms;
 }
 
+/* Compare the old full-prefix decode path with incremental decoding over
+ * the last few positions of a full context. Prompt prefill is excluded
+ * from both timings: this isolates steady-state per-token decode cost,
+ * which is exactly what the KV cache is intended to reduce. */
+static void bench_kv_decode(neural_model_t *model, const bench_config_t *cfg) {
+    size_t decode_steps = cfg->max_seq_len < 8 ? cfg->max_seq_len : 8;
+    size_t prefill_len = cfg->max_seq_len - decode_steps;
+    if (prefill_len == 0) {
+        prefill_len = 1;
+        decode_steps = cfg->max_seq_len - 1;
+    }
+    if (decode_steps == 0) return;
+
+    uint32_t *tokens = malloc(cfg->max_seq_len * sizeof(uint32_t));
+    float *logits = malloc(cfg->vocab_size * sizeof(float));
+    if (!tokens || !logits) {
+        free(tokens);
+        free(logits);
+        printf("  KV-cache decode benchmark: allocation failed\n");
+        return;
+    }
+    for (size_t i = 0; i < cfg->max_seq_len; i++) {
+        tokens[i] = (uint32_t)((i * 43 + 11) % cfg->vocab_size);
+    }
+
+    model->is_training = 0;
+    model_forward(model, tokens, cfg->max_seq_len, logits); /* warm up */
+
+    double full_t0 = now_sec();
+    for (size_t pos = prefill_len; pos < cfg->max_seq_len; pos++) {
+        model_forward(model, tokens, pos + 1, logits);
+    }
+    double full_ms = 1000.0 * (now_sec() - full_t0) / (double)decode_steps;
+
+    model_kv_cache_t cache = {0};
+    if (model_kv_cache_init(&cache, model) != MODEL_SUCCESS) {
+        free(tokens);
+        free(logits);
+        printf("  KV-cache decode benchmark: cache allocation failed\n");
+        return;
+    }
+    for (size_t i = 0; i < prefill_len; i++) {
+        model_forward_token(model, &cache, tokens[i], logits);
+    }
+
+    double cached_t0 = now_sec();
+    for (size_t pos = prefill_len; pos < cfg->max_seq_len; pos++) {
+        model_forward_token(model, &cache, tokens[pos], logits);
+    }
+    double cached_ms = 1000.0 * (now_sec() - cached_t0) / (double)decode_steps;
+
+    printf("  autoregressive decode (last %zu positions, prefill excluded):\n", decode_steps);
+    printf("    full-prefix %.3f ms/token   KV-cache %.3f ms/token   speedup %.2fx\n",
+           full_ms, cached_ms, full_ms / cached_ms);
+
+    model_kv_cache_free(&cache);
+    free(tokens);
+    free(logits);
+}
+
 /* GPU forward dispatch only touches model_forward's matmuls (see
  * transformer.c) - the backward pass and optimizer step inside
  * model_train_step stay CPU-only regardless of model->use_gpu, so this
@@ -148,6 +208,7 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer, in
 
     bench_result_t r;
     r.inference_ms_per_token = bench_inference(&model, cfg, infer_iters);
+    bench_kv_decode(&model, cfg);
     r.training_ms_per_step = bench_training(&model, cfg, train_iters);
 
     long rss_after = peak_rss_kb();

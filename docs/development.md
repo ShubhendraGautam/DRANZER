@@ -28,6 +28,9 @@ tests and returns a nonzero status if any build or test fails.
 | `test_adam_convergence.c` | AdamW convergence and lazy moment allocation |
 | `test_lr_schedule.c` | Warmup, cosine decay, and minimum learning rate |
 | `test_serialization_roundtrip.c` | Identical logits before and after save/load |
+| `test_kv_cache.c` | Incremental logits versus full-prefix logits at every position |
+| `test_sampling.c` | Greedy/top-k behavior and correct top-p candidate selection |
+| `test_tokenizer_serialization.c` | Learned vocabulary, encoding, and decoding round-trip |
 | `test_gpu_matmul.c` | GPU matmul versus CPU reference |
 | `test_gpu_model_forward.c` | Full GPU-dispatched forward pass versus CPU |
 | `test_gpu_weight_cache.c` | Correct cache invalidation after weight changes |
@@ -85,11 +88,24 @@ The benchmark runs representative tiny, small, and medium model configurations. 
 - peak resident memory;
 - full-context inference latency and throughput;
 - training-step latency and throughput;
+- full-prefix versus KV-cached autoregressive decode latency;
 - CPU and, when available, GPU execution.
 
 Results append to `bench_results.csv`, which is intentionally ignored by Git because measurements
 from different machines are not directly comparable. Use a stable machine, compiler, thread count,
 and power state for before/after performance work.
+
+The initial single-threaded GCC measurement on an Intel i5-11320H showed the following steady-state
+decode results (last eight context positions, prompt prefill excluded):
+
+| Model tier | Full-prefix | KV cache | Speedup |
+|---|---:|---:|---:|
+| tiny/default | 0.171 ms/token | 0.011 ms/token | 15.80× |
+| small | 4.493 ms/token | 0.111 ms/token | 40.42× |
+| medium | 419.839 ms/token | 6.207 ms/token | 67.64× |
+
+Treat these as a reproducible example, not a cross-machine promise; `bench.out` reports the same
+comparison for the machine on which it runs.
 
 For an OpenMP comparison:
 

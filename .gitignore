@@ -23,6 +23,7 @@ src/bench_results.csv
 
 # Generated files
 *.pth
+*.tokenizer
 *.ckpt
 dranzer.pth
 checkpoints/

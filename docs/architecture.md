@@ -47,6 +47,18 @@ feed-forward layers, residual branches, dropout, embeddings, and the output proj
 gradient tests protect this path from implementations that appear to train but use incorrect
 derivatives.
 
+## Incremental generation
+
+Generation uses `model_forward_token()` instead of running `model_forward()` over the growing
+prefix. A `model_kv_cache_t` stores every layer's projected keys and values. For a new position the
+runtime computes one query/key/value row, attends over cached rows, and advances one hidden state
+through the stack.
+
+Prompt processing fills the cache once. Subsequent decode work grows linearly with the cached
+context for attention, while transformer projections and feed-forward layers process only the new
+token. `test_kv_cache.c` compares logits from this path against full-prefix logits at every
+position.
+
 ## Parameter and activation memory
 
 All trainable parameters live in one contiguous `params` allocation. Gradients use an identical
@@ -102,7 +114,7 @@ operations, layer normalization, softmax, optimizer, and tokenizer remain on the
 | `core/metrics.c` | Loss history and running metrics |
 | `cli/main.c` | Train, infer, and generate modes |
 | `cli/tokenizer.c` | Adapter around the BPE utility library |
-| `cli/sampling.c` | Greedy, top-k, top-p, and beam-search helpers |
+| `cli/sampling.c` | Temperature, greedy, top-k, top-p, and beam-search helpers |
 | `backends/gpu/gpu_cuda.c` | Minimal dynamically loaded CUDA Driver API wrapper |
 | `backends/gpu/gpu_matmul.c` | Hand-written PTX matmul and device-side caches |
 | `tools/bench.c` | Model-size and throughput benchmark |
@@ -114,10 +126,10 @@ Headers live under `src/include/` and mirror the source hierarchy. External call
 
 - Fixed sinusoidal positional encodings
 - ReLU feed-forward network with width `4 × embedding_dim`
-- Full-context generation without a KV cache
+- KV-cached generation bounded by a fixed maximum sequence length
 - Last-position next-token prediction
 - Linux-focused runtime and hardware probing
 - Optional NVIDIA-only GPU acceleration for forward matmuls
 
-These constraints keep the code inspectable. They are also the clearest extension points for KV
-caching, alternate activations, additional backends, and GPU-resident training.
+These constraints keep the code inspectable. They are also the clearest extension points for
+sliding context windows, alternate activations, additional backends, and GPU-resident training.

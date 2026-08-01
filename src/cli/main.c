@@ -15,6 +15,7 @@
 #include "cli/checkpoint.h"
 #include "cli/cli.h"
 #include "cli/stream.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,17 +34,100 @@ int mode_train(const cli_args_t *args);
 int mode_infer(const cli_args_t *args);
 int mode_generate(const cli_args_t *args);
 
+/* The release build uses -ffast-math, under which isfinite() and even
+ * value != value may be optimized on the assumption that NaNs cannot
+ * occur. Inspecting the IEEE-754 exponent bits keeps CLI validation
+ * reliable for values returned by strtof/atof. */
+static int float_is_finite(float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return (bits & UINT32_C(0x7f800000)) != UINT32_C(0x7f800000);
+}
+
+static int resolve_tokenizer_path(const cli_args_t *args, char *path, size_t path_size) {
+    if (args->tokenizer_path[0]) {
+        int written = snprintf(path, path_size, "%s", args->tokenizer_path);
+        return written >= 0 && (size_t)written < path_size ? 0 : -1;
+    }
+    return tokenizer_default_path(args->model_path, path, path_size) == TOKENIZER_SUCCESS ? 0 : -1;
+}
+
+static bpe_encoder_t *load_model_tokenizer(const cli_args_t *args, size_t model_vocab_size) {
+    char tokenizer_path[1024];
+    if (resolve_tokenizer_path(args, tokenizer_path, sizeof(tokenizer_path)) != 0) {
+        fprintf(stderr, "Error: Tokenizer path is too long\n");
+        return NULL;
+    }
+
+    bpe_encoder_t *encoder = NULL;
+    tokenizer_errors_t rc = tokenizer_load_encoder(tokenizer_path, &encoder);
+    if (rc == TOKENIZER_FILE_NOT_FOUND) {
+        if (args->tokenizer_path[0]) {
+            fprintf(stderr, "Error: Explicit tokenizer sidecar %s was not found\n", tokenizer_path);
+            return NULL;
+        }
+        /* Models written before tokenizer persistence have no sidecar.
+         * Retain a usable byte-level fallback instead of breaking them. */
+        fprintf(stderr,
+                "Warning: Tokenizer sidecar %s was not found; using the legacy byte vocabulary.\n",
+                tokenizer_path);
+        return tokenizer_create_encoder(model_vocab_size);
+    }
+    if (rc != TOKENIZER_SUCCESS) {
+        fprintf(stderr, "Error: Tokenizer sidecar %s is invalid or unreadable (code: %d)\n",
+                tokenizer_path, rc);
+        return NULL;
+    }
+    if (encoder->max_vocab_size != model_vocab_size) {
+        fprintf(stderr, "Error: Tokenizer/model vocabulary mismatch (%zu vs %zu)\n",
+                encoder->max_vocab_size, model_vocab_size);
+        tokenizer_free_encoder(encoder);
+        return NULL;
+    }
+
+    printf("   Tokenizer loaded from %s (%zu learned tokens)\n",
+           tokenizer_path, encoder->vocab_size);
+    return encoder;
+}
+
 int main(int argc, char *argv[]) {
     cli_args_t args;
     
     /* Parse command-line arguments */
-    cli_parse(argc, argv, &args);
+    if (cli_parse(argc, argv, &args) != 0) {
+        fprintf(stderr, "Error: Failed to parse command-line arguments\n");
+        return 2;
+    }
     
     /* Handle help flag */
     if (args.help) {
         cli_print_help(argv[0]);
         return 0;
     }
+
+    if ((args.mode == MODE_INFER || args.mode == MODE_GENERATE) &&
+        args.sampling_strategy == SAMPLING_TOPK && args.top_k <= 0) {
+        fprintf(stderr, "Error: --top-k must be greater than zero\n");
+        return 2;
+    }
+    if ((args.mode == MODE_INFER || args.mode == MODE_GENERATE) &&
+        args.sampling_strategy == SAMPLING_TOPP &&
+        (!float_is_finite(args.top_p) || args.top_p <= 0.0f || args.top_p > 1.0f)) {
+        fprintf(stderr, "Error: --top-p must be greater than zero and at most one\n");
+        return 2;
+    }
+    if ((args.mode == MODE_INFER || args.mode == MODE_GENERATE) &&
+        (!float_is_finite(args.temperature) ||
+         args.temperature < 0.0f || args.temperature > 2.0f)) {
+        fprintf(stderr, "Error: --temperature must be between zero and two\n");
+        return 2;
+    }
+    if (args.mode == MODE_GENERATE && args.generate_length < 0) {
+        fprintf(stderr, "Error: --length must not be negative\n");
+        return 2;
+    }
+
+    srand(args.seed);
     
     /* Enable debug if requested */
     if (args.debug) {
@@ -90,7 +174,7 @@ int mode_train(const cli_args_t *args) {
     stream_reader_t *stream = stream_reader_create(args->input_file, STREAM_CHUNK_SIZE);
     if (stream == NULL) {
         fprintf(stderr, "Error: Failed to open file for streaming\n");
-        bpe_encoder_free(encoder);
+        tokenizer_free_encoder(encoder);
         return 1;
     }
     
@@ -101,7 +185,7 @@ int mode_train(const cli_args_t *args) {
     if (token_stream == NULL) {
         fprintf(stderr, "Error: Failed to create token stream\n");
         stream_reader_free(stream);
-        bpe_encoder_free(encoder);
+        tokenizer_free_encoder(encoder);
         return 1;
     }
     
@@ -117,7 +201,7 @@ int mode_train(const cli_args_t *args) {
         fprintf(stderr, "Error: Model initialization failed (code: %d)\n", init_rc);
         token_stream_free(token_stream);
         stream_reader_free(stream);
-        bpe_encoder_free(encoder);
+        tokenizer_free_encoder(encoder);
         return 1;
     }
 
@@ -302,6 +386,17 @@ int mode_train(const cli_args_t *args) {
         fprintf(stderr, "   ✗ Save failed (code: %d)\n", save_rc);
     }
 
+    char tokenizer_path[1024];
+    int tokenizer_saved = 0;
+    if (resolve_tokenizer_path(args, tokenizer_path, sizeof(tokenizer_path)) != 0) {
+        fprintf(stderr, "   ✗ Tokenizer path is too long\n");
+    } else if (tokenizer_save_encoder(encoder, tokenizer_path) != TOKENIZER_SUCCESS) {
+        fprintf(stderr, "   ✗ Failed to save tokenizer to %s\n", tokenizer_path);
+    } else {
+        printf("   ✓ Tokenizer saved to %s\n", tokenizer_path);
+        tokenizer_saved = 1;
+    }
+
     /* ===== STEP 6: Configuration ===== */
     printf("[6] Saving configuration...\n");
     config_t config;
@@ -320,11 +415,11 @@ int mode_train(const cli_args_t *args) {
     model_free(&model);
     token_stream_free(token_stream);
     stream_reader_free(stream);
-    bpe_encoder_free(encoder);
+    tokenizer_free_encoder(encoder);
     printf("   ✓ Resources freed\n\n");
 
     printf("=== Training Complete ===\n");
-    return 0;
+    return save_rc == MODEL_SUCCESS && tokenizer_saved ? 0 : 1;
 }
 
 /* ===== INFERENCE MODE ===== */
@@ -354,30 +449,59 @@ int mode_infer(const cli_args_t *args) {
 
     printf("[2] Tokenizing prompt: \"%s\"\n", args->prompt);
     
-    /* Create encoder for inference */
-    bpe_encoder_t *encoder = tokenizer_create_encoder(model.vocab_size);
+    bpe_encoder_t *encoder = load_model_tokenizer(args, model.vocab_size);
+    if (!encoder) {
+        model_free(&model);
+        return 1;
+    }
     bpe_tokens_t tokens = {0};
-    bpe_encode(encoder, args->prompt, strlen(args->prompt), &tokens);
+    if (bpe_encode(encoder, args->prompt, strlen(args->prompt), &tokens) != BPE_SUCCESS) {
+        fprintf(stderr, "Error: Failed to encode prompt\n");
+        model_free(&model);
+        tokenizer_free_encoder(encoder);
+        return 1;
+    }
     
     printf("   Encoded to %zu tokens\n", tokens.token_count);
 
     printf("[3] Running inference...\n");
     
     if (tokens.token_count > 0) {
-        uint32_t predicted = model_predict_next_token(&model, tokens.token_ids, tokens.token_count);
+        size_t context_len = tokens.token_count;
+        uint32_t *context = tokens.token_ids;
+        if (context_len > model.max_seq_len) {
+            context += context_len - model.max_seq_len;
+            context_len = model.max_seq_len;
+            printf("   Prompt truncated to the last %zu tokens\n", context_len);
+        }
+
+        int was_training = model.is_training;
+        model.is_training = 0;
+        model_errors_t forward_rc = model_forward(&model, context, context_len, model.ws_logits);
+        model.is_training = was_training;
+        if (forward_rc != MODEL_SUCCESS) {
+            fprintf(stderr, "Error: Model forward pass failed (code: %d)\n", forward_rc);
+            model_free(&model);
+            tokenizer_free_encoder(encoder);
+            free(tokens.token_ids);
+            return 1;
+        }
+        uint32_t predicted = sample_next_token(model.ws_logits, model.vocab_size,
+                                               args->sampling_strategy, args->temperature,
+                                               (size_t)args->top_k, args->top_p);
         printf("   Predicted next token: %u\n", predicted);
         printf("   ✓ Inference complete\n\n");
     } else {
         fprintf(stderr, "Error: Failed to encode prompt\n");
         model_free(&model);
-        bpe_encoder_free(encoder);
+        tokenizer_free_encoder(encoder);
         free(tokens.token_ids);
         return 1;
     }
 
     /* Cleanup */
     model_free(&model);
-    bpe_encoder_free(encoder);
+    tokenizer_free_encoder(encoder);
     free(tokens.token_ids);
     
     return 0;
@@ -407,10 +531,20 @@ int mode_generate(const cli_args_t *args) {
 
     printf("[2] Tokenizing prompt: \"%s\"\n", args->prompt);
     
-    /* Create encoder */
-    bpe_encoder_t *encoder = tokenizer_create_encoder(model.vocab_size);
+    bpe_encoder_t *encoder = load_model_tokenizer(args, model.vocab_size);
+    if (!encoder) {
+        model_free(&model);
+        return 1;
+    }
     bpe_tokens_t tokens = {0};
-    bpe_encode(encoder, args->prompt, strlen(args->prompt), &tokens);
+    if (bpe_encode(encoder, args->prompt, strlen(args->prompt), &tokens) != BPE_SUCCESS ||
+        tokens.token_count == 0) {
+        fprintf(stderr, "Error: Failed to encode prompt\n");
+        model_free(&model);
+        tokenizer_free_encoder(encoder);
+        free(tokens.token_ids);
+        return 1;
+    }
     
     printf("   Seed: %zu tokens\n", tokens.token_count);
 
@@ -420,24 +554,71 @@ int mode_generate(const cli_args_t *args) {
            args->sampling_strategy == SAMPLING_TOPK ? "top-k" : "top-p");
     
     /* Generate tokens */
-    uint32_t *generated = malloc((tokens.token_count + args->generate_length) * sizeof(uint32_t));
+    uint32_t *generated = malloc(model.max_seq_len * sizeof(uint32_t));
     if (!generated) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         model_free(&model);
-        bpe_encoder_free(encoder);
+        tokenizer_free_encoder(encoder);
         free(tokens.token_ids);
         return 1;
     }
     
-    /* Copy seed tokens */
-    memcpy(generated, tokens.token_ids, tokens.token_count * sizeof(uint32_t));
-    size_t current_len = tokens.token_count;
-    
-    /* Generate new tokens */
-    for (int i = 0; i < args->generate_length && current_len < model.max_seq_len; i++) {
-        /* Simple greedy generation for demo */
-        uint32_t next_token = model_predict_next_token(&model, generated, current_len);
+    size_t prompt_len = tokens.token_count;
+    const uint32_t *prompt_tokens = tokens.token_ids;
+    if (prompt_len > model.max_seq_len) {
+        prompt_tokens += prompt_len - model.max_seq_len;
+        prompt_len = model.max_seq_len;
+        printf("   Prompt truncated to the last %zu tokens\n", prompt_len);
+    }
+    memcpy(generated, prompt_tokens, prompt_len * sizeof(uint32_t));
+    size_t current_len = prompt_len;
+
+    model_kv_cache_t kv_cache = {0};
+    model_errors_t cache_rc = model_kv_cache_init(&kv_cache, &model);
+    if (cache_rc != MODEL_SUCCESS) {
+        fprintf(stderr, "Error: Failed to allocate KV cache (code: %d)\n", cache_rc);
+        free(generated);
+        model_free(&model);
+        tokenizer_free_encoder(encoder);
+        free(tokens.token_ids);
+        return 1;
+    }
+
+    for (size_t i = 0; i < prompt_len; i++) {
+        if (model_forward_token(&model, &kv_cache, generated[i], model.ws_logits) != MODEL_SUCCESS) {
+            fprintf(stderr, "Error: Failed to prime KV cache\n");
+            model_kv_cache_free(&kv_cache);
+            free(generated);
+            model_free(&model);
+            tokenizer_free_encoder(encoder);
+            free(tokens.token_ids);
+            return 1;
+        }
+    }
+
+    size_t available = model.max_seq_len - current_len;
+    size_t requested = args->generate_length > 0 ? (size_t)args->generate_length : 0;
+    size_t new_token_count = requested < available ? requested : available;
+    if (new_token_count < requested) {
+        printf("   Generation capped at %zu new tokens by max_seq_len=%zu\n",
+               new_token_count, model.max_seq_len);
+    }
+
+    for (size_t i = 0; i < new_token_count; i++) {
+        uint32_t next_token = sample_next_token(model.ws_logits, model.vocab_size,
+                                                args->sampling_strategy, args->temperature,
+                                                (size_t)args->top_k, args->top_p);
         generated[current_len++] = next_token;
+        if (i + 1 < new_token_count &&
+            model_forward_token(&model, &kv_cache, next_token, model.ws_logits) != MODEL_SUCCESS) {
+            fprintf(stderr, "Error: Incremental forward pass failed\n");
+            model_kv_cache_free(&kv_cache);
+            free(generated);
+            model_free(&model);
+            tokenizer_free_encoder(encoder);
+            free(tokens.token_ids);
+            return 1;
+        }
     }
     
     printf("   Generated %zu total tokens\n", current_len);
@@ -464,9 +645,10 @@ int mode_generate(const cli_args_t *args) {
     }
 
     /* Cleanup */
+    model_kv_cache_free(&kv_cache);
     free(generated);
     model_free(&model);
-    bpe_encoder_free(encoder);
+    tokenizer_free_encoder(encoder);
     free(tokens.token_ids);
     
     return 0;

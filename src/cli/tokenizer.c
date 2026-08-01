@@ -21,6 +21,47 @@ bpe_encoder_t* tokenizer_create_encoder(size_t vocab_size) {
     return encoder;
 }
 
+void tokenizer_free_encoder(bpe_encoder_t *encoder) {
+    if (!encoder) return;
+    bpe_encoder_free(encoder);
+    free(encoder);
+}
+
+tokenizer_errors_t tokenizer_save_encoder(const bpe_encoder_t *encoder, const char *filename) {
+    if (!encoder || !filename) return TOKENIZER_INVALID_INPUT;
+    bpe_errors_t rc = bpe_encoder_save(encoder, filename);
+    if (rc == BPE_SUCCESS) return TOKENIZER_SUCCESS;
+    if (rc == BPE_IO_ERROR) return TOKENIZER_IO_ERROR;
+    if (rc == BPE_FORMAT_ERROR) return TOKENIZER_FORMAT_ERROR;
+    return rc == BPE_ALLOCATION_FAILURE ? TOKENIZER_ALLOCATION_FAILURE : TOKENIZER_INVALID_INPUT;
+}
+
+tokenizer_errors_t tokenizer_load_encoder(const char *filename, bpe_encoder_t **out_encoder) {
+    if (!filename || !out_encoder) return TOKENIZER_INVALID_INPUT;
+    *out_encoder = NULL;
+
+    bpe_encoder_t *encoder = malloc(sizeof(*encoder));
+    if (!encoder) return TOKENIZER_ALLOCATION_FAILURE;
+
+    bpe_errors_t rc = bpe_encoder_load(encoder, filename);
+    if (rc != BPE_SUCCESS) {
+        free(encoder);
+        if (rc == BPE_IO_ERROR) return TOKENIZER_FILE_NOT_FOUND;
+        if (rc == BPE_FORMAT_ERROR) return TOKENIZER_FORMAT_ERROR;
+        return rc == BPE_ALLOCATION_FAILURE ? TOKENIZER_ALLOCATION_FAILURE : TOKENIZER_INVALID_INPUT;
+    }
+
+    *out_encoder = encoder;
+    return TOKENIZER_SUCCESS;
+}
+
+tokenizer_errors_t tokenizer_default_path(const char *model_path, char *output, size_t output_size) {
+    if (!model_path || !output || output_size == 0) return TOKENIZER_INVALID_INPUT;
+    int written = snprintf(output, output_size, "%s.tokenizer", model_path);
+    if (written < 0 || (size_t)written >= output_size) return TOKENIZER_INVALID_INPUT;
+    return TOKENIZER_SUCCESS;
+}
+
 tokenizer_errors_t tokenizer_tokenize(bpe_encoder_t *encoder, const char *text, bpe_tokens_t *output) {
     if (encoder == NULL || text == NULL || output == NULL) {
         return TOKENIZER_INVALID_INPUT;
@@ -94,4 +135,3 @@ tokenizer_errors_t tokenizer_detokenize(bpe_encoder_t *encoder, const uint32_t *
 
     return TOKENIZER_SUCCESS;
 }
-

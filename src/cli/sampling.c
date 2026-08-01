@@ -22,6 +22,13 @@ static int compare_prob_desc(const void *a, const void *b) {
     return (prob_a < prob_b) ? 1 : (prob_a > prob_b) ? -1 : 0;
 }
 
+static float random_unit(void) {
+    /* RAND_MAX itself is a possible result, so divide in double by one
+     * more than RAND_MAX to produce [0, 1) without float-rounding the
+     * integer constant up to 2^31. */
+    return (float)((double)rand() / ((double)RAND_MAX + 1.0));
+}
+
 /* Greedy sampling: select highest probability token */
 uint32_t sample_greedy(float *logits, size_t vocab_size) {
     if (!logits || vocab_size == 0) return 0;
@@ -61,7 +68,7 @@ uint32_t sample_topk(float *logits, size_t vocab_size, size_t k) {
     qsort(pairs, vocab_size, sizeof(prob_idx_t), compare_prob_desc);
     
     /* Compute probabilities only for top-k */
-    float best_prob = pairs[k-1].prob;
+    float best_prob = pairs[0].prob;
     float sum = 0.0f;
     for (size_t i = 0; i < k; i++) {
         float prob = expf(pairs[i].prob - best_prob);
@@ -70,7 +77,7 @@ uint32_t sample_topk(float *logits, size_t vocab_size, size_t k) {
     }
     
     /* Sample from top-k with fast reciprocal division */
-    float r = (float)rand() / RAND_MAX * sum;
+    float r = random_unit() * sum;
     float acc = 0.0f;
     uint32_t selected = pairs[0].idx;
     
@@ -122,31 +129,31 @@ uint32_t sample_topp(float *logits, size_t vocab_size, float p) {
     
     /* Find cutoff point for nucleus */
     float cumsum = 0.0f;
-    size_t cutoff = 0;
+    size_t candidate_count = vocab_size;
     float inv_sum = 1.0f / sum_all;
     
     for (size_t i = 0; i < vocab_size; i++) {
         cumsum += exp_probs[i] * inv_sum;
-        if (cumsum > p) {
-            cutoff = i;
+        if (cumsum >= p) {
+            candidate_count = i + 1;
             break;
         }
     }
-    
-    if (cutoff == 0) cutoff = 1; /* At least keep top-1 */
+
+    if (candidate_count == 0) candidate_count = 1;
     
     /* Compute nucleus sum from cached exp values */
     float nucleus_sum = 0.0f;
-    for (size_t i = 0; i <= cutoff; i++) {
+    for (size_t i = 0; i < candidate_count; i++) {
         nucleus_sum += exp_probs[i];
     }
     
     /* Sample from nucleus using normalized probabilities */
-    float r = (float)rand() / RAND_MAX * nucleus_sum;
+    float r = random_unit() * nucleus_sum;
     float acc = 0.0f;
     uint32_t selected = pairs[0].idx;
     
-    for (size_t i = 0; i <= cutoff; i++) {
+    for (size_t i = 0; i < candidate_count; i++) {
         acc += exp_probs[i];
         if (acc >= r) {
             selected = pairs[i].idx;
@@ -157,9 +164,36 @@ uint32_t sample_topp(float *logits, size_t vocab_size, float p) {
     free(exp_probs);
     
     free(pairs);
-    DEBUG_PRINT("Top-p (p=%.2f) sampling selected token %u from %zu candidates\n", p, selected, cutoff + 1);
+    DEBUG_PRINT("Top-p (p=%.2f) sampling selected token %u from %zu candidates\n", p, selected, candidate_count);
     
     return selected;
+}
+
+uint32_t sample_next_token(float *logits, size_t vocab_size,
+                           sampling_strategy_t strategy, float temperature,
+                           size_t top_k, float top_p) {
+    if (!logits || vocab_size == 0) return 0;
+
+    if (strategy == SAMPLING_GREEDY || temperature <= 0.0f) {
+        return sample_greedy(logits, vocab_size);
+    }
+
+    float inv_temperature = 1.0f / temperature;
+    for (size_t i = 0; i < vocab_size; i++) {
+        logits[i] *= inv_temperature;
+    }
+
+    if (strategy == SAMPLING_TOPK) {
+        if (top_k == 0) return sample_greedy(logits, vocab_size);
+        return sample_topk(logits, vocab_size, top_k);
+    }
+    if (strategy == SAMPLING_TOPP) {
+        if (top_p <= 0.0f || top_p > 1.0f) {
+            return sample_greedy(logits, vocab_size);
+        }
+        return sample_topp(logits, vocab_size, top_p);
+    }
+    return sample_greedy(logits, vocab_size);
 }
 
 /* Initialize beam search. On allocation failure, returns a beam_search_t

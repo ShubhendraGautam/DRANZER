@@ -144,16 +144,16 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # "unavailable" if no NVIDIA driver is present - see
 # tests/gpu/test_gpu_matmul.c's self-skip. Needs -ldl.
 TEST_MODEL_OBJ = core/model.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/serialization.o core/metrics.o \
-                 backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o
-TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/tpu/test_*.c)
+                 backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/sampling.o cli/tokenizer.o
+TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/cli/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/tpu/test_*.c)
 TEST_BINS = $(TEST_SRCS:.c=.out)
 
-test: $(TEST_MODEL_OBJ)
+test: $(LIB) $(TEST_MODEL_OBJ)
 	@failed=0; \
 	for src in $(TEST_SRCS); do \
 		bin=$${src%.c}.out; \
 		echo "=== $$src ==="; \
-		$(CC) $(CFLAGS) $$src $(TEST_MODEL_OBJ) $(LDFLAGS) -ldl -o $$bin || { echo "BUILD FAILED: $$src"; failed=1; continue; }; \
+		$(CC) $(CFLAGS) $$src $(TEST_MODEL_OBJ) -L$(LIB_DIR) -l$(LIB_NAME) $(LDFLAGS) -ldl -o $$bin || { echo "BUILD FAILED: $$src"; failed=1; continue; }; \
 		./$$bin || failed=1; \
 		rm -f $$bin; \
 		echo ""; \

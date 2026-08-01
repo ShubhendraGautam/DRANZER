@@ -22,6 +22,7 @@ typedef struct {
     /* Input/Output */
     char input_file[512];
     char model_path[512];
+    char tokenizer_path[512]; /* empty = derive <model_path>.tokenizer */
     char checkpoint_dir[512];
     
     /* Model architecture hyperparameters. Defaults match this project's
@@ -55,6 +56,7 @@ typedef struct {
     int top_k;
     float top_p;
     float temperature;
+    unsigned int seed;
     
     /* Flags */
     int use_gpu;

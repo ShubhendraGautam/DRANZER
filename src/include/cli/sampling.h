@@ -55,6 +55,15 @@ uint32_t sample_topk(float *logits, size_t vocab_size, size_t k);
 uint32_t sample_topp(float *logits, size_t vocab_size, float p);
 
 /**
+ * Apply temperature and the selected decoding strategy to one logits row.
+ * `logits` may be modified as scratch. A non-positive temperature selects
+ * greedily; positive temperatures are used by top-k/top-p sampling.
+ */
+uint32_t sample_next_token(float *logits, size_t vocab_size,
+                           sampling_strategy_t strategy, float temperature,
+                           size_t top_k, float top_p);
+
+/**
  * Initialize beam search
  * @param beam_width: Number of beams to maintain
  * @param initial_token: Starting token

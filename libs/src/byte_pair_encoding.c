@@ -9,8 +9,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <limits.h>
 
 #define MAX_PAIR_LEN 256
+#define BPE_FILE_MAGIC "DRNZBPE1"
+#define BPE_FILE_MAGIC_SIZE 8
 
 typedef struct {
     char pair[MAX_PAIR_LEN];
@@ -90,31 +94,34 @@ static pair_frequency_t* count_pair_frequencies(char **tokens, size_t token_coun
 
 /* Merge the highest frequency pair in the token sequence */
 static void merge_pair(char **tokens, size_t *token_count, const char *pair) {
-    size_t pair_len1 = strlen(tokens[0]);
-    for (size_t i = 0; i < *token_count; i++) {
-        int token_len = strlen(tokens[i]);
-        if (i < *token_count - 1) {
-            int next_len = strlen(tokens[i + 1]);
-            char combined[MAX_PAIR_LEN];
-            snprintf(combined, MAX_PAIR_LEN, "%s%s", tokens[i], tokens[i + 1]);
+    size_t i = 0;
+    while (i + 1 < *token_count) {
+        char combined[MAX_PAIR_LEN];
+        snprintf(combined, MAX_PAIR_LEN, "%s%s", tokens[i], tokens[i + 1]);
 
-            if (strcmp(combined, pair) == 0) {
-                tokens[i] = realloc(tokens[i], MAX_PAIR_LEN);
-                strncpy(tokens[i], combined, MAX_PAIR_LEN - 1);
-                tokens[i][MAX_PAIR_LEN - 1] = '\0';
+        if (strcmp(combined, pair) == 0) {
+            /* Every working token is allocated at MAX_PAIR_LEN, so no
+             * resize is needed here. Keeping the allocation stable also
+             * avoids losing the original pointer if realloc fails. */
+            strncpy(tokens[i], combined, MAX_PAIR_LEN - 1);
+            tokens[i][MAX_PAIR_LEN - 1] = '\0';
 
-                // Free the token we're about to remove
-                free(tokens[i + 1]);
-                
-                // Shift remaining tokens
-                for (size_t j = i + 1; j < *token_count - 1; j++) {
-                    tokens[j] = tokens[j + 1];
-                }
-                (*token_count)--;
-                i--; // Check this position again in case of multiple merges
+            free(tokens[i + 1]);
+            for (size_t j = i + 1; j + 1 < *token_count; j++) {
+                tokens[j] = tokens[j + 1];
             }
+            (*token_count)--;
+            continue; /* Recheck this position for another adjacent merge. */
         }
+        i++;
     }
+}
+
+static int insert_token_id(bpe_encoder_t *encoder, const char *token, uint32_t id) {
+    int token_rc = hashmap_insert(&encoder->token_to_id, token, &id, HASHMAP_VALUE_TYPE_INT);
+    int id_rc = hashmap_insert(&encoder->id_to_token, token, &id, HASHMAP_VALUE_TYPE_INT);
+    return (token_rc == HASHMAP_SUCCESS || token_rc == HASHMAP_KEY_EXISTS) &&
+           (id_rc == HASHMAP_SUCCESS || id_rc == HASHMAP_KEY_EXISTS);
 }
 
 bpe_errors_t bpe_encoder_new(bpe_encoder_t *encoder, size_t max_vocab_size) {
@@ -123,12 +130,17 @@ bpe_errors_t bpe_encoder_new(bpe_encoder_t *encoder, size_t max_vocab_size) {
         return BPE_INVALID_INPUT;
     }
 
-    if (hashmap_new(&encoder->token_to_id, 1000) != HASHMAP_SUCCESS ||
-        hashmap_new(&encoder->id_to_token, 1000) != HASHMAP_SUCCESS) {
+    memset(encoder, 0, sizeof(*encoder));
+
+    if (hashmap_new(&encoder->token_to_id, 1000) != HASHMAP_SUCCESS) {
+        return BPE_ALLOCATION_FAILURE;
+    }
+    if (hashmap_new(&encoder->id_to_token, 1000) != HASHMAP_SUCCESS) {
+        hashmap_free(&encoder->token_to_id);
         return BPE_ALLOCATION_FAILURE;
     }
 
-    encoder->tokens = malloc(sizeof(bpe_token_t) * max_vocab_size);
+    encoder->tokens = calloc(max_vocab_size, sizeof(bpe_token_t));
     if (encoder->tokens == NULL) {
         hashmap_free(&encoder->token_to_id);
         hashmap_free(&encoder->id_to_token);
@@ -143,23 +155,21 @@ bpe_errors_t bpe_encoder_new(bpe_encoder_t *encoder, size_t max_vocab_size) {
         char byte_char[2] = {(char)i, '\0'};
         encoder->tokens[encoder->vocab_size].token = malloc(2);
         if (encoder->tokens[encoder->vocab_size].token == NULL) {
+            bpe_encoder_free(encoder);
             return BPE_ALLOCATION_FAILURE;
         }
         strcpy(encoder->tokens[encoder->vocab_size].token, byte_char);
         encoder->tokens[encoder->vocab_size].id = encoder->vocab_size;
         encoder->tokens[encoder->vocab_size].frequency = 0;
 
-        // Allocate ID values on heap for safe storage in hashmap
-        uint32_t *id_ptr = malloc(sizeof(uint32_t));
-        if (id_ptr == NULL) {
+        /* hashmap_insert duplicates scalar values, so a stack value is
+         * sufficient. The old heap temporary leaked once per token. */
+        uint32_t id = (uint32_t)encoder->vocab_size;
+        encoder->vocab_size++;
+        if (!insert_token_id(encoder, byte_char, id)) {
+            bpe_encoder_free(encoder);
             return BPE_ALLOCATION_FAILURE;
         }
-        *id_ptr = encoder->vocab_size;
-        
-        hashmap_insert(&encoder->token_to_id, byte_char, id_ptr, HASHMAP_VALUE_TYPE_INT);
-        hashmap_insert(&encoder->id_to_token, byte_char, id_ptr, HASHMAP_VALUE_TYPE_INT);
-
-        encoder->vocab_size++;
     }
 
     return BPE_SUCCESS;
@@ -216,16 +226,13 @@ bpe_errors_t bpe_train(bpe_encoder_t *encoder, const char *input, size_t input_l
         new_token->id = encoder->vocab_size;
         new_token->frequency = best_pair.frequency;
 
-        // Allocate ID values on heap for safe storage in hashmap
-        uint32_t *id_ptr = malloc(sizeof(uint32_t));
-        if (id_ptr == NULL) {
+        uint32_t id = (uint32_t)encoder->vocab_size;
+        if (!insert_token_id(encoder, new_token->token, id)) {
+            free(new_token->token);
+            new_token->token = NULL;
             free(pairs);
             return BPE_ALLOCATION_FAILURE;
         }
-        *id_ptr = encoder->vocab_size;
-        
-        hashmap_insert(&encoder->token_to_id, new_token->token, id_ptr, HASHMAP_VALUE_TYPE_INT);
-        hashmap_insert(&encoder->id_to_token, new_token->token, id_ptr, HASHMAP_VALUE_TYPE_INT);
 
         encoder->vocab_size++;
 
@@ -343,6 +350,119 @@ bpe_errors_t bpe_decode(bpe_encoder_t *encoder, const uint32_t *token_ids, size_
     return BPE_SUCCESS;
 }
 
+static int write_exact(FILE *file, const void *data, size_t size) {
+    return fwrite(data, 1, size, file) == size;
+}
+
+static int read_exact(FILE *file, void *data, size_t size) {
+    return fread(data, 1, size, file) == size;
+}
+
+bpe_errors_t bpe_encoder_save(const bpe_encoder_t *encoder, const char *filename) {
+    if (!encoder || !filename || !encoder->tokens || encoder->vocab_size < 256 ||
+        encoder->vocab_size > encoder->max_vocab_size) {
+        return BPE_INVALID_INPUT;
+    }
+
+    FILE *file = fopen(filename, "wb");
+    if (!file) return BPE_IO_ERROR;
+
+    uint64_t max_vocab_size = (uint64_t)encoder->max_vocab_size;
+    uint64_t vocab_size = (uint64_t)encoder->vocab_size;
+    int ok = write_exact(file, BPE_FILE_MAGIC, BPE_FILE_MAGIC_SIZE) &&
+             write_exact(file, &max_vocab_size, sizeof(max_vocab_size)) &&
+             write_exact(file, &vocab_size, sizeof(vocab_size));
+
+    /* Byte tokens 0..255 are deterministic and need not be repeated in
+     * the file. Merge order is the array order from index 256 onward. */
+    for (size_t i = 256; ok && i < encoder->vocab_size; i++) {
+        size_t token_len = strlen(encoder->tokens[i].token);
+        if (token_len == 0 || token_len >= MAX_PAIR_LEN || token_len > UINT32_MAX) {
+            ok = 0;
+            break;
+        }
+        uint32_t stored_len = (uint32_t)token_len;
+        int32_t frequency = (int32_t)encoder->tokens[i].frequency;
+        ok = write_exact(file, &stored_len, sizeof(stored_len)) &&
+             write_exact(file, &frequency, sizeof(frequency)) &&
+             write_exact(file, encoder->tokens[i].token, token_len);
+    }
+
+    if (fclose(file) != 0) ok = 0;
+    return ok ? BPE_SUCCESS : BPE_IO_ERROR;
+}
+
+bpe_errors_t bpe_encoder_load(bpe_encoder_t *encoder, const char *filename) {
+    if (!encoder || !filename) return BPE_INVALID_INPUT;
+
+    FILE *file = fopen(filename, "rb");
+    if (!file) return BPE_IO_ERROR;
+
+    char magic[BPE_FILE_MAGIC_SIZE];
+    uint64_t stored_max_vocab = 0;
+    uint64_t stored_vocab = 0;
+    if (!read_exact(file, magic, sizeof(magic)) ||
+        memcmp(magic, BPE_FILE_MAGIC, sizeof(magic)) != 0 ||
+        !read_exact(file, &stored_max_vocab, sizeof(stored_max_vocab)) ||
+        !read_exact(file, &stored_vocab, sizeof(stored_vocab)) ||
+        stored_max_vocab < 256 || stored_vocab < 256 ||
+        stored_vocab > stored_max_vocab || stored_max_vocab > SIZE_MAX) {
+        fclose(file);
+        return BPE_FORMAT_ERROR;
+    }
+
+    bpe_errors_t rc = bpe_encoder_new(encoder, (size_t)stored_max_vocab);
+    if (rc != BPE_SUCCESS) {
+        fclose(file);
+        return rc;
+    }
+
+    for (size_t i = 256; i < (size_t)stored_vocab; i++) {
+        uint32_t token_len = 0;
+        int32_t frequency = 0;
+        if (!read_exact(file, &token_len, sizeof(token_len)) ||
+            !read_exact(file, &frequency, sizeof(frequency)) ||
+            token_len == 0 || token_len >= MAX_PAIR_LEN) {
+            rc = BPE_FORMAT_ERROR;
+            break;
+        }
+
+        bpe_token_t *token = &encoder->tokens[i];
+        token->token = malloc((size_t)token_len + 1);
+        if (!token->token) {
+            rc = BPE_ALLOCATION_FAILURE;
+            break;
+        }
+        /* Count the slot as owned immediately so error cleanup also frees
+         * a token whose payload turns out to be truncated. */
+        encoder->vocab_size = i + 1;
+        if (!read_exact(file, token->token, token_len)) {
+            rc = BPE_FORMAT_ERROR;
+            break;
+        }
+        token->token[token_len] = '\0';
+        token->id = (uint32_t)i;
+        token->frequency = (int)frequency;
+
+        uint32_t id = (uint32_t)i;
+        if (!insert_token_id(encoder, token->token, id)) {
+            rc = BPE_ALLOCATION_FAILURE;
+            break;
+        }
+    }
+
+    if (rc == BPE_SUCCESS) {
+        int trailing = fgetc(file);
+        if (trailing != EOF) rc = BPE_FORMAT_ERROR;
+    }
+    fclose(file);
+
+    if (rc != BPE_SUCCESS) {
+        bpe_encoder_free(encoder);
+    }
+    return rc;
+}
+
 bpe_errors_t bpe_encoder_free(bpe_encoder_t *encoder) {
     if (encoder == NULL) {
         return BPE_NULL_ENCODER;
@@ -355,6 +475,7 @@ bpe_errors_t bpe_encoder_free(bpe_encoder_t *encoder) {
             }
         }
         free(encoder->tokens);
+        encoder->tokens = NULL;
     }
 
     hashmap_free(&encoder->token_to_id);
@@ -379,4 +500,3 @@ bpe_errors_t bpe_tokens_free(bpe_tokens_t *tokens) {
     tokens->token_count = 0;
     return BPE_SUCCESS;
 }
-

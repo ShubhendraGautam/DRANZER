@@ -19,6 +19,7 @@ toolkit required.
 - Multi-layer, causal, multi-head self-attention with residual connections and layer normalization
 - Full hand-written backpropagation, checked against numerical gradients
 - AdamW, SGD, gradient clipping, dropout, and warmup/cosine learning-rate scheduling
+- Persisted BPE vocabularies and KV-cached greedy/top-k/top-p decoding (15.8–67.6× faster in the bundled CPU benchmark)
 - Portable CPU execution plus optional OpenMP parallelism
 - Optional NVIDIA GPU offload with persistent buffers and a validated weight cache
 - Built-in tests, benchmarks, hardware probing, serialization, and GitHub Actions CI
@@ -37,7 +38,7 @@ make
 
 # Use the saved model
 ./app.out infer --prompt "hello"
-./app.out generate --prompt "hello" --length 20
+./app.out generate --prompt "hello" --length 20 --sampling topp --top-p 0.9 --seed 42
 ```
 
 Run `./app.out --help` for the complete CLI.
@@ -81,10 +82,10 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 ## Scope
 
 DRANZER is an educational and systems-research implementation, not a production LLM runtime.
-Generation currently uses greedy decoding and reprocesses the context without a KV cache. GPU
-offload is NVIDIA-only and covers forward-pass matrix multiplications; training's backward pass
-remains on the CPU. These boundaries are intentional and documented so performance claims stay
-honest.
+Generation uses a per-layer KV cache but remains bounded by the model's fixed maximum sequence
+length. GPU offload is NVIDIA-only and covers forward-pass matrix multiplications; training's
+backward pass remains on the CPU. These boundaries are intentional and documented so performance
+claims stay honest.
 
 ## License
 

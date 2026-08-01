@@ -66,9 +66,10 @@ A more explicit configuration:
   --total-steps 5000
 ```
 
-Training saves the final model to the path selected by `--model` and writes `config.json` in the
-current working directory. The checkpoint utility module exists, but periodic checkpoint saving
-and resume are not currently wired into the training CLI.
+Training saves the final model to the path selected by `--model`, the learned BPE vocabulary to
+`<model>.tokenizer`, and `config.json` in the current working directory. Use `--tokenizer FILE` to
+choose a different sidecar path. The checkpoint utility module exists, but periodic checkpoint
+saving and resume are not currently wired into the training CLI.
 
 ### Training and model options
 
@@ -76,6 +77,7 @@ and resume are not currently wired into the training CLI.
 |---|---:|---|
 | `--input FILE` | `../tests/chunk_aa` | Training corpus; passing it explicitly is recommended |
 | `--model FILE` | `dranzer.pth` | Model output/input path |
+| `--tokenizer FILE` | `<model>.tokenizer` | Learned BPE vocabulary path |
 | `--epochs N` | `1` | Number of passes over the input |
 | `--batch-size N` | `1` | Token stream batch setting |
 | `--learning-rate LR` | `0.001` | Initial learning rate |
@@ -102,8 +104,9 @@ Inference loads a trained model and predicts its next token:
 ./app.out infer --model dranzer.pth --prompt "Once upon a time"
 ```
 
-`--prompt` is required. Add `--gpu` to request GPU matmul; the runtime falls back to CPU when a
-usable CUDA device is not present.
+`--prompt` is required. Inference loads the tokenizer sidecar associated with the model and applies
+the selected decoding strategy to the next-token logits. Add `--gpu` to request GPU matmul; the
+runtime falls back to CPU when a usable CUDA device is not present.
 
 ## Generation
 
@@ -111,13 +114,34 @@ usable CUDA device is not present.
 ./app.out generate \
   --model dranzer.pth \
   --prompt "In the beginning" \
-  --length 20
+  --length 20 \
+  --sampling topp \
+  --top-p 0.9 \
+  --temperature 0.8 \
+  --seed 42
 ```
 
 Generation stops when it reaches either `--length` new tokens or the model's `--max-seq-len`
-capacity. The CLI accepts `--sampling`, `--top-k`, `--top-p`, and `--temperature`, and the sampling
-helpers are implemented, but the current generation loop selects tokens greedily. Treat the extra
-sampling flags as reserved until they are connected to that loop.
+capacity. Prompt tokens are processed once to populate a per-layer KV cache; each subsequent step
+computes only the new query, key, value, and hidden state.
+
+Available decoding strategies:
+
+| Strategy | Command | Behavior |
+|---|---|---|
+| Greedy | `--sampling greedy` | Always choose the largest logit |
+| Top-k | `--sampling topk --top-k 10` | Sample from the `k` highest logits |
+| Top-p | `--sampling topp --top-p 0.9` | Sample from the smallest nucleus reaching probability `p` |
+
+`--temperature` scales non-greedy logits before sampling. Lower positive values sharpen the
+distribution; higher values flatten it. A zero value falls back to greedy decoding. `--seed`
+makes top-k and top-p runs reproducible and defaults to `1`.
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--length N` | `50` | Maximum number of new tokens |
+| `--temperature T` | `0.8` | Non-greedy logit scaling, from `0.0` to `2.0` |
+| `--seed N` | `1` | Reproducible random seed for sampling |
 
 ## General options
 
@@ -132,6 +156,7 @@ sampling flags as reserved until they are connected to that loop.
 | File | Purpose |
 |---|---|
 | `dranzer.pth` | Serialized model weights and training state |
+| `dranzer.pth.tokenizer` | Learned BPE tokens and merge order |
 | `config.json` | Saved architecture and training configuration |
 | `bench_results.csv` | Machine-local benchmark history, created by `bench.out` |
 | `gpu_capability_cache/` | Hardware probe cache, created when a GPU can be identified |

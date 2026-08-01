@@ -10,6 +10,7 @@
 #include "core/tensor_ops.h"
 #include "backends/gpu/gpu_matmul.h"
 #include "common/debug.h"
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -280,5 +281,181 @@ model_errors_t model_forward(neural_model_t *model,
         output_logits[i] += model->output_bias[i];
     }
 
+    return MODEL_SUCCESS;
+}
+
+model_errors_t model_kv_cache_init(model_kv_cache_t *cache, const neural_model_t *model) {
+    if (!cache || !model || model->num_layers == 0 || model->num_heads == 0 ||
+        model->embedding_dim == 0 || model->max_seq_len == 0) {
+        return MODEL_INVALID_INPUT;
+    }
+
+    memset(cache, 0, sizeof(*cache));
+    cache->model = model;
+    cache->capacity = model->max_seq_len;
+    cache->num_layers = model->num_layers;
+    cache->num_heads = model->num_heads;
+    cache->embedding_dim = model->embedding_dim;
+
+    size_t embedding_dim = model->embedding_dim;
+    size_t ffn_dim = embedding_dim * 4;
+    size_t cache_floats = model->max_seq_len * embedding_dim;
+
+    cache->keys = calloc(model->num_layers, sizeof(float *));
+    cache->values = calloc(model->num_layers, sizeof(float *));
+    if (!cache->keys || !cache->values) {
+        model_kv_cache_free(cache);
+        return MODEL_ALLOCATION_FAILURE;
+    }
+
+    for (size_t l = 0; l < model->num_layers; l++) {
+        cache->keys[l] = malloc(cache_floats * sizeof(float));
+        cache->values[l] = malloc(cache_floats * sizeof(float));
+        if (!cache->keys[l] || !cache->values[l]) {
+            model_kv_cache_free(cache);
+            return MODEL_ALLOCATION_FAILURE;
+        }
+    }
+
+    cache->hidden = malloc(embedding_dim * sizeof(float));
+    cache->attn_norm = malloc(embedding_dim * sizeof(float));
+    cache->query = malloc(embedding_dim * sizeof(float));
+    cache->attn_concat = malloc(embedding_dim * sizeof(float));
+    cache->attn_raw = malloc(embedding_dim * sizeof(float));
+    cache->ff_hidden = malloc(ffn_dim * sizeof(float));
+    cache->ff_raw = malloc(embedding_dim * sizeof(float));
+    cache->scores = malloc(model->num_heads * model->max_seq_len * sizeof(float));
+
+    if (!cache->hidden || !cache->attn_norm || !cache->query || !cache->attn_concat ||
+        !cache->attn_raw || !cache->ff_hidden || !cache->ff_raw || !cache->scores) {
+        model_kv_cache_free(cache);
+        return MODEL_ALLOCATION_FAILURE;
+    }
+
+    return MODEL_SUCCESS;
+}
+
+void model_kv_cache_reset(model_kv_cache_t *cache) {
+    if (cache) cache->length = 0;
+}
+
+void model_kv_cache_free(model_kv_cache_t *cache) {
+    if (!cache) return;
+    if (cache->keys) {
+        for (size_t l = 0; l < cache->num_layers; l++) free(cache->keys[l]);
+    }
+    if (cache->values) {
+        for (size_t l = 0; l < cache->num_layers; l++) free(cache->values[l]);
+    }
+    free(cache->keys);
+    free(cache->values);
+    free(cache->hidden);
+    free(cache->attn_norm);
+    free(cache->query);
+    free(cache->attn_concat);
+    free(cache->attn_raw);
+    free(cache->ff_hidden);
+    free(cache->ff_raw);
+    free(cache->scores);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cache,
+                                    size_t layer_index, size_t position) {
+    transformer_layer_t *layer = &model->layers[layer_index];
+    size_t embedding_dim = model->embedding_dim;
+    size_t num_heads = model->num_heads;
+    size_t head_dim = embedding_dim / num_heads;
+    size_t context_len = position + 1;
+
+    float *key = &cache->keys[layer_index][position * embedding_dim];
+    float *value = &cache->values[layer_index][position * embedding_dim];
+    dispatch_matmul(model, cache->hidden, layer->W_q, cache->query, 1, embedding_dim, embedding_dim);
+    dispatch_matmul(model, cache->hidden, layer->W_k, key, 1, embedding_dim, embedding_dim);
+    dispatch_matmul(model, cache->hidden, layer->W_v, value, 1, embedding_dim, embedding_dim);
+
+    memset(cache->attn_concat, 0, embedding_dim * sizeof(float));
+
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t head = 0; head < num_heads; head++) {
+        float *scores = &cache->scores[head * cache->capacity];
+        for (size_t j = 0; j < context_len; j++) {
+            float score = 0.0f;
+            const float *cached_key = &cache->keys[layer_index][j * embedding_dim];
+            for (size_t d = 0; d < head_dim; d++) {
+                size_t idx = head * head_dim + d;
+                score += cache->query[idx] * cached_key[idx];
+            }
+            scores[j] = score / sqrtf((float)head_dim);
+        }
+        softmax(scores, context_len);
+
+        for (size_t d = 0; d < head_dim; d++) {
+            size_t idx = head * head_dim + d;
+            float sum = 0.0f;
+            for (size_t j = 0; j < context_len; j++) {
+                sum += scores[j] * cache->values[layer_index][j * embedding_dim + idx];
+            }
+            cache->attn_concat[idx] = sum;
+        }
+    }
+
+    dispatch_matmul(model, cache->attn_concat, layer->W_o, cache->attn_raw,
+                    1, embedding_dim, embedding_dim);
+}
+
+model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cache,
+                                   uint32_t token_id, float *output_logits) {
+    if (!model || !cache || !output_logits || cache->model != model ||
+        cache->embedding_dim != model->embedding_dim ||
+        cache->num_layers != model->num_layers ||
+        cache->length >= cache->capacity) {
+        return MODEL_INVALID_INPUT;
+    }
+
+    size_t position = cache->length;
+    size_t embedding_dim = model->embedding_dim;
+    size_t ffn_dim = embedding_dim * 4;
+    const float epsilon = 1e-6f;
+
+    if (token_id >= model->vocab_size) token_id = 0;
+    for (size_t d = 0; d < embedding_dim; d++) {
+        cache->hidden[d] = model->token_embeddings[token_id * embedding_dim + d] +
+                           model->position_embeddings[position * embedding_dim + d];
+    }
+
+    for (size_t l = 0; l < model->num_layers; l++) {
+        transformer_layer_t *layer = &model->layers[l];
+        attention_forward_token(model, cache, l, position);
+
+        for (size_t d = 0; d < embedding_dim; d++) {
+            cache->attn_raw[d] += cache->hidden[d];
+        }
+        layer_normalize(cache->attn_raw, cache->attn_norm, embedding_dim,
+                        layer->ln_gamma_attn, layer->ln_beta_attn, epsilon);
+
+        dispatch_matmul(model, cache->attn_norm, layer->W_ff1, cache->ff_hidden,
+                        1, embedding_dim, ffn_dim);
+        for (size_t d = 0; d < ffn_dim; d++) {
+            cache->ff_hidden[d] = relu(cache->ff_hidden[d] + layer->b_ff1[d]);
+        }
+        dispatch_matmul(model, cache->ff_hidden, layer->W_ff2, cache->ff_raw,
+                        1, ffn_dim, embedding_dim);
+        for (size_t d = 0; d < embedding_dim; d++) {
+            cache->ff_raw[d] += layer->b_ff2[d] + cache->attn_norm[d];
+        }
+        layer_normalize(cache->ff_raw, cache->hidden, embedding_dim,
+                        layer->ln_gamma_ffn, layer->ln_beta_ffn, epsilon);
+    }
+
+    dispatch_matmul(model, cache->hidden, model->output_projection, output_logits,
+                    1, embedding_dim, model->vocab_size);
+    for (size_t i = 0; i < model->vocab_size; i++) {
+        output_logits[i] += model->output_bias[i];
+    }
+
+    cache->length++;
     return MODEL_SUCCESS;
 }

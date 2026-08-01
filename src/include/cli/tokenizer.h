@@ -10,6 +10,8 @@ typedef enum {
     TOKENIZER_ALLOCATION_FAILURE,
     TOKENIZER_INVALID_INPUT,
     TOKENIZER_ENCODING_ERROR,
+    TOKENIZER_IO_ERROR,
+    TOKENIZER_FORMAT_ERROR,
 } tokenizer_errors_t;
 
 typedef struct {
@@ -24,6 +26,16 @@ typedef struct {
  * @return Allocated encoder, or NULL on failure
  */
 bpe_encoder_t* tokenizer_create_encoder(size_t vocab_size);
+
+/** Free an encoder returned by tokenizer_create_encoder/load_encoder. */
+void tokenizer_free_encoder(bpe_encoder_t *encoder);
+
+/** Save/load the trained BPE vocabulary used alongside a model file. */
+tokenizer_errors_t tokenizer_save_encoder(const bpe_encoder_t *encoder, const char *filename);
+tokenizer_errors_t tokenizer_load_encoder(const char *filename, bpe_encoder_t **out_encoder);
+
+/** Derive the default sidecar path: "<model path>.tokenizer". */
+tokenizer_errors_t tokenizer_default_path(const char *model_path, char *output, size_t output_size);
 
 /**
  * Tokenizes a text string using BPE.

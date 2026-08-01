@@ -17,6 +17,7 @@ void cli_get_defaults(cli_args_t *out_args) {
     out_args->mode = MODE_TRAIN;
     strcpy(out_args->input_file, "../tests/chunk_aa");
     strcpy(out_args->model_path, "dranzer.pth");
+    out_args->tokenizer_path[0] = '\0';
     strcpy(out_args->checkpoint_dir, "checkpoints");
 
     /* Model architecture defaults - match the values this project used as
@@ -50,6 +51,7 @@ void cli_get_defaults(cli_args_t *out_args) {
     out_args->top_k = 5;
     out_args->top_p = 0.9f;
     out_args->temperature = 0.8f;
+    out_args->seed = 1;
     
     /* Flags */
     out_args->use_gpu = 0;
@@ -78,6 +80,7 @@ void cli_print_help(const char *program_name) {
     printf("  --batch-size N            Batch size (default: 1)\n");
     printf("  --learning-rate LR        Learning rate (default: 0.001)\n");
     printf("  --model FILE              Model path (default: dranzer.pth)\n");
+    printf("  --tokenizer FILE          BPE vocabulary sidecar (default: <model>.tokenizer)\n");
     printf("  --checkpoint-dir DIR      Checkpoint directory (default: checkpoints)\n");
     printf("  --checkpoint-interval N   Save checkpoint every N steps (default: 10)\n\n");
 
@@ -103,7 +106,8 @@ void cli_print_help(const char *program_name) {
     printf("  --sampling STRATEGY       Sampling: greedy, topk, topp (default: greedy)\n");
     printf("  --top-k N                 Top-k value (default: 5)\n");
     printf("  --top-p P                 Top-p value 0.0-1.0 (default: 0.9)\n");
-    printf("  --temperature T           Temperature 0.0-2.0 (default: 0.8)\n\n");
+    printf("  --temperature T           Temperature 0.0-2.0 (default: 0.8)\n");
+    printf("  --seed N                  Random seed (default: 1)\n\n");
     
     printf("GENERAL OPTIONS:\n");
     printf("  --gpu                     Offload forward-pass matmuls to a CUDA GPU if usable (see `make bench`\n");
@@ -174,6 +178,9 @@ int cli_parse(int argc, char *argv[], cli_args_t *out_args) {
         }
         else if (strcmp(arg, "--model") == 0 && i + 1 < argc) {
             strncpy(out_args->model_path, argv[++i], sizeof(out_args->model_path) - 1);
+        }
+        else if (strcmp(arg, "--tokenizer") == 0 && i + 1 < argc) {
+            strncpy(out_args->tokenizer_path, argv[++i], sizeof(out_args->tokenizer_path) - 1);
         }
         else if (strcmp(arg, "--checkpoint-dir") == 0 && i + 1 < argc) {
             strncpy(out_args->checkpoint_dir, argv[++i], sizeof(out_args->checkpoint_dir) - 1);
@@ -251,6 +258,9 @@ int cli_parse(int argc, char *argv[], cli_args_t *out_args) {
         else if (strcmp(arg, "--temperature") == 0 && i + 1 < argc) {
             out_args->temperature = atof(argv[++i]);
         }
+        else if (strcmp(arg, "--seed") == 0 && i + 1 < argc) {
+            out_args->seed = (unsigned int)strtoul(argv[++i], NULL, 10);
+        }
     }
     
     return 0;
@@ -267,6 +277,7 @@ void cli_print_args(const cli_args_t *args) {
             printf("Mode: TRAIN\n");
             printf("  Input: %s\n", args->input_file);
             printf("  Model: %s\n", args->model_path);
+            printf("  Tokenizer: %s\n", args->tokenizer_path[0] ? args->tokenizer_path : "<model>.tokenizer");
             printf("  Checkpoints: %s\n", args->checkpoint_dir);
             printf("  Architecture: vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu train_window=%zu\n",
                    args->vocab_size, args->embedding_dim, args->num_heads, args->num_layers,
@@ -289,6 +300,7 @@ void cli_print_args(const cli_args_t *args) {
         case MODE_INFER:
             printf("Mode: INFERENCE\n");
             printf("  Model: %s\n", args->model_path);
+            printf("  Tokenizer: %s\n", args->tokenizer_path[0] ? args->tokenizer_path : "<model>.tokenizer");
             printf("  Prompt: %s\n", args->prompt);
             printf("  Sampling: ");
             switch (args->sampling_strategy) {
@@ -310,9 +322,11 @@ void cli_print_args(const cli_args_t *args) {
         case MODE_GENERATE:
             printf("Mode: GENERATE\n");
             printf("  Model: %s\n", args->model_path);
+            printf("  Tokenizer: %s\n", args->tokenizer_path[0] ? args->tokenizer_path : "<model>.tokenizer");
             printf("  Prompt: %s\n", args->prompt);
             printf("  Length: %d\n", args->generate_length);
             printf("  Temperature: %.2f\n", args->temperature);
+            printf("  Seed: %u\n", args->seed);
             printf("  Sampling: ");
             switch (args->sampling_strategy) {
                 case SAMPLING_GREEDY:

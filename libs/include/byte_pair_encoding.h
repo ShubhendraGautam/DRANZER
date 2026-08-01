@@ -11,6 +11,8 @@ typedef enum {
     BPE_INVALID_INPUT,
     BPE_NULL_ENCODER,
     BPE_ENCODING_ERROR,
+    BPE_IO_ERROR,
+    BPE_FORMAT_ERROR,
 } bpe_errors_t;
 
 typedef struct {
@@ -71,6 +73,19 @@ bpe_errors_t bpe_encode(bpe_encoder_t *encoder, const char *input, size_t input_
  * @return BPE_SUCCESS on success, error code otherwise
  */
 bpe_errors_t bpe_decode(bpe_encoder_t *encoder, const uint32_t *token_ids, size_t token_count, char **output, size_t *output_len);
+
+/**
+ * Save a trained vocabulary, including merge order, to a binary sidecar.
+ * The model weights deliberately remain a separate format so existing
+ * .pth files stay readable.
+ */
+bpe_errors_t bpe_encoder_save(const bpe_encoder_t *encoder, const char *filename);
+
+/**
+ * Load a vocabulary saved by bpe_encoder_save into an uninitialized
+ * encoder. The caller owns the result and must call bpe_encoder_free.
+ */
+bpe_errors_t bpe_encoder_load(bpe_encoder_t *encoder, const char *filename);
 
 /**
  * Frees the BPE encoder and all associated resources.
