@@ -95,6 +95,44 @@ the complete suite with GCC and Clang on Ubuntu 24.04.
 - compilation of the benchmark and GPU probe;
 - CLI and hardware-probe smoke tests.
 
+`.github/workflows/performance.yml` runs nightly at 03:41 UTC and is manually dispatchable with
+custom tiers and repeat counts. It exists because a developer machine is a poor measurement
+instrument - on the project's own 2-core WSL2 workstation, repeating one unchanged benchmark six
+times spanned a factor of 1.45. A hosted runner is dedicated for the length of the job and has more
+cores, so it can answer questions a contended laptop cannot. Three jobs run:
+
+| Job | What it measures |
+|---|---|
+| Matmul kernel sweep | Every kernel and tile candidate on every model shape, per compiler |
+| Whole-model throughput | Inference, prefill, decode, training, and memory per tier, per compiler |
+| Thread scaling | One run per thread count, up to the runner's core count |
+
+Each job writes a markdown report to the GitHub step summary and uploads its raw CSV as a 90-day
+artifact, so a trend can be followed by downloading successive runs.
+
+**No absolute timing is asserted on.** Hosted runners vary by CPU model and neighbour load, so a
+committed "this must finish in X ms" threshold fails for reasons unrelated to the code. Instead
+`src/tools/perf_check.py` checks ratios between measurements taken in the same process on the same
+machine, which hold regardless of how fast that machine is:
+
+- the shipped matmul kernel must beat the portable scalar reference on every shape;
+- it must stay within 2.5× of the fastest candidate measured beside it (1.5× warns), which catches a
+  bad default without pinning a speed;
+- KV-cached decode must beat recomputing the full prefix by at least 3× (observed 10–44×);
+- every kernel must stay within numerical tolerance of the reference.
+
+Run the same checks locally against any CSV the tools produce:
+
+```bash
+cd src
+python3 tools/perf_check.py --bench bench_results_v2.csv --matmul matmul_results_v2.csv
+```
+
+`python3` is needed only for this report, not to build, test, or run anything.
+
+GPU offload is not measured in CI because hosted runners have no GPU; use
+`make gpu-latency && ./gpu_latency.out` on a machine that has one.
+
 Jobs use read-only repository permissions, pinned action revisions, concurrency controls, and
 timeouts. `.github/dependabot.yml` checks workflow actions weekly.
 
@@ -187,6 +225,12 @@ make gpu-probe
 
 The probe is a diagnostic tool, not a prerequisite. It is expected to run successfully and report
 unavailable backends on CPU-only systems. See [GPU backend](gpu.md) for its design.
+
+For the question "is GPU offload worth it here", `make gpu-latency && ./gpu_latency.out` measures
+what a single `gpu_matmul()` call costs once device buffers are resident: transfer latency at
+several sizes, an empty kernel launch, and whole calls at the shapes the model issues. Small
+models lose on the GPU because of that fixed per-call cost, not because of allocation - see
+[GPU backend](gpu.md). It exits cleanly with an explanation when no CUDA device is present.
 
 ## Adding a test
 

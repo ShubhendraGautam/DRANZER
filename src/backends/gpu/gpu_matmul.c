@@ -204,7 +204,12 @@ int gpu_matmul(const float *A, const float *B, float *C, size_t m, size_t k, siz
     const unsigned int BLOCK = 16;
     unsigned int grid_x = ((unsigned int)n + BLOCK - 1) / BLOCK;
     unsigned int grid_y = ((unsigned int)m + BLOCK - 1) / BLOCK;
-    if (gpu_cuda_launch_2d(g_ctx, grid_x, grid_y, BLOCK, BLOCK, args) != 0) return -1;
+    /* Launched without waiting: the download below runs on the same default
+     * stream, so it cannot start until this kernel has finished, and it is
+     * itself blocking. Waiting here as well cost a full extra device
+     * round-trip per matmul for nothing. A fault inside the kernel still
+     * fails the call - it surfaces as an error from that download. */
+    if (gpu_cuda_launch_2d_async(g_ctx, grid_x, grid_y, BLOCK, BLOCK, args) != 0) return -1;
 
     if (gpu_cuda_download(g_ctx, C, d_C, m * n * sizeof(float)) != 0) return -1;
 

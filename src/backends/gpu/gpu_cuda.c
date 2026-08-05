@@ -176,18 +176,28 @@ int gpu_cuda_download(gpu_cuda_ctx_t *ctx, void *host, uint64_t dptr, size_t byt
     return 0;
 }
 
-int gpu_cuda_launch_2d(gpu_cuda_ctx_t *ctx,
-                        unsigned int grid_x, unsigned int grid_y,
-                        unsigned int block_x, unsigned int block_y,
-                        void **args) {
+int gpu_cuda_launch_2d_async(gpu_cuda_ctx_t *ctx,
+                             unsigned int grid_x, unsigned int grid_y,
+                             unsigned int block_x, unsigned int block_y,
+                             void **args) {
     CUresult rc = ctx->cuLaunchKernel(ctx->kernel, grid_x, grid_y, 1, block_x, block_y, 1,
                                        0, NULL, args, NULL);
     if (rc != 0) {
         log_cuda_error(ctx, "cuLaunchKernel", rc);
         return -1;
     }
+    return 0;
+}
 
-    rc = ctx->cuCtxSynchronize();
+int gpu_cuda_launch_2d(gpu_cuda_ctx_t *ctx,
+                        unsigned int grid_x, unsigned int grid_y,
+                        unsigned int block_x, unsigned int block_y,
+                        void **args) {
+    if (gpu_cuda_launch_2d_async(ctx, grid_x, grid_y, block_x, block_y, args) != 0) {
+        return -1;
+    }
+
+    CUresult rc = ctx->cuCtxSynchronize();
     if (rc != 0) {
         log_cuda_error(ctx, "cuCtxSynchronize", rc);
         return -1;

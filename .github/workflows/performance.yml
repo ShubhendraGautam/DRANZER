@@ -1,0 +1,187 @@
+name: Performance
+
+# Nightly performance measurement on hosted runners.
+#
+# This exists because a developer laptop is a poor measurement instrument:
+# the project's own workstation is a 2-core WSL2 VM sharing its cores with an
+# editor, where repeating one unchanged benchmark six times spanned a factor
+# of 1.45. A hosted runner is not a quiet lab either, but it is dedicated for
+# the length of the job and has more cores, so it can answer questions a
+# contended laptop cannot - above all whether the code scales across threads.
+#
+# Nothing here asserts an absolute timing. Runners vary by CPU model and
+# neighbour load, so every check compares two measurements taken in the same
+# process on the same machine (see src/tools/perf_check.py). Absolute numbers
+# are recorded as artifacts for trend-watching by a human, not gates.
+#
+# No GPU is present on hosted runners, so GPU offload is not measured here;
+# use `make gpu-latency && ./gpu_latency.out` on a machine that has one.
+
+on:
+  schedule:
+    # 03:41 UTC: after the nightly correctness workflow (02:17) has finished,
+    # so the two never contend for the same runner pool minute.
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tiers:
+        description: "Model tiers to measure (space separated)"
+        default: "tiny small medium"
+      repeats:
+        description: "Timing rounds per matmul candidate"
+        default: "5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TIERS: ${{ github.event.inputs.tiers || 'tiny small medium' }}
+  REPEATS: ${{ github.event.inputs.repeats || '5' }}
+
+jobs:
+  matmul-kernels:
+    name: Matmul kernel sweep (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record the runner's hardware
+        run: |
+          echo "### Runner" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep "model name" /proc/cpuinfo | head -1 >> "$GITHUB_STEP_SUMMARY"
+          echo "cores: $(nproc)" >> "$GITHUB_STEP_SUMMARY"
+          free -h | head -2 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sweep every kernel and tile candidate
+        working-directory: src
+        run: |
+          tools/matmul_sweep.sh \
+            --compilers "${{ matrix.compiler }}" \
+            --tiers "$TIERS" \
+            --repeats "$REPEATS"
+
+      - name: Check invariants and write the report
+        working-directory: src
+        run: |
+          python3 tools/perf_check.py \
+            --matmul matmul_results_v2.csv \
+            --title "Matmul kernels (${{ matrix.compiler }})" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the raw measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: matmul-${{ matrix.compiler }}-${{ github.run_number }}
+          path: src/matmul_results_v2.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+  whole-model:
+    name: Whole-model throughput (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the benchmark
+        working-directory: src
+        run: make bench CC=${{ matrix.compiler }}
+
+      - name: Measure every tier
+        working-directory: src
+        run: |
+          for tier in $TIERS; do
+            ./bench.out --tier "$tier" --cpu-only
+          done
+
+      - name: Check invariants and write the report
+        working-directory: src
+        run: |
+          python3 tools/perf_check.py \
+            --bench bench_results_v2.csv \
+            --title "Whole-model throughput (${{ matrix.compiler }})" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the raw measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: whole-model-${{ matrix.compiler }}-${{ github.run_number }}
+          path: src/bench_results_v2.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+  thread-scaling:
+    name: Thread scaling
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build with OpenMP
+        working-directory: src
+        run: make bench CC=gcc OMP=1
+
+      - name: Measure one thread per available core
+        working-directory: src
+        # The runner decides how many cores this job actually gets, so the
+        # thread counts are derived from nproc rather than hard-coded. Each
+        # count writes its own row; perf_check.py pairs them up afterwards.
+        run: |
+          cores=$(nproc)
+          counts="1"
+          for n in 2 4 8 16; do
+            [ "$n" -le "$cores" ] && counts="$counts $n"
+          done
+          echo "runner has $cores cores; measuring threads: $counts"
+          for threads in $counts; do
+            for tier in small medium; do
+              echo "--- OMP_NUM_THREADS=$threads tier=$tier ---"
+              OMP_NUM_THREADS=$threads ./bench.out --tier "$tier" --cpu-only
+            done
+          done
+
+      - name: Check invariants and write the report
+        working-directory: src
+        run: |
+          python3 tools/perf_check.py \
+            --omp bench_results_v2.csv \
+            --title "Thread scaling" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the raw measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thread-scaling-${{ github.run_number }}
+          path: src/bench_results_v2.csv
+          if-no-files-found: warn
+          retention-days: 90

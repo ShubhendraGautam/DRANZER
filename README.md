@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/ci.yml/badge.svg)](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/ci.yml)
 [![Nightly](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/nightly.yml/badge.svg)](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/nightly.yml)
+[![Performance](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/performance.yml/badge.svg)](https://github.com/ShubhendraGautam/DRANZER/actions/workflows/performance.yml)
 
 ### A decoder-only transformer, built from scratch in C
 
@@ -73,6 +74,7 @@ make -C src clean test CC=clang ASAN=1  # memory-safety checks
 make -C src bench && ./src/bench.out     # model benchmarks
 make -C src profile CC=gcc               # frame-pointer build for perf
 make -C src gpu-probe && ./src/gpu_probe.out
+make -C src gpu-latency && ./src/gpu_latency.out  # GPU per-call cost
 ```
 
 GPU tests compile on every machine and self-skip when CUDA hardware is unavailable.

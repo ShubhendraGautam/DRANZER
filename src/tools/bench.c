@@ -197,8 +197,10 @@ static void csv_log(FILE *csv, const char *timestamp, const bench_config_t *cfg,
     bench_csv_field(csv, timestamp);
     fputc(',', csv);
     bench_csv_field(csv, cfg->name);
+    /* No trailing comma: bench_csv_metadata() writes its own separator
+     * before the provenance columns and terminates the row. */
     fprintf(csv, ",%zu,%zu,%zu,%zu,%zu,%s,%s,%ld,"
-                 "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,",
+                 "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f",
             cfg->vocab_size, cfg->embedding_dim, cfg->num_heads,
             cfg->num_layers, cfg->max_seq_len, optimizer_name, mode, param_floats,
             r->inference_ms_per_token, 1000.0 / r->inference_ms_per_token,
@@ -272,8 +274,9 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
 static void print_usage(const char *program) {
     printf("Usage: %s [--tier tiny|small|medium] [--scalar] [--quick]\n"
            "          [--kernel auto|scalar|rowwise|tiled|tiled_mr4] [--tile N]\n"
-           "          [--matmul-only [--sweep] [--repeats N] [--csv-path FILE]]\n\n"
+           "          [--cpu-only] [--matmul-only [--sweep] [--repeats N] [--csv-path FILE]]\n\n"
            "  --kernel/--tile   override the CPU matmul kernel and tile for the run\n"
+           "  --cpu-only        skip the GPU pass even when a CUDA device is present\n"
            "  --matmul-only     compare kernels on isolated shapes instead of whole models\n"
            "  --sweep           with --matmul-only: measure every kernel and tile candidate\n"
            "  --repeats N       with --matmul-only: timing rounds per candidate (median wins)\n"
@@ -301,6 +304,7 @@ int main(int argc, char **argv) {
     int use_scalar = 0;
     int quick = 0;
     int matmul_only = 0;
+    int cpu_only = 0;
     int sweep = 0;
     size_t repeats = 3;
     size_t tile = 0;
@@ -317,6 +321,8 @@ int main(int argc, char **argv) {
             quick = 1;
         } else if (strcmp(argv[i], "--matmul-only") == 0) {
             matmul_only = 1;
+        } else if (strcmp(argv[i], "--cpu-only") == 0) {
+            cpu_only = 1;
         } else if (strcmp(argv[i], "--sweep") == 0) {
             sweep = 1;
         } else if (strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) {
@@ -391,7 +397,10 @@ int main(int argc, char **argv) {
     printf("Built WITHOUT OpenMP - single-threaded throughout (rebuild with `make bench OMP=1 CC=gcc` to compare).\n\n");
 #endif
 
-    int gpu_available = gpu_matmul_available();
+    /* --cpu-only skips the GPU pass entirely. A CPU scaling study pays for
+     * every GPU run it does not need, and at the medium tier that doubles
+     * the wall time of the measurement. */
+    int gpu_available = !cpu_only && gpu_matmul_available();
     printf(gpu_available
            ? "CUDA GPU detected - each config runs on CPU and GPU (GPU dispatch covers model_forward's\n"
              "matmuls only - see transformer.c's dispatch_matmul() - backward stays CPU-only regardless).\n\n"
@@ -450,12 +459,14 @@ int main(int argc, char **argv) {
         int train_iters = quick ? 2 : 20;
         run_config(&configs[i], OPTIMIZER_ADAM, 0, use_scalar,
                    infer_iters, train_iters, csv, timestamp, &metadata);
-        /* GPU runs use fewer iterations: gpu_matmul() currently does a
-         * fresh alloc/upload/launch/download/free on every single call
-         * (see gpu_matmul.c) rather than reusing persistent device
-         * buffers, so per-call overhead is real and this keeps total
-         * benchmark time bounded while still measuring that overhead
-         * honestly rather than hiding it. */
+        /* GPU runs use fewer iterations to keep total benchmark time
+         * bounded. Device buffers are not the reason: gpu_matmul.c holds
+         * weights in a generation-keyed cache and reuses grown-on-demand
+         * activation/output scratch, so nothing is allocated per call. What
+         * remains per call is one activation upload, one result download,
+         * and the launch itself - on the WSL2 test system about 140 us of
+         * fixed cost regardless of matrix size (docs/gpu.md). That is real
+         * and these runs measure it rather than hide it. */
         if (gpu_available && !use_scalar) {
             run_config(&configs[i], OPTIMIZER_ADAM, 1, 0,
                        quick ? 2 : 10, quick ? 1 : 5,

@@ -247,7 +247,13 @@ reference automatically.
 - [ ] Replace repeated OpenMP entry with a measured persistent worker strategy if beneficial.
 - [ ] Add INT8 and then INT4 weight-only quantization with accuracy comparisons.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.
-- [ ] Add nightly performance-regression thresholds on stable benchmark tiers.
+- [x] Run the full benchmark nightly on hosted runners and gate on same-run performance invariants
+  (`.github/workflows/performance.yml`, `src/tools/perf_check.py`): kernel versus scalar reference,
+  shipped kernel versus the fastest candidate beside it, KV-cache benefit, and numerical tolerance.
+  Absolute timings are recorded as artifacts but never asserted on, because hosted-runner speed is
+  not reproducible across runs.
+- [ ] Add cross-run regression thresholds on stable benchmark tiers, once enough nightly artifacts
+  exist to establish what a normal run-to-run spread looks like on that runner class.
 
 Acceptance gate: each optimized path is numerically checked against the reference path and its
 speed/memory improvement is reproducible on identified hardware.

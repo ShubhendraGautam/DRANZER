@@ -5,6 +5,7 @@ src/**/*.o
 src/bench.out
 src/bench_profile.out
 src/gpu_probe.out
+src/gpu_latency.out
 src/app.out
 libs/src/*.o
 libs/libattention.a

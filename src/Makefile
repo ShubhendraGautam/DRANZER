@@ -152,6 +152,19 @@ profile:
 		$(BENCH_SRC) $(LDFLAGS) -ldl -o $(PROFILE_TARGET)
 	@echo "Profile build ready: perf record -g -- ./$(PROFILE_TARGET) --tier small"
 
+# GPU per-call latency probe: what a gpu_matmul() call costs once device
+# buffers are already resident. Links the CUDA wrapper and matmul backend
+# plus the shared benchmark provenance/timing helpers - no model code.
+GPU_LATENCY_SRC = tools/gpu_latency.c tools/bench_support.c \
+                  backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
+GPU_LATENCY_OBJ = $(GPU_LATENCY_SRC:.c=.o)
+GPU_LATENCY_TARGET = gpu_latency.out
+
+gpu-latency: $(GPU_LATENCY_TARGET)
+
+$(GPU_LATENCY_TARGET): $(GPU_LATENCY_OBJ)
+	$(CC) $(GPU_LATENCY_OBJ) $(CFLAGS) $(LDFLAGS) -ldl -o $(GPU_LATENCY_TARGET)
+
 gpu-probe: $(GPU_PROBE_TARGET)
 
 $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
@@ -188,7 +201,7 @@ test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
 	@bash tests/integration/test_resume_cli.sh ./$(TARGET)
 
 clean:
-	rm -f $(OBJ) $(BENCH_OBJ) $(GPU_PROBE_OBJ) $(TARGET) $(BENCH_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(TEST_BINS)
+	rm -f $(OBJ) $(BENCH_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(TEST_BINS)
 	$(MAKE) -C $(LIB_DIR) clean
 
-.PHONY: all clean bench profile test gpu-probe
+.PHONY: all clean bench profile test gpu-probe gpu-latency

@@ -46,11 +46,30 @@ int gpu_cuda_download(gpu_cuda_ctx_t *ctx, void *host, uint64_t dptr, size_t byt
  * convention: an array of pointers, each pointing to one kernel argument's
  * value, in the same order as the kernel's .param declarations. Blocks
  * until the kernel completes and returns 0 on success (nonzero means the
- * launch OR the kernel itself failed - e.g. an illegal memory access). */
+ * launch OR the kernel itself failed - e.g. an illegal memory access).
+ *
+ * Use this when the caller needs the kernel to have finished before it does
+ * anything else - most importantly when timing the kernel itself, which is
+ * what gpu_microbench.c does. */
 int gpu_cuda_launch_2d(gpu_cuda_ctx_t *ctx,
                         unsigned int grid_x, unsigned int grid_y,
                         unsigned int block_x, unsigned int block_y,
                         void **args);
+
+/* Same launch, without waiting for the kernel to finish. Only the launch
+ * itself is validated; a fault raised while the kernel runs is reported by
+ * the next synchronizing call on the context instead.
+ *
+ * This exists because a blocking launch immediately followed by a blocking
+ * device-to-host copy waits twice: the copy already orders itself after the
+ * kernel on the default stream. On this project's WSL2 test system that
+ * redundant cuCtxSynchronize() measured about 50 us per call against roughly
+ * 140 us of total per-call overhead - see docs/gpu.md. Only use it when a
+ * synchronizing operation on the same context provably follows. */
+int gpu_cuda_launch_2d_async(gpu_cuda_ctx_t *ctx,
+                             unsigned int grid_x, unsigned int grid_y,
+                             unsigned int block_x, unsigned int block_y,
+                             void **args);
 
 /* Wraps cuDeviceGetAttribute(), a single documented CUDA Driver API call
  * that accepts ~100 different documented CUdevice_attribute codes (max

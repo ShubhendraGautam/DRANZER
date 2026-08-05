@@ -85,6 +85,56 @@ Two tests protect this behavior:
 
 Both self-skip when a CUDA device is unavailable.
 
+## What a call still costs
+
+Because buffers are already resident, what remains per `gpu_matmul()` call is one activation
+upload, the launch, and one result download. Reproduce with:
+
+```bash
+cd src
+make gpu-latency
+./gpu_latency.out
+```
+
+Measured on the WSL2 test system below (fastest of five rounds of 200 calls), each of those is a
+driver round-trip with a latency floor that has nothing to do with how much data moves:
+
+| Operation | Cost | Effective rate |
+|---|---:|---|
+| Upload 1 KB | 53 µs | 0.02 GB/s |
+| Upload 16 KB | 38 µs | 0.43 GB/s |
+| Upload 1 MB | 258 µs | 4.06 GB/s |
+| Download 1 MB | 308 µs | 3.41 GB/s |
+| Empty kernel launch + synchronize | 51 µs | — |
+
+Small transfers are pure latency: 1 KB costs more than 16 KB. That fixed cost — roughly 100–140 µs
+per matmul — is why small models lose on the GPU no matter how good the kernel is. A medium-tier
+forward pass issues 37 matmuls, so it pays that toll 37 times.
+
+The kernel itself is not the problem. The same measurement timing whole calls:
+
+| Shape | Whole call | Achieved |
+|---|---:|---|
+| 1×256×256 (decode projection) | 98 µs | 1.3 GFLOP/s |
+| 1×256×4000 (decode output head) | 212 µs | 9.7 GFLOP/s |
+| 128×256×256 (prefill projection) | 275 µs | 61 GFLOP/s |
+| 128×256×1024 (prefill FFN up) | 652 µs | 103 GFLOP/s |
+
+At prefill shapes the GPU reaches 4–14× the CPU kernel's throughput. At single-token decode shapes
+the fixed cost swamps roughly two microseconds of actual arithmetic.
+
+One redundant round-trip was removed as a result of this measurement: the launch used to block on
+`cuCtxSynchronize()` and was then immediately followed by a blocking device-to-host copy, which
+already orders itself after the kernel on the default stream. `gpu_matmul()` now uses
+`gpu_cuda_launch_2d_async()` and lets the download do the waiting, which measured 4–18% off each
+call. Whole-model runs on this contended machine could not resolve a difference that size, so no
+model-level claim is made for it. `gpu_cuda_launch_2d()` still blocks and is what `gpu_microbench.c`
+uses, since timing a kernel requires waiting for it.
+
+The remaining overhead is structural rather than fixable in the backend: only matmul runs on the
+GPU, so activations return to host memory between every operation. Keeping them device-resident
+would require layer normalization, softmax, and attention on the device too.
+
 ## Measured crossover
 
 Historical measurements from the project's NVIDIA MX450 test system illustrate why `--gpu` is not
