@@ -190,22 +190,60 @@ GCC, Clang, OpenMP, AddressSanitizer, size-optimized, benchmark, profile, strict
 integration checks pass; the profiling binary was smoke-tested where `perf` itself was not
 installed.
 
-### T10. Profile-guided CPU matrix multiplication — ACTIVE
+### T10. Profile-guided CPU matrix multiplication — COMPLETE
 
-- [ ] Add isolated matrix-multiplication benchmark shapes representative of prompt prefill,
+- [x] Add isolated matrix-multiplication benchmark shapes representative of prompt prefill,
   single-token decode, and training.
-- [ ] Compare the existing 64×64 tiled kernel with the scalar reference across supported benchmark
+- [x] Compare the existing 64×64 tiled kernel with the scalar reference across supported benchmark
   tiers and compilers.
-- [ ] Tune loop order and tile sizes only where measurements show a repeatable improvement.
-- [ ] Record numerical error, throughput, and the hardware/build metadata for every selected path.
+- [x] Tune loop order and tile sizes only where measurements show a repeatable improvement.
+- [x] Record numerical error, throughput, and the hardware/build metadata for every selected path.
 
 Acceptance gate: the default portable CPU kernel is selected from reproducible measurements,
 outperforms the scalar reference on its target shapes without materially regressing small shapes,
 and remains within the scalar-reference tolerance.
 
-### Later runtime goals
+Completion evidence: the kernels moved into their own `core/matmul` module holding the scalar
+reference, an unblocked row-wise kernel, the previous tiled kernel, and a four-row register-blocked
+kernel, all runtime-selectable with a runtime tile size. `bench.out --matmul-only --sweep` measures
+every kernel and tile candidate on six shapes taken from live `core/transformer.c` call sites
+across all three tiers, and `tools/matmul_sweep.sh` repeats that across GCC and Clang and
+summarises the winners. Candidates are checked against the scalar reference before being timed,
+ranked by their fastest round with the median reported as a noise indicator, warmed up once, and
+interleaved so contention cannot favour one candidate; every row carries build, compiler, OS, CPU,
+core-count, and threading provenance.
+
+The measurements selected a four-row register-blocked kernel at a 256 tile, replacing the 64-tile
+kernel that had never been measured. It beats the scalar reference on all 36 measured
+(compiler, tier, shape) combinations — 1.46× worst, 4.47× geometric mean, 9.20× best — is never
+more than 1.40× off the fastest candidate for any shape, and is 1.13× faster than the previous
+default in geometric mean. Whole-model GCC runs improve by 1.06–1.31× across inference, prefill,
+decode, and training; the matching Clang whole-model runs did not reproduce across three batches on
+this contended machine and are documented as inconclusive rather than claimed. Two shape-split
+policies were measured and rejected for not holding across compilers or exceeding session noise;
+`matmul_select()` therefore returns one kernel for every shape, which `test_matmul_kernels.c` pins
+along with kernel/tile equivalence over eleven shapes, six tile sizes, and every kernel. Adding
+`restrict` to the kernel signatures was itself worth 3–4× under Clang. GCC, Clang, OpenMP,
+AddressSanitizer, size-optimized, benchmark, and integration checks pass, and exact resume remains
+byte-identical. The kernels, policy, reproducibility contract, and measurement workflow are
+documented in `docs/matmul.md`.
+
+### T11. Runtime-dispatched SIMD kernels — NEXT
 
 - [ ] Add runtime-dispatched AVX2/AVX-512 and ARM NEON kernels where supported.
+- [ ] Detect CPU features at runtime so one binary stays portable across machines.
+- [ ] Extend the kernel sweep and the equivalence test to cover every dispatched kernel.
+
+Acceptance gate: dispatched kernels are numerically checked against the scalar reference on the
+same shapes as the portable kernels, selected by the same reproducible measurement workflow, and a
+binary built with them still runs correctly on a machine lacking the instruction set.
+
+T10 left the seam this needs: `matmul_select()` already resolves a shape to a kernel, kernels are
+runtime-selectable by name, and `test_matmul_kernels.c` checks every registered kernel against the
+reference automatically.
+
+### Later runtime goals
+
 - [ ] Replace repeated OpenMP entry with a measured persistent worker strategy if beneficial.
 - [ ] Add INT8 and then INT4 weight-only quantization with accuracy comparisons.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.

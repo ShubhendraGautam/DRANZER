@@ -32,6 +32,7 @@ fails.
 | `test_serialization_roundtrip.c` | Identical logits before and after save/load |
 | `test_model_bundle.c` | Canonical round-trip, corruption sweep, bounds, and legacy fixture |
 | `test_scalar_reference.c` | Tiled/full-model/cached-decode agreement with portable scalar matmul |
+| `test_matmul_kernels.c` | Every kernel and tile size versus the scalar reference, plus selection determinism and configuration validation |
 | `test_batch_behavior.c` | Bounded deterministic shuffle and batch capacity checks |
 | `test_checkpoint_resume.c` | Complete-state round-trip, continued trajectory, latest selection, and retention |
 | `test_cli_strict.c` | Unknown/missing/malformed/overflowing CLI input rejection |
@@ -120,16 +121,23 @@ and power state for before/after performance work. Each row records the exact bu
 compiler, OS/kernel/architecture, CPU model, online CPU count, OpenMP version, and maximum thread
 count alongside its measurements.
 
-To isolate the portable matrix-multiplication kernel from the rest of the model, compare it with
-the scalar reference on decode, prefill, and training shapes:
+To isolate the matrix-multiplication kernels from the rest of the model, compare them on the decode,
+prefill, and training shapes the model actually issues:
 
 ```bash
-./bench.out --matmul-only --tier small
+./bench.out --matmul-only --tier small           # scalar vs the shipped default
+./bench.out --matmul-only --sweep --repeats 5    # every kernel and tile candidate
+tools/matmul_sweep.sh                            # the same sweep across gcc and clang
 ```
 
-This mode always measures both paths, checks their output, and writes latency, GFLOP/s, speedup,
-error, iteration counts, and the same machine/build metadata to `matmul_results_v1.csv`. Use
-`--quick` only to validate the workflow; omit `--tier` to cover every model tier.
+Every candidate is checked against the scalar reference before it is timed, and each row records
+latency (fastest and median round), GFLOP/s, speedup, error, iteration counts, and the same
+machine/build metadata in `matmul_results_v2.csv`. `--kernel` and `--tile` pin a kernel for a whole
+run, including full-model runs, so a kernel choice can be judged end to end and not only in
+isolation. Use `--quick` only to validate the workflow; omit `--tier` to cover every model tier.
+
+[CPU matmul kernels](matmul.md) documents the kernel set, the selection policy, the reproducibility
+contract, and how to read a sweep — including why candidates are ranked by their fastest round.
 
 The initial single-threaded GCC measurement on an Intel i5-11320H showed the following steady-state
 decode results (last eight context positions, prompt prefill excluded):
@@ -164,9 +172,10 @@ perf report -i perf.data
 ```
 
 Use `--quick` for a smoke run, not a performance claim. Use `--scalar` to force the portable
-unblocked C matmul through the full model; omitting it selects the normal CPU dispatch path. The
-scalar path and dispatch path are compared directly by `test_scalar_reference.c`. `perf` is a Linux
-developer dependency, not a build or runtime dependency; `make profile` succeeds without it.
+unblocked C matmul through the full model; omitting it selects the normal CPU dispatch path, and
+`--kernel`/`--tile` pin a specific kernel instead. The scalar path and dispatch path are compared
+directly by `test_scalar_reference.c`. `perf` is a Linux developer dependency, not a build or
+runtime dependency; `make profile` succeeds without it.
 
 ## Hardware probing
 

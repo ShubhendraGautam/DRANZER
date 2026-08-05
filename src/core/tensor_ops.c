@@ -1,6 +1,8 @@
 /*
- * Low-level numeric primitives: matmul, softmax, layer norm, dropout,
- * positional encoding. No knowledge of neural_model_t - see tensor_ops.h.
+ * Low-level numeric primitives: softmax, layer norm, dropout, positional
+ * encoding. No knowledge of neural_model_t - see tensor_ops.h. The matmul
+ * kernels live in their own module (core/matmul.c) because they are the one
+ * primitive with several interchangeable implementations to choose between.
  */
 
 #include "core/tensor_ops.h"
@@ -9,14 +11,6 @@
 #include <string.h>
 #ifdef _OPENMP
 #include <omp.h>
-#endif
-
-#ifndef DRANZER_MATMUL_BLOCK_SIZE
-#define DRANZER_MATMUL_BLOCK_SIZE 64
-#endif
-
-#if DRANZER_MATMUL_BLOCK_SIZE < 1
-#error "DRANZER_MATMUL_BLOCK_SIZE must be positive"
 #endif
 
 void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out) {
@@ -56,85 +50,6 @@ void softmax_backward(float *probs, float *dL_dprobs, size_t size) {
     }
     for (size_t j = 0; j < size; j++) {
         dL_dprobs[j] = probs[j] * (dL_dprobs[j] - dot);
-    }
-}
-
-void matrix_multiply(float *restrict A, float *restrict B, float *restrict C,
-                      size_t m, size_t k, size_t n) {
-    const size_t block_size = DRANZER_MATMUL_BLOCK_SIZE;
-
-    memset(C, 0, m * n * sizeof(float));
-
-    #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static)
-    #endif
-    for (size_t ii = 0; ii < m; ii += block_size) {
-        for (size_t jj = 0; jj < n; jj += block_size) {
-            for (size_t ll = 0; ll < k; ll += block_size) {
-                size_t i_limit = (ii + block_size > m) ? m : ii + block_size;
-                size_t j_limit = (jj + block_size > n) ? n : jj + block_size;
-                size_t l_limit = (ll + block_size > k) ? k : ll + block_size;
-
-                /* Keep one output/B tile hot while walking k, but make j
-                 * the innermost loop. C and B are then contiguous, which
-                 * permits portable compiler vectorization and avoids the
-                 * cache-line-sized B stride of the former i/j/l order.
-                 * Each C element still accumulates l in increasing order. */
-                for (size_t i = ii; i < i_limit; i++) {
-                    for (size_t l = ll; l < l_limit; l++) {
-                        float a = A[i * k + l];
-                        for (size_t j = jj; j < j_limit; j++) {
-                            C[i * n + j] += a * B[l * n + j];
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-void matrix_multiply_scalar(const float *A, const float *B, float *C,
-                            size_t m, size_t k, size_t n) {
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
-            for (size_t l = 0; l < k; l++) {
-                sum += A[i * k + l] * B[l * n + j];
-            }
-            C[i * n + j] = sum;
-        }
-    }
-}
-
-void matmul_backward_input(float *restrict dC, float *restrict B, float *restrict dA,
-                            size_t m, size_t k, size_t n) {
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t i = 0; i < m; i++) {
-        for (size_t l = 0; l < k; l++) {
-            float sum = 0.0f;
-            for (size_t j = 0; j < n; j++) {
-                sum += dC[i * n + j] * B[l * n + j];
-            }
-            dA[i * k + l] += sum;
-        }
-    }
-}
-
-void matmul_backward_weight(float *restrict A, float *restrict dC, float *restrict dB,
-                             size_t m, size_t k, size_t n) {
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t l = 0; l < k; l++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
-            for (size_t i = 0; i < m; i++) {
-                sum += A[i * k + l] * dC[i * n + j];
-            }
-            dB[l * n + j] += sum;
-        }
     }
 }
 

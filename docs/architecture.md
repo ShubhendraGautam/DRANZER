@@ -143,10 +143,11 @@ All trainable parameters live in one contiguous `params` allocation. Gradients u
 contiguous layout in `grads`; Adam moment buffers use that layout as well and are allocated lazily.
 Named fields such as `W_q` and `output_projection` are views into those buffers.
 
-Forward matmuls normally use the CPU dispatch path (or opt-in GPU path). Setting
-`model.use_scalar_matmul` forces a portable unblocked C reference through full-prefix and cached
-decode. This remains independently selectable so later tiled/SIMD kernels can be checked at the
-model level, not only on isolated matrices.
+Forward matmuls normally use the CPU dispatch path (or opt-in GPU path), which picks a kernel from
+the shape of the call - see [CPU matmul kernels](matmul.md). Setting `model.use_scalar_matmul`
+forces the portable unblocked C reference through full-prefix and cached decode instead. That
+reference remains independently selectable so every optimized kernel can be checked at the model
+level, not only on isolated matrices.
 
 This layout provides three useful properties:
 
@@ -173,13 +174,13 @@ operations, layer normalization, softmax, optimizer, and tokenizer remain on the
 .
 ├── libs/                    tokenizer and hashmap utility library
 ├── src/
-│   ├── core/                model, tensor ops, transformer, training, optimizer
+│   ├── core/                model, matmul kernels, tensor ops, transformer, training
 │   ├── backends/gpu/        CUDA driver wrapper, PTX matmul, hardware probe
 │   ├── cli/                 commands, tokenizer adapter, config, sampling
 │   ├── include/             public headers mirroring the source layout
 │   ├── tests/core/          numerical and behavioral correctness tests
 │   ├── tests/gpu/           GPU/CPU equivalence and cache tests
-│   └── tools/               standalone benchmark
+│   └── tools/               standalone benchmark and matmul kernel sweep
 ├── docs/                    focused project documentation
 └── .github/                 CI, nightly, and dependency automation
 ```
@@ -189,7 +190,8 @@ operations, layer normalization, softmax, optimizer, and tokenizer remain on the
 | Module | Responsibility |
 |---|---|
 | `core/model.c` | Model allocation, contiguous tensor layout, and lifecycle |
-| `core/tensor_ops.c` | Matmul, softmax, layer norm, dropout, and positional encoding |
+| `core/matmul.c` | Interchangeable CPU matmul kernels and their shape-directed selection |
+| `core/tensor_ops.c` | Softmax, layer norm, dropout, and positional encoding |
 | `core/transformer.c` | Causal attention, transformer blocks, forward pass, backend dispatch |
 | `core/training.c` | Cross-entropy and full backward-pass orchestration |
 | `core/evaluation.c` | Side-effect-free next-token cross-entropy |

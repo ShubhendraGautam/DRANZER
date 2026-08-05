@@ -86,6 +86,7 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 | [Model bundle](docs/model-bundle.md) | Portable artifact layout, validation, and legacy compatibility |
 | [Special tokens](docs/special-tokens.md) | Stable IDs, sequence boundaries, EOS stopping, and legacy mode |
 | [Generation runtime](docs/generation.md) | Streaming callbacks, stop sequences, sampling controls, and result semantics |
+| [CPU matmul kernels](docs/matmul.md) | Kernel set, shape-directed selection, reproducibility, and the measurement workflow |
 | [GPU backend](docs/gpu.md) | PTX execution, capability probing, caching, limitations, and measurements |
 | [Development](docs/development.md) | Tests, CI/nightly jobs, sanitizers, benchmarks, and contribution workflow |
 | [Design checklist](docs/design-checklist.md) | Prioritized maturity roadmap and acceptance gates |

@@ -64,8 +64,9 @@ MAIN_SOURCE = cli/main.c
 # cli/            the train/infer/generate command-line application:
 #                 argument parsing, config files, sampling, checkpoints,
 #                 the streaming tokenizer, and main() itself.
-# tools/          standalone developer tools unrelated to the CLI
-#                 (currently just bench.c).
+# tools/          standalone developer tools unrelated to the CLI: the
+#                 throughput/memory benchmark, the isolated matmul kernel
+#                 comparison, and their shared provenance helpers.
 # tests/core/     tests/gpu/   permanent correctness test suite, split the
 #                 same way as the source it tests.
 
@@ -77,7 +78,7 @@ MAIN_SOURCE = cli/main.c
 # core/transformer.c's dispatch_matmul(). Needs -ldl.
 SRC = $(MAIN_SOURCE) \
       cli/tokenizer.c cli/evaluation.c cli/generation.c cli/attention.c cli/config.c cli/manifest.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
-      core/model.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
+      core/model.c core/matmul.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
       backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 OBJ = $(SRC:.c=.o)
 
@@ -86,8 +87,8 @@ TARGET = app.out
 # Standalone memory/throughput benchmark (tools/bench.c) - links only the
 # model modules it actually needs, not cli/*.o. A separate binary on
 # purpose: it has nothing to do with training-run orchestration.
-BENCH_SRC = tools/bench.c \
-            core/model.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
+BENCH_SRC = tools/bench.c tools/bench_matmul.c tools/bench_support.c \
+            core/model.c core/matmul.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
             backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 BENCH_TARGET = bench.out
@@ -128,6 +129,11 @@ $(TARGET): $(OBJ) $(LIB)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# bench_support.c is the only file that needs the recorded build command,
+# but bench.o is listed too so touching either rebuilds with it.
+tools/bench_support.o: tools/bench_support.c
+	$(CC) $(CFLAGS) $(BENCH_METADATA_FLAGS) -c $< -o $@
+
 tools/bench.o: tools/bench.c
 	$(CC) $(CFLAGS) $(BENCH_METADATA_FLAGS) -c $< -o $@
 
@@ -162,7 +168,7 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # they compile and link on any Linux machine and simply report
 # "unavailable" if no NVIDIA driver is present - see
 # tests/gpu/test_gpu_matmul.c's self-skip. Needs -ldl.
-TEST_MODEL_OBJ = core/model.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
+TEST_MODEL_OBJ = core/model.o core/matmul.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
 TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/cli/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/tpu/test_*.c)
 TEST_BINS = $(TEST_SRCS:.c=.out)

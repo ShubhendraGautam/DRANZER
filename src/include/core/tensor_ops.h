@@ -4,8 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Low-level numeric primitives shared across the model: matmul, softmax,
- * layer norm, ReLU, dropout, positional encoding. None of these know about
+/* The matmul kernels and their selection policy live in their own module.
+ * Included here so every existing user of tensor_ops.h keeps seeing
+ * matrix_multiply() and friends unchanged. */
+#include "core/matmul.h"
+
+/* Low-level numeric primitives shared across the model: softmax, layer norm,
+ * ReLU, dropout, positional encoding. None of these know about
  * neural_model_t - they operate purely on caller-supplied buffers, so they
  * can be unit-tested and reused independently of the transformer/training
  * modules built on top of them. */
@@ -33,39 +38,6 @@ static inline float relu(float x) {
 static inline float relu_derivative(float x) {
     return x > 0.0f ? 1.0f : 0.0f;
 }
-
-/* Matrix multiplication with cache blocking and a contiguous inner output
- * loop for locality and portable compiler vectorization. The measured
- * default tile is 64; developers can compare another positive size by
- * defining DRANZER_MATMUL_BLOCK_SIZE at build time.
- * C (m x n) = A (m x k) @ B (k x n). Zeroes C first.
- *
- * Parallelized over (ii, jj) row/col blocks when built with OMP=1: each
- * block owns a disjoint region of C, so threads never write the same
- * output and there is no cross-thread reduction - results are bit-identical
- * to a serial build. collapse(2) matters here: with only e.g. 2-8 row
- * blocks for typical seq_len-sized m, parallelizing ii alone starves most
- * threads; collapsing ii and jj together gives up to
- * ceil(m/BLOCK_SIZE)*ceil(n/BLOCK_SIZE) independent tasks instead. */
-void matrix_multiply(float *restrict A, float *restrict B, float *restrict C,
-                     size_t m, size_t k, size_t n);
-
-/* Portable unblocked reference, kept independently selectable as optimized
- * CPU kernels are introduced. */
-void matrix_multiply_scalar(const float *A, const float *B, float *C,
-                            size_t m, size_t k, size_t n);
-
-/* Backprop through C = A @ B (A: m x k, B: k x n, C: m x n).
- * Accumulates (+=) into dA; caller must zero dA first for a fresh gradient.
- * Parallel over i: each iteration owns a disjoint row of dA. */
-void matmul_backward_input(float *restrict dC, float *restrict B, float *restrict dA,
-                            size_t m, size_t k, size_t n);
-
-/* Backprop through C = A @ B (A: m x k, B: k x n, C: m x n).
- * Accumulates (+=) into dB; caller must zero dB first for a fresh gradient.
- * Parallel over l: each iteration owns a disjoint row of dB. */
-void matmul_backward_weight(float *restrict A, float *restrict dC, float *restrict dB,
-                             size_t m, size_t k, size_t n);
 
 /* In-place layer normalization + scale/shift, single row of `size`
  * elements. Used by the public layer_normalize() wrapper only; the

@@ -8,38 +8,36 @@
  * decisions) so the CPU numbers reflect what a single low-end core can do.
  *
  * Full-model runs append to bench_results_v2.csv. `--matmul-only` instead
- * compares the scalar and default portable CPU kernels on isolated shapes
- * and appends to matmul_results_v1.csv. Both files are gitignored so local
- * histories can accumulate without presenting cross-machine numbers as
- * directly comparable.
+ * hands off to tools/bench_matmul.c, which compares the interchangeable CPU
+ * kernels on isolated shapes and appends to matmul_results_v2.csv. Both
+ * files are gitignored so local histories can accumulate without presenting
+ * cross-machine numbers as directly comparable.
  *
  * Deliberately its own small file/binary (bench.out) rather than a mode
  * bolted onto main.c/cli.c - it links directly against the model modules
  * and has nothing to do with training-run orchestration or the tokenizer.
+ * Provenance/timing helpers live in tools/bench_support.c and the isolated
+ * kernel comparison in tools/bench_matmul.c, so this file stays about
+ * whole-model throughput and memory.
  *
  * Build:  make bench      (or: make bench OMP=1 CC=gcc)
  * Run:    ./bench.out
  */
 
 #include "core/model.h"
+#include "core/matmul.h"
 #include "core/tensor_ops.h"
 #include "backends/gpu/gpu_matmul.h"
+#include "tools/bench_matmul.h"
+#include "tools/bench_support.h"
+#include <errno.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <sys/utsname.h>
 #include <unistd.h>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
-#ifndef DRANZER_BUILD_COMMAND
-#define DRANZER_BUILD_COMMAND "unknown (built outside the project Makefile)"
-#endif
 
 typedef struct {
     const char *key;
@@ -55,110 +53,6 @@ typedef struct {
     double training_ms_per_step;
 } bench_result_t;
 
-typedef struct {
-    char compiler[192];
-    char os[256];
-    char cpu[256];
-    const char *build_command;
-    long online_cpus;
-    long openmp_version;
-    int max_threads;
-} bench_metadata_t;
-
-typedef struct {
-    const char *name;
-    size_t m, k, n;
-} matmul_case_t;
-
-typedef struct {
-    size_t scalar_iterations;
-    size_t dispatch_iterations;
-    double scalar_us;
-    double dispatch_us;
-    double scalar_gflops;
-    double dispatch_gflops;
-    double speedup;
-    float max_abs_error;
-    float max_relative_error;
-} matmul_result_t;
-
-/* Read after every timed region so an optimizing compiler cannot consider
- * the matrix results dead. The kernels live in another translation unit,
- * but keeping an explicit observable consumer also makes that contract
- * survive a future link-time-optimization build. */
-static volatile float matmul_sink;
-
-static void trim_line(char *text) {
-    size_t length = strlen(text);
-    while (length > 0 &&
-           (text[length - 1] == '\n' || text[length - 1] == '\r' ||
-            text[length - 1] == ' ' || text[length - 1] == '\t')) {
-        text[--length] = '\0';
-    }
-}
-
-static void read_cpu_name(char *output, size_t capacity) {
-    snprintf(output, capacity, "unknown");
-    FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
-    if (!cpuinfo) return;
-    char line[512];
-    while (fgets(line, sizeof(line), cpuinfo)) {
-        if (strncmp(line, "model name", 10) != 0 &&
-            strncmp(line, "Hardware", 8) != 0) continue;
-        char *value = strchr(line, ':');
-        if (!value) continue;
-        value++;
-        while (*value == ' ' || *value == '\t') value++;
-        trim_line(value);
-        snprintf(output, capacity, "%s", value);
-        break;
-    }
-    fclose(cpuinfo);
-}
-
-static void collect_metadata(bench_metadata_t *metadata) {
-    memset(metadata, 0, sizeof(*metadata));
-#if defined(__clang__)
-    snprintf(metadata->compiler, sizeof(metadata->compiler),
-             "clang %s", __clang_version__);
-#elif defined(__GNUC__)
-    snprintf(metadata->compiler, sizeof(metadata->compiler),
-             "gcc %s", __VERSION__);
-#else
-    snprintf(metadata->compiler, sizeof(metadata->compiler), "unknown C compiler");
-#endif
-    struct utsname system;
-    memset(&system, 0, sizeof(system));
-    if (uname(&system) == 0) {
-        snprintf(metadata->os, sizeof(metadata->os), "%s %s %s",
-                 system.sysname, system.release, system.machine);
-    } else {
-        snprintf(metadata->os, sizeof(metadata->os), "unknown");
-    }
-    read_cpu_name(metadata->cpu, sizeof(metadata->cpu));
-    metadata->build_command = DRANZER_BUILD_COMMAND;
-    metadata->online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-#ifdef _OPENMP
-    metadata->openmp_version = _OPENMP;
-    metadata->max_threads = omp_get_max_threads();
-#else
-    metadata->openmp_version = 0;
-    metadata->max_threads = 1;
-#endif
-}
-
-static double now_sec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
-
-static long peak_rss_kb(void) {
-    struct rusage usage;
-    getrusage(RUSAGE_SELF, &usage);
-    return usage.ru_maxrss; /* KB on Linux */
-}
-
 /* Runs `iters` forward passes at seq_len == cfg->max_seq_len (the
  * worst-case, steady-state cost once a generated sequence has filled its
  * context window - there's no KV cache here, so every generation step
@@ -171,11 +65,11 @@ static double bench_inference(neural_model_t *model, const bench_config_t *cfg, 
     model->is_training = 0;
     model_forward(model, tokens, cfg->max_seq_len, logits); /* warm up */
 
-    double t0 = now_sec();
+    double t0 = bench_now_sec();
     for (int it = 0; it < iters; it++) {
         model_forward(model, tokens, cfg->max_seq_len, logits);
     }
-    double elapsed = now_sec() - t0;
+    double elapsed = bench_now_sec() - t0;
     double per_token_ms = 1000.0 * elapsed / iters;
 
     printf("  inference (seq_len=%-3zu, full context each step, no KV cache):\n", cfg->max_seq_len);
@@ -215,11 +109,11 @@ static int bench_kv_decode(neural_model_t *model, const bench_config_t *cfg,
     model->is_training = 0;
     model_forward(model, tokens, cfg->max_seq_len, logits); /* warm up */
 
-    double full_t0 = now_sec();
+    double full_t0 = bench_now_sec();
     for (size_t pos = prefill_len; pos < cfg->max_seq_len; pos++) {
         model_forward(model, tokens, pos + 1, logits);
     }
-    double full_ms = 1000.0 * (now_sec() - full_t0) / (double)decode_steps;
+    double full_ms = 1000.0 * (bench_now_sec() - full_t0) / (double)decode_steps;
 
     model_kv_cache_t cache = {0};
     if (model_kv_cache_init(&cache, model) != MODEL_SUCCESS) {
@@ -228,24 +122,24 @@ static int bench_kv_decode(neural_model_t *model, const bench_config_t *cfg,
         printf("  KV-cache decode benchmark: cache allocation failed\n");
         return -1;
     }
-    double prefill_t0 = now_sec();
+    double prefill_t0 = bench_now_sec();
     for (size_t i = 0; i < prefill_len; i++) {
         model_forward_token(model, &cache, tokens[i], logits);
     }
-    double prefill_total_ms = 1000.0 * (now_sec() - prefill_t0);
+    double prefill_total_ms = 1000.0 * (bench_now_sec() - prefill_t0);
 
-    double cached_t0 = now_sec();
+    double cached_t0 = bench_now_sec();
     for (size_t pos = prefill_len; pos < cfg->max_seq_len; pos++) {
         model_forward_token(model, &cache, tokens[pos], logits);
     }
-    double cached_ms = 1000.0 * (now_sec() - cached_t0) / (double)decode_steps;
+    double cached_ms = 1000.0 * (bench_now_sec() - cached_t0) / (double)decode_steps;
 
-    double sliding_t0 = now_sec();
+    double sliding_t0 = bench_now_sec();
     for (size_t pos = cfg->max_seq_len;
          pos < cfg->max_seq_len + decode_steps; pos++) {
         model_forward_token(model, &cache, tokens[pos], logits);
     }
-    double sliding_ms = 1000.0 * (now_sec() - sliding_t0) /
+    double sliding_ms = 1000.0 * (bench_now_sec() - sliding_t0) /
                         (double)decode_steps;
     result->prefill_ms_per_token = prefill_total_ms / (double)prefill_len;
     result->growing_decode_ms_per_token = cached_ms;
@@ -280,11 +174,11 @@ static double bench_training(neural_model_t *model, const bench_config_t *cfg, i
 
     model_train_step(model, tokens, target, cfg->max_seq_len); /* warm up */
 
-    double t0 = now_sec();
+    double t0 = bench_now_sec();
     for (int it = 0; it < iters; it++) {
         model_train_step(model, tokens, target, cfg->max_seq_len);
     }
-    double elapsed = now_sec() - t0;
+    double elapsed = bench_now_sec() - t0;
     double per_step_ms = 1000.0 * elapsed / iters;
 
     printf("  training  (seq_len=%-3zu, forward+backward+optimizer step):\n", cfg->max_seq_len);
@@ -295,230 +189,14 @@ static double bench_training(neural_model_t *model, const bench_config_t *cfg, i
     return per_step_ms;
 }
 
-static void csv_field(FILE *csv, const char *value) {
-    fputc('"', csv);
-    for (const char *cursor = value ? value : ""; *cursor; cursor++) {
-        if (*cursor == '"') fputc('"', csv);
-        fputc(*cursor, csv);
-    }
-    fputc('"', csv);
-}
-
-static double measure_matmul(int use_scalar, float *a, float *b, float *c,
-                             size_t m, size_t k, size_t n,
-                             double target_seconds, size_t *iterations_out) {
-    const size_t max_iterations = 1U << 20;
-    size_t iterations = 1;
-    double elapsed = 0.0;
-
-    if (use_scalar) {
-        matrix_multiply_scalar(a, b, c, m, k, n);
-    } else {
-        matrix_multiply(a, b, c, m, k, n);
-    }
-
-    for (;;) {
-        double started = now_sec();
-        for (size_t i = 0; i < iterations; i++) {
-            if (use_scalar) {
-                matrix_multiply_scalar(a, b, c, m, k, n);
-            } else {
-                matrix_multiply(a, b, c, m, k, n);
-            }
-        }
-        elapsed = now_sec() - started;
-        matmul_sink += c[(iterations * 131U) % (m * n)];
-
-        if (elapsed >= target_seconds || iterations >= max_iterations) break;
-        double multiplier = elapsed > 0.0 ? target_seconds / elapsed : 2.0;
-        if (multiplier < 2.0) multiplier = 2.0;
-        size_t next = (size_t)((double)iterations * multiplier);
-        if (next <= iterations) next = iterations + 1;
-        iterations = next > max_iterations ? max_iterations : next;
-    }
-
-    *iterations_out = iterations;
-    return elapsed / (double)iterations;
-}
-
-static int compare_matmul_case(const matmul_case_t *test_case, int quick,
-                               matmul_result_t *result) {
-    if (!test_case || !result || test_case->m == 0 || test_case->k == 0 ||
-        test_case->n == 0 || test_case->m > SIZE_MAX / test_case->k ||
-        test_case->k > SIZE_MAX / test_case->n ||
-        test_case->m > SIZE_MAX / test_case->n) {
-        return -1;
-    }
-
-    size_t a_count = test_case->m * test_case->k;
-    size_t b_count = test_case->k * test_case->n;
-    size_t c_count = test_case->m * test_case->n;
-    if (a_count > SIZE_MAX / sizeof(float) ||
-        b_count > SIZE_MAX / sizeof(float) ||
-        c_count > SIZE_MAX / sizeof(float)) {
-        return -1;
-    }
-
-    float *a = malloc(a_count * sizeof(float));
-    float *b = malloc(b_count * sizeof(float));
-    float *reference = malloc(c_count * sizeof(float));
-    float *dispatch = malloc(c_count * sizeof(float));
-    if (!a || !b || !reference || !dispatch) {
-        free(a);
-        free(b);
-        free(reference);
-        free(dispatch);
-        return -1;
-    }
-
-    for (size_t i = 0; i < a_count; i++) {
-        a[i] = (float)((int)(i % 101U) - 50) / 51.0f;
-    }
-    for (size_t i = 0; i < b_count; i++) {
-        b[i] = (float)((int)((i * 17U + 13U) % 103U) - 51) / 52.0f;
-    }
-
-    matrix_multiply_scalar(a, b, reference, test_case->m, test_case->k,
-                           test_case->n);
-    matrix_multiply(a, b, dispatch, test_case->m, test_case->k,
-                    test_case->n);
-
-    float max_reference = 0.0f;
-    result->max_abs_error = 0.0f;
-    result->max_relative_error = 0.0f;
-    for (size_t i = 0; i < c_count; i++) {
-        float abs_error = fabsf(reference[i] - dispatch[i]);
-        float reference_abs = fabsf(reference[i]);
-        float relative_error = abs_error / fmaxf(reference_abs, 1e-6f);
-        if (!isfinite(reference[i]) || !isfinite(dispatch[i])) {
-            result->max_abs_error = INFINITY;
-            result->max_relative_error = INFINITY;
-            break;
-        }
-        if (reference_abs > max_reference) max_reference = reference_abs;
-        if (abs_error > result->max_abs_error) result->max_abs_error = abs_error;
-        if (relative_error > result->max_relative_error) {
-            result->max_relative_error = relative_error;
-        }
-    }
-
-    double target_seconds = quick ? 0.01 : 0.15;
-    double scalar_seconds = measure_matmul(1, a, b, reference,
-                                           test_case->m, test_case->k,
-                                           test_case->n, target_seconds,
-                                           &result->scalar_iterations);
-    double dispatch_seconds = measure_matmul(0, a, b, dispatch,
-                                             test_case->m, test_case->k,
-                                             test_case->n, target_seconds,
-                                             &result->dispatch_iterations);
-    double operations = 2.0 * (double)test_case->m * (double)test_case->k *
-                        (double)test_case->n;
-    result->scalar_us = scalar_seconds * 1e6;
-    result->dispatch_us = dispatch_seconds * 1e6;
-    result->scalar_gflops = operations / scalar_seconds / 1e9;
-    result->dispatch_gflops = operations / dispatch_seconds / 1e9;
-    result->speedup = scalar_seconds / dispatch_seconds;
-
-    int correct = result->max_abs_error <= 1e-4f * (1.0f + max_reference);
-    free(a);
-    free(b);
-    free(reference);
-    free(dispatch);
-    return correct ? 0 : -1;
-}
-
-static void matmul_csv_log(FILE *csv, const char *timestamp,
-                           const bench_config_t *cfg,
-                           const matmul_case_t *test_case,
-                           const matmul_result_t *result,
-                           const bench_metadata_t *metadata) {
-    if (!csv) return;
-    csv_field(csv, timestamp);
-    fputc(',', csv);
-    csv_field(csv, cfg->key);
-    fputc(',', csv);
-    csv_field(csv, test_case->name);
-    fprintf(csv, ",%zu,%zu,%zu,%zu,%zu,%.4f,%.4f,%.6f,%.6f,%.4f,%.8g,%.8g,",
-            test_case->m, test_case->k, test_case->n,
-            result->scalar_iterations, result->dispatch_iterations,
-            result->scalar_us, result->dispatch_us,
-            result->scalar_gflops, result->dispatch_gflops, result->speedup,
-            result->max_abs_error, result->max_relative_error);
-    csv_field(csv, metadata->build_command);
-    fputc(',', csv);
-    csv_field(csv, metadata->compiler);
-    fputc(',', csv);
-    csv_field(csv, metadata->os);
-    fputc(',', csv);
-    csv_field(csv, metadata->cpu);
-    fprintf(csv, ",%ld,%ld,%d\n", metadata->online_cpus,
-            metadata->openmp_version, metadata->max_threads);
-    fflush(csv);
-}
-
-static int run_matmul_suite(const bench_config_t *configs, size_t num_configs,
-                            const char *selected_tier, int quick,
-                            const char *timestamp,
-                            const bench_metadata_t *metadata) {
-    const char *csv_path = "matmul_results_v1.csv";
-    int csv_existed = (access(csv_path, F_OK) == 0);
-    FILE *csv = fopen(csv_path, "a");
-    if (!csv) {
-        fprintf(stderr, "Error: cannot open %s\n", csv_path);
-        return 1;
-    }
-    if (!csv_existed) {
-        fprintf(csv, "timestamp,tier,case,m,k,n,scalar_iterations,dispatch_iterations,"
-                     "scalar_us,dispatch_us,scalar_gflops,dispatch_gflops,dispatch_speedup,"
-                     "max_abs_error,max_relative_error,build_command,compiler,os,cpu,"
-                     "online_cpus,openmp_version,max_threads\n");
-    }
-
-    int failed = 0;
-    for (size_t i = 0; i < num_configs; i++) {
-        const bench_config_t *cfg = &configs[i];
-        if (selected_tier && strcmp(selected_tier, cfg->key) != 0) continue;
-        size_t ffn_dim = cfg->embedding_dim * 4U;
-        matmul_case_t cases[] = {
-            { "decode_attention_projection", 1, cfg->embedding_dim,
-              cfg->embedding_dim },
-            { "decode_ffn_up", 1, cfg->embedding_dim, ffn_dim },
-            { "prefill_attention_projection", cfg->max_seq_len,
-              cfg->embedding_dim, cfg->embedding_dim },
-            { "prefill_ffn_up", cfg->max_seq_len, cfg->embedding_dim,
-              ffn_dim },
-            { "training_ffn_down", cfg->max_seq_len, ffn_dim,
-              cfg->embedding_dim },
-        };
-        size_t case_count = sizeof(cases) / sizeof(cases[0]);
-        printf("--- isolated matmul: %s ---\n", cfg->name);
-        for (size_t j = 0; j < case_count; j++) {
-            matmul_result_t result = {0};
-            int rc = compare_matmul_case(&cases[j], quick, &result);
-            printf("  %-31s %zux%zux%zu  scalar %8.3f us  dispatch %8.3f us  "
-                   "%6.2fx  error %.3g%s\n",
-                   cases[j].name, cases[j].m, cases[j].k, cases[j].n,
-                   result.scalar_us, result.dispatch_us, result.speedup,
-                   result.max_abs_error, rc == 0 ? "" : "  FAIL");
-            matmul_csv_log(csv, timestamp, cfg, &cases[j], &result, metadata);
-            if (rc != 0) failed = 1;
-        }
-        printf("\n");
-    }
-
-    printf("Matmul results appended to %s\n", csv_path);
-    fclose(csv);
-    return failed;
-}
-
 static void csv_log(FILE *csv, const char *timestamp, const bench_config_t *cfg,
                     const char *optimizer_name, const char *mode,
                     long param_floats, const bench_result_t *r,
                     long rss_delta_kb, const bench_metadata_t *metadata) {
     if (!csv) return;
-    csv_field(csv, timestamp);
+    bench_csv_field(csv, timestamp);
     fputc(',', csv);
-    csv_field(csv, cfg->name);
+    bench_csv_field(csv, cfg->name);
     fprintf(csv, ",%zu,%zu,%zu,%zu,%zu,%s,%s,%ld,"
                  "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,",
             cfg->vocab_size, cfg->embedding_dim, cfg->num_heads,
@@ -528,16 +206,7 @@ static void csv_log(FILE *csv, const char *timestamp, const bench_config_t *cfg,
             r->sliding_decode_ms_per_token,
             r->training_ms_per_step, 1000.0 / r->training_ms_per_step,
             rss_delta_kb / 1024.0);
-    csv_field(csv, metadata->build_command);
-    fputc(',', csv);
-    csv_field(csv, metadata->compiler);
-    fputc(',', csv);
-    csv_field(csv, metadata->os);
-    fputc(',', csv);
-    csv_field(csv, metadata->cpu);
-    fprintf(csv, ",%ld,%ld,%d\n", metadata->online_cpus,
-            metadata->openmp_version, metadata->max_threads);
-    fflush(csv);
+    bench_csv_metadata(csv, metadata);
 }
 
 static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
@@ -550,7 +219,7 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
     }
 
     neural_model_t model = {0};
-    long rss_before = peak_rss_kb();
+    long rss_before = bench_peak_rss_kb();
 
     if (model_new(&model, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads,
                   cfg->num_layers, cfg->max_seq_len) != MODEL_SUCCESS) {
@@ -565,7 +234,8 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
     printf("--- %s (vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu) optimizer=%s mode=%s ---\n",
            cfg->name, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads, cfg->num_layers,
            cfg->max_seq_len, optimizer_name,
-           use_gpu ? "GPU" : use_scalar ? "CPU scalar reference" : "CPU dispatch");
+           use_gpu ? "GPU" : use_scalar ? "CPU scalar reference"
+                                        : matmul_kernel_name(matmul_get_kernel()));
 
     size_t param_floats = model.total_param_count;
     printf("  parameters: %zu (%.2f MB weights only)\n",
@@ -576,12 +246,23 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
     (void)bench_kv_decode(&model, cfg, &r);
     r.training_ms_per_step = bench_training(&model, cfg, train_iters);
 
-    long rss_after = peak_rss_kb();
+    long rss_after = bench_peak_rss_kb();
     printf("  process peak RSS after this config: %.2f MB (delta from process start: %.2f MB)\n",
            rss_after / 1024.0, (rss_after - rss_before) / 1024.0);
     printf("\n");
 
-    const char *mode = use_gpu ? "gpu" : use_scalar ? "cpu-scalar" : "cpu-dispatch";
+    /* Encode the CPU kernel and tile into the existing `mode` column rather
+     * than adding columns: a v2 results file written by an older build stays
+     * readable, and a row still says exactly which kernel produced it. */
+    char mode[64];
+    if (use_gpu) {
+        snprintf(mode, sizeof(mode), "gpu");
+    } else if (use_scalar) {
+        snprintf(mode, sizeof(mode), "cpu-scalar");
+    } else {
+        snprintf(mode, sizeof(mode), "cpu-%s-tile%zu",
+                 matmul_kernel_name(matmul_get_kernel()), matmul_tile_size());
+    }
     csv_log(csv, timestamp, cfg, optimizer_name, mode, (long)param_floats,
             &r, rss_after - rss_before, metadata);
 
@@ -589,8 +270,30 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
 }
 
 static void print_usage(const char *program) {
-    printf("Usage: %s [--tier tiny|small|medium] [--scalar] [--quick] [--matmul-only]\n",
+    printf("Usage: %s [--tier tiny|small|medium] [--scalar] [--quick]\n"
+           "          [--kernel auto|scalar|rowwise|tiled|tiled_mr4] [--tile N]\n"
+           "          [--matmul-only [--sweep] [--repeats N] [--csv-path FILE]]\n\n"
+           "  --kernel/--tile   override the CPU matmul kernel and tile for the run\n"
+           "  --matmul-only     compare kernels on isolated shapes instead of whole models\n"
+           "  --sweep           with --matmul-only: measure every kernel and tile candidate\n"
+           "  --repeats N       with --matmul-only: timing rounds per candidate (median wins)\n"
+           "  --csv-path FILE   with --matmul-only: results file to append to\n",
            program);
+}
+
+/* Strict positive-integer parsing, matching the CLI's own contract: no
+ * silent truncation, no partially numeric arguments, no zero. */
+static int parse_positive(const char *text, size_t *value_out) {
+    if (!text || *text == '\0') return -1;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed == 0 ||
+        parsed > (unsigned long long)SIZE_MAX) {
+        return -1;
+    }
+    *value_out = (size_t)parsed;
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -598,6 +301,13 @@ int main(int argc, char **argv) {
     int use_scalar = 0;
     int quick = 0;
     int matmul_only = 0;
+    int sweep = 0;
+    size_t repeats = 3;
+    size_t tile = 0;
+    const char *matmul_csv_path = NULL;
+    matmul_kernel_t kernel = MATMUL_KERNEL_AUTO;
+    int kernel_overridden = 0;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--tier") == 0 && i + 1 < argc) {
             selected_tier = argv[++i];
@@ -607,6 +317,32 @@ int main(int argc, char **argv) {
             quick = 1;
         } else if (strcmp(argv[i], "--matmul-only") == 0) {
             matmul_only = 1;
+        } else if (strcmp(argv[i], "--sweep") == 0) {
+            sweep = 1;
+        } else if (strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) {
+            if (matmul_kernel_from_name(argv[++i], &kernel) != 0) {
+                fprintf(stderr, "Error: unknown matmul kernel '%s'\n", argv[i]);
+                return 2;
+            }
+            kernel_overridden = 1;
+        } else if (strcmp(argv[i], "--tile") == 0 && i + 1 < argc) {
+            if (parse_positive(argv[++i], &tile) != 0) {
+                fprintf(stderr, "Error: --tile needs a positive integer, got '%s'\n",
+                        argv[i]);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--csv-path") == 0 && i + 1 < argc) {
+            matmul_csv_path = argv[++i];
+            if (*matmul_csv_path == '\0') {
+                fprintf(stderr, "Error: --csv-path needs a file name\n");
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--repeats") == 0 && i + 1 < argc) {
+            if (parse_positive(argv[++i], &repeats) != 0) {
+                fprintf(stderr, "Error: --repeats needs a positive integer, got '%s'\n",
+                        argv[i]);
+                return 2;
+            }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -626,13 +362,29 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: --matmul-only already compares scalar and dispatch paths\n");
         return 2;
     }
+    if (sweep && !matmul_only) {
+        fprintf(stderr, "Error: --sweep only applies to --matmul-only runs\n");
+        return 2;
+    }
+    if (matmul_csv_path && !matmul_only) {
+        fprintf(stderr, "Error: --csv-path only applies to --matmul-only runs\n");
+        return 2;
+    }
+    if (matmul_only && kernel_overridden) {
+        fprintf(stderr, "Error: --matmul-only measures every kernel itself; drop --kernel\n");
+        return 2;
+    }
+    if (tile != 0 && matmul_set_tile_size(tile) != 0) {
+        fprintf(stderr, "Error: --tile must be positive\n");
+        return 2;
+    }
+    if (kernel_overridden) matmul_set_kernel(kernel);
 
     bench_metadata_t metadata;
-    collect_metadata(&metadata);
-    printf("Build: %s\nCompiler: %s\nSystem: %s\nCPU: %s\n",
-           metadata.build_command, metadata.compiler, metadata.os, metadata.cpu);
-    printf("Threads: online=%ld OpenMP=%ld max=%d\n\n",
-           metadata.online_cpus, metadata.openmp_version, metadata.max_threads);
+    bench_collect_metadata(&metadata);
+    bench_print_metadata(&metadata);
+    printf("CPU matmul kernel: %s (tile %zu)\n\n",
+           matmul_kernel_name(matmul_get_kernel()), matmul_tile_size());
 #ifdef _OPENMP
     printf("Built with OpenMP (OMP=1) - matmul/attention parallelize across cores internally.\n\n");
 #else
@@ -645,16 +397,6 @@ int main(int argc, char **argv) {
              "matmuls only - see transformer.c's dispatch_matmul() - backward stays CPU-only regardless).\n\n"
            : "No CUDA GPU detected - CPU-only run (see gpu_probe.out for why).\n\n");
 
-    const char *csv_path = "bench_results_v2.csv";
-    int csv_existed = (access(csv_path, F_OK) == 0);
-    FILE *csv = fopen(csv_path, "a");
-    if (csv && !csv_existed) {
-        fprintf(csv, "timestamp,config,vocab_size,embedding_dim,num_heads,num_layers,max_seq_len,"
-                      "optimizer,mode,param_count,inference_ms_per_token,inference_tokens_per_sec,"
-                      "prefill_ms_per_token,growing_decode_ms_per_token,sliding_decode_ms_per_token,"
-                      "training_ms_per_step,training_steps_per_sec,rss_delta_mb,build_command,"
-                      "compiler,os,cpu,online_cpus,openmp_version,max_threads\n");
-    }
     char timestamp[32];
     time_t now = time(NULL);
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
@@ -671,8 +413,35 @@ int main(int argc, char **argv) {
     size_t num_configs = sizeof(configs) / sizeof(configs[0]);
 
     if (matmul_only) {
-        return run_matmul_suite(configs, num_configs, selected_tier, quick,
+        bench_matmul_tier_t tiers[sizeof(configs) / sizeof(configs[0])];
+        for (size_t i = 0; i < num_configs; i++) {
+            tiers[i].key = configs[i].key;
+            tiers[i].name = configs[i].name;
+            tiers[i].vocab_size = configs[i].vocab_size;
+            tiers[i].embedding_dim = configs[i].embedding_dim;
+            tiers[i].max_seq_len = configs[i].max_seq_len;
+        }
+        bench_matmul_options_t options;
+        bench_matmul_default_options(&options);
+        options.sweep = sweep;
+        options.quick = quick;
+        options.repeats = repeats;
+        if (matmul_csv_path) options.csv_path = matmul_csv_path;
+        return bench_matmul_run(tiers, num_configs, selected_tier, &options,
                                 timestamp, &metadata);
+    }
+
+    /* Opened only for full-model runs, so a matmul-only session never leaves
+     * a header-only bench_results_v2.csv behind. */
+    const char *csv_path = "bench_results_v2.csv";
+    int csv_existed = (access(csv_path, F_OK) == 0);
+    FILE *csv = fopen(csv_path, "a");
+    if (csv && !csv_existed) {
+        fprintf(csv, "timestamp,config,vocab_size,embedding_dim,num_heads,num_layers,max_seq_len,"
+                      "optimizer,mode,param_count,inference_ms_per_token,inference_tokens_per_sec,"
+                      "prefill_ms_per_token,growing_decode_ms_per_token,sliding_decode_ms_per_token,"
+                      "training_ms_per_step,training_steps_per_sec,rss_delta_mb,"
+                      BENCH_METADATA_CSV_HEADER "\n");
     }
 
     for (size_t i = 0; i < num_configs; i++) {
