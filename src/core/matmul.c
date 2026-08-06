@@ -6,10 +6,8 @@
 
 #include "core/matmul.h"
 #include "core/matmul_simd.h"
+#include "core/parallel.h"
 #include <string.h>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 #if DRANZER_MATMUL_BLOCK_SIZE < 1
 #error "DRANZER_MATMUL_BLOCK_SIZE must be positive"
@@ -45,10 +43,8 @@ static void kernel_rowwise(const float *restrict A, const float *restrict B,
                            size_t m, size_t k, size_t n) {
     memset(C, 0, m * n * sizeof(float));
 
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t i = 0; i < m; i++) {
+    /* One chunk per row of C; the rows are disjoint. */
+    DRANZER_PARALLEL_FOR(m, m * k * n, i,
         float *row_out = &C[i * n];
         for (size_t l = 0; l < k; l++) {
             float a = A[i * k + l];
@@ -57,7 +53,7 @@ static void kernel_rowwise(const float *restrict A, const float *restrict B,
                 row_out[j] += a * row_b[j];
             }
         }
-    }
+    );
 }
 
 /* Cache-blocked i/l/j. Keeps one output/B tile hot while walking k, with j
@@ -68,27 +64,34 @@ static void kernel_tiled(const float *restrict A, const float *restrict B,
                          size_t m, size_t k, size_t n, size_t tile) {
     memset(C, 0, m * n * sizeof(float));
 
-    #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static)
-    #endif
-    for (size_t ii = 0; ii < m; ii += tile) {
-        for (size_t jj = 0; jj < n; jj += tile) {
-            for (size_t ll = 0; ll < k; ll += tile) {
-                size_t i_limit = (ii + tile > m) ? m : ii + tile;
-                size_t j_limit = (jj + tile > n) ? n : jj + tile;
-                size_t l_limit = (ll + tile > k) ? k : ll + tile;
+    /* The (ii, jj) nest flattened into one block index. `collapse(2)` with a
+     * static schedule distributes exactly this iteration space in exactly this
+     * order, so the work each thread gets is unchanged; a single loop is what
+     * lets the same body serve both the forked and the serial path, and it
+     * makes the chunk count the cutoff needs an expression rather than a
+     * guess. */
+    const size_t i_blocks = (m + tile - 1) / tile;
+    const size_t j_blocks = (n + tile - 1) / tile;
 
-                for (size_t i = ii; i < i_limit; i++) {
-                    for (size_t l = ll; l < l_limit; l++) {
-                        float a = A[i * k + l];
-                        for (size_t j = jj; j < j_limit; j++) {
-                            C[i * n + j] += a * B[l * n + j];
-                        }
+    DRANZER_PARALLEL_FOR(i_blocks * j_blocks, m * k * n, blk,
+        size_t ii = (blk / j_blocks) * tile;
+        size_t jj = (blk % j_blocks) * tile;
+        size_t i_limit = (ii + tile > m) ? m : ii + tile;
+        size_t j_limit = (jj + tile > n) ? n : jj + tile;
+
+        for (size_t ll = 0; ll < k; ll += tile) {
+            size_t l_limit = (ll + tile > k) ? k : ll + tile;
+
+            for (size_t i = ii; i < i_limit; i++) {
+                for (size_t l = ll; l < l_limit; l++) {
+                    float a = A[i * k + l];
+                    for (size_t j = jj; j < j_limit; j++) {
+                        C[i * n + j] += a * B[l * n + j];
                     }
                 }
             }
         }
-    }
+    );
 }
 
 /* Cache-blocked with four rows of A in flight. Every B element loaded in the
@@ -102,50 +105,52 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
                              size_t m, size_t k, size_t n, size_t tile) {
     memset(C, 0, m * n * sizeof(float));
 
-    #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static)
-    #endif
-    for (size_t ii = 0; ii < m; ii += tile) {
-        for (size_t jj = 0; jj < n; jj += tile) {
-            for (size_t ll = 0; ll < k; ll += tile) {
-                size_t i_limit = (ii + tile > m) ? m : ii + tile;
-                size_t j_limit = (jj + tile > n) ? n : jj + tile;
-                size_t l_limit = (ll + tile > k) ? k : ll + tile;
+    /* Flattened for the same reason as kernel_tiled() above. */
+    const size_t i_blocks = (m + tile - 1) / tile;
+    const size_t j_blocks = (n + tile - 1) / tile;
 
-                size_t i = ii;
-                for (; i + 4 <= i_limit; i += 4) {
-                    float *c0 = &C[i * n];
-                    float *c1 = c0 + n;
-                    float *c2 = c1 + n;
-                    float *c3 = c2 + n;
-                    for (size_t l = ll; l < l_limit; l++) {
-                        float a0 = A[i * k + l];
-                        float a1 = A[(i + 1) * k + l];
-                        float a2 = A[(i + 2) * k + l];
-                        float a3 = A[(i + 3) * k + l];
-                        const float *row_b = &B[l * n];
-                        for (size_t j = jj; j < j_limit; j++) {
-                            float b = row_b[j];
-                            c0[j] += a0 * b;
-                            c1[j] += a1 * b;
-                            c2[j] += a2 * b;
-                            c3[j] += a3 * b;
-                        }
+    DRANZER_PARALLEL_FOR(i_blocks * j_blocks, m * k * n, blk,
+        size_t ii = (blk / j_blocks) * tile;
+        size_t jj = (blk % j_blocks) * tile;
+        size_t i_limit = (ii + tile > m) ? m : ii + tile;
+        size_t j_limit = (jj + tile > n) ? n : jj + tile;
+
+        for (size_t ll = 0; ll < k; ll += tile) {
+            size_t l_limit = (ll + tile > k) ? k : ll + tile;
+
+            size_t i = ii;
+            for (; i + 4 <= i_limit; i += 4) {
+                float *c0 = &C[i * n];
+                float *c1 = c0 + n;
+                float *c2 = c1 + n;
+                float *c3 = c2 + n;
+                for (size_t l = ll; l < l_limit; l++) {
+                    float a0 = A[i * k + l];
+                    float a1 = A[(i + 1) * k + l];
+                    float a2 = A[(i + 2) * k + l];
+                    float a3 = A[(i + 3) * k + l];
+                    const float *row_b = &B[l * n];
+                    for (size_t j = jj; j < j_limit; j++) {
+                        float b = row_b[j];
+                        c0[j] += a0 * b;
+                        c1[j] += a1 * b;
+                        c2[j] += a2 * b;
+                        c3[j] += a3 * b;
                     }
                 }
-                for (; i < i_limit; i++) {
-                    for (size_t l = ll; l < l_limit; l++) {
-                        float a = A[i * k + l];
-                        const float *row_b = &B[l * n];
-                        float *row_out = &C[i * n];
-                        for (size_t j = jj; j < j_limit; j++) {
-                            row_out[j] += a * row_b[j];
-                        }
+            }
+            for (; i < i_limit; i++) {
+                for (size_t l = ll; l < l_limit; l++) {
+                    float a = A[i * k + l];
+                    const float *row_b = &B[l * n];
+                    float *row_out = &C[i * n];
+                    for (size_t j = jj; j < j_limit; j++) {
+                        row_out[j] += a * row_b[j];
                     }
                 }
             }
         }
-    }
+    );
 }
 
 /* One kernel for every shape, and that is a measured result rather than a
@@ -380,10 +385,8 @@ void matmul_backward_input(float *restrict dC, float *restrict B, float *restric
     }
 #endif
 
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t i = 0; i < m; i++) {
+    /* One chunk per row of dA; the rows are disjoint. */
+    DRANZER_PARALLEL_FOR(m, m * k * n, i,
         for (size_t l = 0; l < k; l++) {
             float sum = 0.0f;
             for (size_t j = 0; j < n; j++) {
@@ -391,7 +394,7 @@ void matmul_backward_input(float *restrict dC, float *restrict B, float *restric
             }
             dA[i * k + l] += sum;
         }
-    }
+    );
 }
 
 /* Loop order l/i/j, not l/j/i.
@@ -425,10 +428,10 @@ void matmul_backward_weight(float *restrict A, float *restrict dC, float *restri
     }
 #endif
 
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t l = 0; l < k; l += 4) {
+    /* One chunk per group of four rows of dB, which is what the strided loop
+     * this replaced already handed OpenMP; the rows are disjoint. */
+    DRANZER_PARALLEL_FOR((k + 3) / 4, m * k * n, blk,
+        size_t l = blk * 4;
         if (l + 4 <= k) {
             float *out0 = &dB[l * n];
             float *out1 = out0 + n;
@@ -458,5 +461,5 @@ void matmul_backward_weight(float *restrict A, float *restrict dC, float *restri
                 }
             }
         }
-    }
+    );
 }

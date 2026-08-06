@@ -16,6 +16,14 @@ entirely in C. It does not aim to compete with production-scale LLM frameworks.
   breaks.
 - Prefer measurable workflow integrity over adding isolated model features.
 - Record benchmark hardware and compiler settings with every performance claim.
+- **A difference is only a result if it exceeds the measured noise of the thing being compared.**
+  Establish that noise floor first — repeated runs for timings, repeated seeds for quality — and
+  report a comparison against it. "1.4x faster" and "0.3 lower perplexity" mean nothing on their
+  own, and this project has already had three sessions of one sweep disagree with each other
+  (`docs/threading.md`).
+- Record what a measurement *cannot* resolve as carefully as what it can. An honest "this model is
+  too small for that delta to be visible" is a finding; a number quoted without its uncertainty is
+  not.
 
 Status labels are `ACTIVE`, `NEXT`, and `LATER`. There must be at most one `ACTIVE` goal.
 
@@ -375,8 +383,121 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   register-resident structure as the x86 kernels — but it has never been timed. Note that the reason
   previously given for doubting it, that a hand-written kernel cannot beat a compiler targeting a
   baseline instruction set, was falsified by the x86 rewrite above and should not be reused.
-- [ ] Replace repeated OpenMP entry with a measured persistent worker strategy if beneficial.
-- [ ] Add INT8 and then INT4 weight-only quantization with accuracy comparisons.
+
+  **Blocked on hardware, not on work.** No AArch64 machine is available to this project, and
+  emulation cannot answer the question — the decision is a timing comparison, and an emulated
+  timing measures the emulator. This is why the threading goal below was taken out of order; it is
+  the only item in this section skipped for that reason, and it should be picked up the moment an
+  ARM machine is at hand.
+- [x] **Replace repeated OpenMP entry with a measured persistent worker strategy if beneficial** —
+  measured, and the persistent strategy was rejected in favour of not entering the region at all
+  (`core/parallel.{c,h}`, `tools/bench_parallel.c`, `docs/threading.md`).
+
+  Entering a region costs 0.475–1.29 µs here (GCC/libgomp, two threads). A single-token decode
+  matmul at the tiny tier takes 60 ns, so the dispatch was eight times the computation, and with the
+  measured 256 tile most decode and prefill shapes decompose into one or two blocks — the team was
+  woken so one thread could do everything. A spinning persistent pool was prototyped and does
+  dispatch for 0.073–0.337 µs, a real 2–15x, but that solves the smaller half: where dispatch
+  dominates, even 0.073 µs exceeds the whole computation, and above the crossover region entry is
+  already under 2% of a call. `parallel_should_fork(chunks, work)` therefore gates every OpenMP loop
+  in `matmul.c`, `matmul_x86.c`, `matmul_arm.c`, and `transformer.c` on having at least two chunks,
+  enough work, and more than one thread.
+
+  OpenMP's own `if` clause cannot do this: `if(0)` measured 0.367–0.492 µs against 0.475–1.29 µs for
+  `if(1)` and 0.0013 µs for no pragma, because libgomp still builds a team of one and calls the
+  outlined function. It skips the threads, not the region. Hence `DRANZER_PARALLEL_FOR`, a macro
+  precisely so the explicit branch's two copies of the loop cannot drift; the blocked kernels'
+  `collapse(2)` nest was flattened to a single block index to feed it, which a static schedule
+  distributes identically.
+
+  The threshold is bracketed rather than derived: the largest shape measured to lose is 4160
+  multiply-adds (1×16×260, 0.21–0.25x — forking costs 4–5x) and the smallest to win is 64000
+  (1×64×1000, 1.16–1.37x), while whole-model runs showed serializing the small tier's decode head
+  loop cost 1.19–1.45x, so it must be admitted at an estimated 13824. 2^13 sits near the geometric
+  middle of (4160, 13824]. Getting there required pricing softmax at 22 multiply-adds
+  (3.4 ns against 0.155 ns, measured): omitted, the decode head-loop estimate undercounts by 40% and
+  the small tier lands on the wrong side — a regression that only whole-model measurement caught,
+  after the isolated shapes already looked clean. No scalar-versus-vector conversion factor was
+  needed; near the threshold both measured 0.145 vs 0.156 ns per multiply-add, because a shape that
+  small waits on memory either way.
+
+  Whole-model, ABBA-interleaved, two binaries differing only in the cutoff (GCC, `OMP=1`, two
+  threads): tiny improves prefill **3.42x**, growing-cache and ring decode **2.29x**, inference
+  1.22x, training 1.15x; small improves prefill 1.25–1.45x, growing-cache decode 1.27x, ring decode
+  1.11–1.22x. Medium is flat at 0.97–1.04x, which is the control — every shape there is far above
+  the threshold — and its flatness is what makes the other two columns credible. The default build
+  is serial and measured 0.92–1.05x before versus after, i.e. unchanged.
+
+  Two methodology results are recorded because they changed conclusions. The tool's own prototype
+  pool was left spinning through the crossover sweep at first and held one of two cores for it,
+  swinging the same shape between 0.86x and 2.62x across sessions; and shapes whose decomposition
+  yields fewer than two blocks run identical code on both sides, so the tool now prints their spread
+  as an explicit noise floor (0.81–1.14x on this machine) and rows inside it are not treated as
+  evidence. `test_parallel.c` asserts forked and serial results are **bit-identical** — not within a
+  tolerance — for every available kernel over eight shapes and three tiles, for both backward
+  functions accumulated twice into a non-zero destination, reports how many shape/tile pairs
+  actually forked so it cannot pass vacuously, and pins each recorded verdict against the shipped
+  threshold so the constant cannot drift silently. GCC, Clang, OpenMP, ASan, ASan+OpenMP,
+  size-optimized, `-Wpedantic -std=c11`, `make arm-check`, and both CLI integration checks pass;
+  exact resume remains byte-identical.
+- [x] **Weight-only quantization, part 1: what it costs in accuracy — COMPLETE.** Simulated
+  (quantize-then-dequantize) INT8 and INT4 at per-tensor, per-row, and per-column scales, under an
+  explicit policy over which tensors are touched. No storage change and no kernel change, so the
+  accuracy question stays isolated from the engineering. `core/quantize.{c,h}` holds the grid,
+  `core/model_params.{c,h}` the tensor inventory, `core/model_quantize.{c,h}` the policy and its
+  report, and `tools/bench_quant.c` the measurement. Documented in `docs/quantization.md`.
+
+  **The headline is a withdrawal.** At 12 seeds, per-tensor scaling was resolvably worse than
+  per-column at 4 bits: +0.0563 ± 0.0222 in relative logit movement, comfortably past the stated
+  threshold. Rerun at 60 seeds the same comparison is +0.0559 ± 0.0308 and does **not** clear it.
+  The mean moved under 1%; the spread grew 39%. Five times the samples did not sharpen the estimate,
+  it revealed that the 12-seed spread was an underestimate — and nothing else changed between the
+  runs. The effect is very likely real, but the 12-seed run was not entitled to say so. Both numbers
+  are recorded, because a result that stops at the first seed count where its threshold happens to
+  be met is the failure mode this project's methodology exists to prevent.
+
+  What survives is the level that does not depend on seeds: per-tensor scaling costs 0.1308 relative
+  RMS in weight space at 4 bits against 0.0907 for per-column, and uses 227 of 255 available levels
+  at 8 bits against 255 — one outlier stretching the scale and wasting an eighth of the grid, visible
+  as a count rather than inferred. **No ΔCE is resolvable for any scheme at 60 seeds**, while INT4
+  simultaneously moves logits 14–21% and flips the top-1 prediction on ~1% of windows. Error that
+  moves logits need not move the loss; reporting only one level would have called INT4 free or
+  called it expensive, which is why all three are printed.
+
+  The axis question came out against expectation. `quantize.h` argues per-output-channel (this
+  layout's *columns*, and what PyTorch's dim-0 convention corresponds to) should win, because every
+  product feeding an output element would then share one scale. Paired, row minus column is
+  −0.00063 ± 0.00105 at 8 bits and −0.01679 ± 0.02298 at 4 — unresolvable at both widths and
+  negative both times. Recorded as unsupported at this scale rather than refuted.
+
+  Two methodology failures are recorded because each invalidated a full run before being caught.
+  The error statistics were computed after the in-place store, so they compared the output against
+  itself and reported exactly zero error for every tensor while quantizing perfectly correctly — no
+  test of the *values* could have caught it, and `test_quantize.c` now requires the in-place and
+  out-of-place forms to report identical error. Separately, the first corpus was a function of
+  absolute position, so the held-out stretch landed on pattern phases training never covered; the
+  model memorized to a training loss of 0.02 and scored *worse than uniform* held out. The corpus is
+  now a Markov process with a closed-form entropy floor (0.6508 nats against a uniform 3.4657), and
+  the tool exits non-zero rather than interpreting deltas from a model that failed it.
+
+  `test_model_params.c` requires the inventory to tile `params` exactly — every float covered once,
+  no gap, no overlap — so a tensor added to `model_new()` and forgotten cannot silently escape
+  quantization and look like unusual accuracy. GCC, Clang, OpenMP, ASan, size-optimized, and
+  `-Wpedantic -std=c11` builds pass, along with both CLI integration checks.
+
+  Scope deliberately not claimed: nothing here transfers to large models. A two-layer 64-wide model
+  on a synthetic corpus has no reason to carry the outlier structure that motivates the real
+  activation-outlier literature, and only the weight-space level is even scale-independent in
+  principle.
+- [ ] **Weight-only quantization, part 2: storage.** Persist quantized weights and their scales in
+  a versioned bundle, with the existing checksum/shape/bounds validation extended to them, and
+  measure artifact size against the accuracy cost part 1 established. A dequantize-on-load path
+  keeps the runtime unchanged, so this goal is about the format alone.
+- [ ] **Weight-only quantization, part 3: whether it is actually faster.** Keep weights quantized in
+  memory and dequantize per tile inside the matmul kernels, so the saving is bandwidth rather than
+  disk. Measure against the fp32 kernels on the same shapes and the same reproducibility contract as
+  every other kernel change, and record the outcome even if the dequantization cost eats the
+  bandwidth win — which is the plausible result at this project's shapes and would be worth knowing.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.
 - [x] Run the full benchmark nightly on hosted runners and gate on same-run performance invariants
   (`.github/workflows/performance.yml`, `src/tools/perf_check.py`): kernel versus scalar reference,
@@ -391,7 +512,13 @@ speed/memory improvement is reproducible on identified hardware.
 
 ## v0.5 — Modern model and stable library
 
-- [ ] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time.
+- [ ] **Measure the seed-variance floor before evaluating any architecture change.** Train the same
+  configuration under several seeds and record the spread in held-out cross-entropy. Nothing in the
+  list below can be claimed as an improvement until its delta is compared against that number, and
+  at this project's model sizes the floor may well be larger than the effects being chased. Finding
+  that out first is cheap; finding it out after publishing a ranking is not.
+- [ ] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
+  the floor above, reporting "no resolvable difference" where that is the honest answer.
 - [ ] Add padding and general attention masks before variable-length batching.
 - [ ] Consider grouped-query attention only after quality and decode benchmarks exist.
 - [ ] Expose opaque model, tokenizer, cache, and generation handles through a stable public C API.

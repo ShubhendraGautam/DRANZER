@@ -24,6 +24,7 @@
  */
 
 #include "core/matmul_simd.h"
+#include "core/parallel.h"
 
 #ifdef DRANZER_HAVE_X86_SIMD
 
@@ -255,19 +256,24 @@ static void run_blocked(x86_block_fn block, const float *restrict A,
                         size_t m, size_t k, size_t n, size_t tile) {
     memset(C, 0, m * n * sizeof(float));
 
-    #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static)
-    #endif
-    for (size_t ii = 0; ii < m; ii += tile) {
-        for (size_t jj = 0; jj < n; jj += tile) {
-            size_t i_limit = (ii + tile > m) ? m : ii + tile;
-            size_t j_limit = (jj + tile > n) ? n : jj + tile;
-            for (size_t ll = 0; ll < k; ll += tile) {
-                size_t l_limit = (ll + tile > k) ? k : ll + tile;
-                block(A, B, C, k, n, ii, i_limit, jj, j_limit, ll, l_limit);
-            }
+    /* The (ii, jj) nest flattened into one block index, matching
+     * kernel_tiled_mr4() in core/matmul.c - `collapse(2)` with a static
+     * schedule distributes this same space in this same order, and one loop is
+     * what lets DRANZER_PARALLEL_FOR skip the region without a second copy of
+     * the body. */
+    const size_t i_blocks = (m + tile - 1) / tile;
+    const size_t j_blocks = (n + tile - 1) / tile;
+
+    DRANZER_PARALLEL_FOR(i_blocks * j_blocks, m * k * n, blk,
+        size_t ii = (blk / j_blocks) * tile;
+        size_t jj = (blk % j_blocks) * tile;
+        size_t i_limit = (ii + tile > m) ? m : ii + tile;
+        size_t j_limit = (jj + tile > n) ? n : jj + tile;
+        for (size_t ll = 0; ll < k; ll += tile) {
+            size_t l_limit = (ll + tile > k) ? k : ll + tile;
+            block(A, B, C, k, n, ii, i_limit, jj, j_limit, ll, l_limit);
         }
-    }
+    );
 }
 
 void matmul_kernel_avx2_mr4(const float *restrict A, const float *restrict B,
@@ -366,12 +372,9 @@ void matmul_backward_weight_avx512(const float *restrict A, const float *restric
     /* Canonical OpenMP loop form: a plain counter with a simple bound. Each
      * block owns four disjoint rows of dB, so there is no cross-thread
      * reduction and results match a serial build bit for bit. */
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t b = 0; b < blocks; b++) {
+    DRANZER_PARALLEL_FOR(blocks, m * k * n, b,
         bw_weight_block_avx512(A, dC, dB, m, k, n, b * 4);
-    }
+    );
     for (size_t l = blocks * 4; l < k; l++) {
         bw_weight_row_avx512(A, dC, dB, m, k, n, l);
     }
@@ -443,12 +446,9 @@ static void bw_input_row_avx512(const float *restrict dC, const float *restrict 
 void matmul_backward_input_avx512(const float *restrict dC, const float *restrict B,
                                   float *restrict dA, size_t m, size_t k, size_t n) {
     /* Parallel over i: each iteration owns a disjoint row of dA. */
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t i = 0; i < m; i++) {
+    DRANZER_PARALLEL_FOR(m, m * k * n, i,
         bw_input_row_avx512(dC, B, dA, k, n, i);
-    }
+    );
 }
 
 #else /* !DRANZER_HAVE_X86_SIMD */

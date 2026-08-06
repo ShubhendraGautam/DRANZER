@@ -7,6 +7,7 @@
  */
 
 #include "core/transformer.h"
+#include "core/parallel.h"
 #include "core/tensor_ops.h"
 #include "backends/gpu/gpu_matmul.h"
 #include "common/debug.h"
@@ -36,6 +37,49 @@ static void dispatch_matmul(neural_model_t *model, float *A, float *B, float *C,
     matrix_multiply(A, B, C, m, k, n);
 }
 
+/* One head of the forward pass, lifted out of the loop below so the loop body
+ * is a single call and DRANZER_PARALLEL_FOR can guard it without duplicating
+ * fifty lines - see core/parallel.h. */
+static void attention_head_forward(size_t head, size_t seq_len,
+                                   size_t embedding_dim, size_t head_dim,
+                                   const float *Q, const float *K, const float *V,
+                                   float *probs, float *concat) {
+    float *head_probs = probs + head * seq_len * seq_len;
+
+    for (size_t i = 0; i < seq_len; i++) {
+        /* Causal mask: position i may only attend to j <= i. Future
+         * positions get -INFINITY so softmax zeroes them out; row i
+         * always has at least the j==i entry, so no row is ever
+         * all -INFINITY. */
+        for (size_t j = 0; j <= i; j++) {
+            float score = 0.0f;
+            for (size_t d = 0; d < head_dim; d++) {
+                size_t q_idx = i * embedding_dim + head * head_dim + d;
+                size_t k_idx = j * embedding_dim + head * head_dim + d;
+                score += Q[q_idx] * K[k_idx];
+            }
+            head_probs[i * seq_len + j] = score / sqrtf((float)head_dim);
+        }
+        for (size_t j = i + 1; j < seq_len; j++) {
+            head_probs[i * seq_len + j] = -INFINITY;
+        }
+    }
+
+    for (size_t i = 0; i < seq_len; i++) {
+        softmax(&head_probs[i * seq_len], seq_len);
+    }
+
+    for (size_t i = 0; i < seq_len; i++) {
+        for (size_t d = 0; d < head_dim; d++) {
+            float sum = 0.0f;
+            for (size_t j = 0; j < seq_len; j++) {
+                sum += head_probs[i * seq_len + j] * V[j * embedding_dim + head * head_dim + d];
+            }
+            concat[i * embedding_dim + head * head_dim + d] = sum;
+        }
+    }
+}
+
 void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len) {
     transformer_layer_t *layer = &model->layers[l];
     size_t embedding_dim = model->embedding_dim;
@@ -58,48 +102,80 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
     /* Parallel over heads: each head reads all of Q/K/V but only ever
      * writes its own head*head_dim slice of concat and its own
      * head*seq_len*seq_len slab of probs - disjoint per head, so this is
-     * safe with no cross-thread reduction. */
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t head = 0; head < num_heads; head++) {
-        float *head_probs = probs + head * seq_len * seq_len;
+     * safe with no cross-thread reduction.
+     *
+     * Work is two seq_len x seq_len x head_dim passes per head - the scores
+     * and the value-weighted sum - which over all heads is
+     * 2 * seq_len^2 * embedding_dim, plus one softmax per row of every head.
+     * See DRANZER_PARALLEL_SOFTMAX_WORK for why the softmax is counted. */
+    DRANZER_PARALLEL_FOR(num_heads,
+                         2 * seq_len * seq_len * embedding_dim +
+                             num_heads * seq_len * seq_len * DRANZER_PARALLEL_SOFTMAX_WORK,
+                         head,
+        attention_head_forward(head, seq_len, embedding_dim, head_dim,
+                               Q, K, V, probs, concat);
+    );
 
-        for (size_t i = 0; i < seq_len; i++) {
-            /* Causal mask: position i may only attend to j <= i. Future
-             * positions get -INFINITY so softmax zeroes them out; row i
-             * always has at least the j==i entry, so no row is ever
-             * all -INFINITY. */
-            for (size_t j = 0; j <= i; j++) {
-                float score = 0.0f;
-                for (size_t d = 0; d < head_dim; d++) {
-                    size_t q_idx = i * embedding_dim + head * head_dim + d;
-                    size_t k_idx = j * embedding_dim + head * head_dim + d;
-                    score += Q[q_idx] * K[k_idx];
-                }
-                head_probs[i * seq_len + j] = score / sqrtf((float)head_dim);
-            }
-            for (size_t j = i + 1; j < seq_len; j++) {
-                head_probs[i * seq_len + j] = -INFINITY;
-            }
-        }
+    dispatch_matmul(model, concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
+}
 
-        for (size_t i = 0; i < seq_len; i++) {
-            softmax(&head_probs[i * seq_len], seq_len);
-        }
+/* One head of the backward pass, lifted out for the same reason as
+ * attention_head_forward() above. */
+static void attention_head_backward(size_t head, size_t seq_len,
+                                    size_t embedding_dim, size_t head_dim,
+                                    float scale, const float *Q, const float *K,
+                                    const float *V, const float *d_concat,
+                                    float *probs, float *d_scores_base,
+                                    float *dQ, float *dK, float *dV) {
+    float *head_probs = probs + head * seq_len * seq_len;
+    float *d_scores = d_scores_base + head * seq_len * seq_len;
 
-        for (size_t i = 0; i < seq_len; i++) {
+    /* dL/dprobs[i][j] from context[i] = sum_j probs[i][j]*V[j]; also
+     * accumulate dL/dV while we're indexed by (i,j) anyway. */
+    for (size_t i = 0; i < seq_len; i++) {
+        for (size_t j = 0; j < seq_len; j++) {
+            float dot = 0.0f;
             for (size_t d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
-                for (size_t j = 0; j < seq_len; j++) {
-                    sum += head_probs[i * seq_len + j] * V[j * embedding_dim + head * head_dim + d];
-                }
-                concat[i * embedding_dim + head * head_dim + d] = sum;
+                dot += d_concat[i * embedding_dim + head * head_dim + d] *
+                       V[j * embedding_dim + head * head_dim + d];
             }
+            d_scores[i * seq_len + j] = dot; /* holds dL/dprobs[i][j] for now */
+        }
+    }
+    for (size_t j = 0; j < seq_len; j++) {
+        for (size_t d = 0; d < head_dim; d++) {
+            float sum = 0.0f;
+            for (size_t i = 0; i < seq_len; i++) {
+                sum += head_probs[i * seq_len + j] * d_concat[i * embedding_dim + head * head_dim + d];
+            }
+            dV[j * embedding_dim + head * head_dim + d] += sum;
         }
     }
 
-    dispatch_matmul(model, concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
+    /* dL/dprobs -> dL/dscores via softmax backward, one row at a time */
+    for (size_t i = 0; i < seq_len; i++) {
+        softmax_backward(&head_probs[i * seq_len], &d_scores[i * seq_len], seq_len);
+    }
+
+    /* dL/dQ, dL/dK from scores = (Q . K) * scale */
+    for (size_t i = 0; i < seq_len; i++) {
+        for (size_t d = 0; d < head_dim; d++) {
+            float sum = 0.0f;
+            for (size_t j = 0; j < seq_len; j++) {
+                sum += d_scores[i * seq_len + j] * K[j * embedding_dim + head * head_dim + d];
+            }
+            dQ[i * embedding_dim + head * head_dim + d] += sum * scale;
+        }
+    }
+    for (size_t j = 0; j < seq_len; j++) {
+        for (size_t d = 0; d < head_dim; d++) {
+            float sum = 0.0f;
+            for (size_t i = 0; i < seq_len; i++) {
+                sum += d_scores[i * seq_len + j] * Q[i * embedding_dim + head * head_dim + d];
+            }
+            dK[j * embedding_dim + head * head_dim + d] += sum * scale;
+        }
+    }
 }
 
 void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_len,
@@ -137,61 +213,16 @@ void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_le
 
     /* Parallel over heads: dQ/dK/dV are accumulated (+=) but each head only
      * ever touches its own head*head_dim slice of them, so writes are
-     * disjoint across threads - no cross-thread reduction, no race. */
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t head = 0; head < num_heads; head++) {
-        float *head_probs = probs + head * seq_len * seq_len;
-        float *d_scores = d_scores_base + head * seq_len * seq_len;
-
-        /* dL/dprobs[i][j] from context[i] = sum_j probs[i][j]*V[j]; also
-         * accumulate dL/dV while we're indexed by (i,j) anyway. */
-        for (size_t i = 0; i < seq_len; i++) {
-            for (size_t j = 0; j < seq_len; j++) {
-                float dot = 0.0f;
-                for (size_t d = 0; d < head_dim; d++) {
-                    dot += d_concat[i * embedding_dim + head * head_dim + d] *
-                           V[j * embedding_dim + head * head_dim + d];
-                }
-                d_scores[i * seq_len + j] = dot; /* holds dL/dprobs[i][j] for now */
-            }
-        }
-        for (size_t j = 0; j < seq_len; j++) {
-            for (size_t d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
-                for (size_t i = 0; i < seq_len; i++) {
-                    sum += head_probs[i * seq_len + j] * d_concat[i * embedding_dim + head * head_dim + d];
-                }
-                dV[j * embedding_dim + head * head_dim + d] += sum;
-            }
-        }
-
-        /* dL/dprobs -> dL/dscores via softmax backward, one row at a time */
-        for (size_t i = 0; i < seq_len; i++) {
-            softmax_backward(&head_probs[i * seq_len], &d_scores[i * seq_len], seq_len);
-        }
-
-        /* dL/dQ, dL/dK from scores = (Q . K) * scale */
-        for (size_t i = 0; i < seq_len; i++) {
-            for (size_t d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
-                for (size_t j = 0; j < seq_len; j++) {
-                    sum += d_scores[i * seq_len + j] * K[j * embedding_dim + head * head_dim + d];
-                }
-                dQ[i * embedding_dim + head * head_dim + d] += sum * scale;
-            }
-        }
-        for (size_t j = 0; j < seq_len; j++) {
-            for (size_t d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
-                for (size_t i = 0; i < seq_len; i++) {
-                    sum += d_scores[i * seq_len + j] * Q[i * embedding_dim + head * head_dim + d];
-                }
-                dK[j * embedding_dim + head * head_dim + d] += sum * scale;
-            }
-        }
-    }
+     * disjoint across threads - no cross-thread reduction, no race.
+     *
+     * Four seq_len x seq_len x head_dim passes per head against the forward
+     * pass's two, so twice its work estimate. No softmax term: this pass runs
+     * softmax_backward(), which has no exponential in it. */
+    DRANZER_PARALLEL_FOR(num_heads, 4 * seq_len * seq_len * embedding_dim, head,
+        attention_head_backward(head, seq_len, embedding_dim, head_dim, scale,
+                                Q, K, V, d_concat, probs, d_scores_base,
+                                dQ, dK, dV);
+    );
 
     matmul_backward_weight(sequence, dQ, layer->W_q_grad, seq_len, embedding_dim, embedding_dim);
     matmul_backward_weight(sequence, dK, layer->W_k_grad, seq_len, embedding_dim, embedding_dim);
@@ -381,6 +412,39 @@ void model_kv_cache_free(model_kv_cache_t *cache) {
     memset(cache, 0, sizeof(*cache));
 }
 
+/* One head of cached single-token decode. Lifted out like the two above, and
+ * the most cutoff-sensitive of the three: this is the generation hot path, and
+ * a head here does only context_len x head_dim work - well under a microsecond
+ * at every tier this project benchmarks. */
+static void attention_head_forward_token(size_t head, model_kv_cache_t *cache,
+                                         size_t layer_index, size_t context_len,
+                                         size_t embedding_dim, size_t head_dim) {
+    float *scores = &cache->scores[head * cache->capacity];
+    for (size_t j = 0; j < context_len; j++) {
+        float score = 0.0f;
+        size_t physical = (cache->start + j) % cache->capacity;
+        const float *cached_key =
+            &cache->keys[layer_index][physical * embedding_dim];
+        for (size_t d = 0; d < head_dim; d++) {
+            size_t idx = head * head_dim + d;
+            score += cache->query[idx] * cached_key[idx];
+        }
+        scores[j] = score / sqrtf((float)head_dim);
+    }
+    softmax(scores, context_len);
+
+    for (size_t d = 0; d < head_dim; d++) {
+        size_t idx = head * head_dim + d;
+        float sum = 0.0f;
+        for (size_t j = 0; j < context_len; j++) {
+            size_t physical = (cache->start + j) % cache->capacity;
+            sum += scores[j] *
+                   cache->values[layer_index][physical * embedding_dim + idx];
+        }
+        cache->attn_concat[idx] = sum;
+    }
+}
+
 static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cache,
                                     size_t layer_index, size_t slot,
                                     size_t context_len) {
@@ -397,35 +461,18 @@ static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cac
 
     memset(cache->attn_concat, 0, embedding_dim * sizeof(float));
 
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t head = 0; head < num_heads; head++) {
-        float *scores = &cache->scores[head * cache->capacity];
-        for (size_t j = 0; j < context_len; j++) {
-            float score = 0.0f;
-            size_t physical = (cache->start + j) % cache->capacity;
-            const float *cached_key =
-                &cache->keys[layer_index][physical * embedding_dim];
-            for (size_t d = 0; d < head_dim; d++) {
-                size_t idx = head * head_dim + d;
-                score += cache->query[idx] * cached_key[idx];
-            }
-            scores[j] = score / sqrtf((float)head_dim);
-        }
-        softmax(scores, context_len);
-
-        for (size_t d = 0; d < head_dim; d++) {
-            size_t idx = head * head_dim + d;
-            float sum = 0.0f;
-            for (size_t j = 0; j < context_len; j++) {
-                size_t physical = (cache->start + j) % cache->capacity;
-                sum += scores[j] *
-                       cache->values[layer_index][physical * embedding_dim + idx];
-            }
-            cache->attn_concat[idx] = sum;
-        }
-    }
+    /* Two context_len x head_dim passes per head - 2 * context_len *
+     * embedding_dim over all of them - plus one softmax of context_len
+     * elements per head. The softmax term is 40% of this estimate and decides
+     * the small tier's verdict, which is what makes it worth counting here
+     * rather than treating attention as pure multiply-adds. */
+    DRANZER_PARALLEL_FOR(num_heads,
+                         2 * context_len * embedding_dim +
+                             num_heads * context_len * DRANZER_PARALLEL_SOFTMAX_WORK,
+                         head,
+        attention_head_forward_token(head, cache, layer_index, context_len,
+                                     embedding_dim, head_dim);
+    );
 
     dispatch_matmul(model, cache->attn_concat, layer->W_o, cache->attn_raw,
                     1, embedding_dim, embedding_dim);

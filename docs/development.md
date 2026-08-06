@@ -266,6 +266,37 @@ make bench OMP=1 CC=gcc
 OMP_NUM_THREADS=4 ./bench.out
 ```
 
+Threading has its own measurement tool, because whether a parallel region is worth entering cannot
+be seen from a whole-model number:
+
+```bash
+make bench-parallel OMP=1 CC=gcc
+OMP_NUM_THREADS=4 ./bench_parallel.out --rounds 7
+```
+
+It reports what a region entry costs, how a persistent worker pool compares, and where forking
+starts paying for itself, appending every row to `parallel_results_v1.csv`. Read its `cannot fork`
+rows first: those run identical code on both sides, so their spread is the machine's noise floor and
+anything inside it is not a measurement. [CPU threading](threading.md) documents the cutoff, the
+threshold's derivation, and why the worker pool was rejected.
+
+Quantization accuracy has its own tool, for the same reason - a single held-out number cannot say
+where the error entered or whether it is larger than seed noise:
+
+```bash
+make bench-quant CC=gcc
+./bench_quant.out --seeds 60
+./bench_quant.out --seeds 12 --per-tensor
+```
+
+It trains several models on a corpus with a closed-form entropy floor, quantizes each one, and
+reports the cost in weight space, logit space, and held-out cross-entropy, appending rows to
+`quant_results_v1.csv`. It exits non-zero if the trained model failed to beat a uniform predictor,
+so a broken training configuration fails loudly instead of producing a plausible table. Read the
+`seeds req` column before believing any "resolvable" verdict - a 12-seed run in this project
+produced a conclusion the 60-seed rerun withdrew. [Weight quantization](quantization.md) documents
+the schemes, the three levels, and that reversal.
+
 ### Profiling workflow
 
 Build a frame-pointer-enabled benchmark and select one bounded tier before changing a kernel:

@@ -196,6 +196,10 @@ operations, layer normalization, softmax, optimizer, and tokenizer remain on the
 | `core/matmul_x86.c` | AVX2 and AVX-512 kernels, reached only through runtime dispatch |
 | `core/matmul_arm.c` | NEON kernel, reached only through runtime dispatch |
 | `core/cpu_features.c` | Runtime instruction-set detection behind that dispatch |
+| `core/parallel.c` | Whether an OpenMP region is worth entering, and the guarded loop form |
+| `core/quantize.c` | Symmetric integer grids and the error they introduce |
+| `core/model_params.c` | Inventory of the model's trainable tensors, with shapes and roles |
+| `core/model_quantize.c` | Quantization policy over those tensors, and its error report |
 | `core/tensor_ops.c` | Softmax, layer norm, dropout, and positional encoding |
 | `core/transformer.c` | Causal attention, transformer blocks, forward pass, backend dispatch |
 | `core/training.c` | Cross-entropy and full backward-pass orchestration |
@@ -214,6 +218,8 @@ operations, layer normalization, softmax, optimizer, and tokenizer remain on the
 | `backends/gpu/gpu_cuda.c` | Minimal dynamically loaded CUDA Driver API wrapper |
 | `backends/gpu/gpu_matmul.c` | Hand-written PTX matmul and device-side caches |
 | `tools/bench.c` | Model-size and throughput benchmark |
+| `tools/bench_parallel.c` | Parallel-region entry cost and the fork/serial crossover sweep |
+| `tools/bench_quant.c` | Quantization cost in weight, logit, and cross-entropy space |
 
 Headers live under `src/include/` and mirror the source hierarchy. External callers can include
 `core/model.h` as a facade; internal modules include only the narrow headers they need.

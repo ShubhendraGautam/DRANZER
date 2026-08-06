@@ -134,7 +134,10 @@ a different compiler, or a different kernel override remains equivalent within f
 bit-identical. Nothing in the selection policy varies on thread count or wall-clock timing.
 
 OpenMP parallelism does not change results either: blocks own disjoint regions of `C`, so there is
-no cross-thread reduction and an `OMP=1` build agrees bit-for-bit with a serial one.
+no cross-thread reduction and an `OMP=1` build agrees bit-for-bit with a serial one. Whether a
+kernel enters a parallel region at all is a separate, purely-performance decision described in
+[CPU threading](threading.md); it cannot change a result, and `test_parallel.c` asserts that as
+bit-identity rather than as a tolerance.
 
 ## Reproducing the measurements
 
@@ -490,9 +493,10 @@ have detected a dispatch that never fired.
 ## Limitations
 
 - **The NEON kernel is written but unmeasured.** No AArch64 machine was available. It is checked for
-  correctness by the same equivalence test wherever it is built, and the preference order places it
-  ahead of the portable kernel on the same reasoning as the x86 kernels, but no number in this
-  document was produced on ARM. Re-run `tools/matmul_sweep.sh` before trusting it there.
+  correctness by the same equivalence test wherever it is built and cross-compiled by
+  `make arm-check`, but `matmul_select()` does not return it — an AArch64 machine falls back to
+  `tiled_mr4` — and no number in this document was produced on ARM. Run `tools/matmul_sweep.sh`
+  there before promoting it.
 - **The "runs without the instruction set" gate is tested by simulation, not by hardware.** No
   pre-AVX2 machine was available either. `cpu_features_set_max_isa(CPU_ISA_BASELINE)` makes
   detection report exactly what such a CPU would report, so every dispatch decision below it is the
@@ -502,11 +506,9 @@ have detected a dispatch that never fired.
   row-major layout, so the innermost loop's `B` access is contiguous but its `A` access is strided.
   A packing pass is the usual next step and is not attempted here.
 - **The backward-pass kernels are not part of the candidate set.** `matmul_backward_input` and
-  `matmul_backward_weight` have one portable implementation each and no SIMD path, which is why the
-  whole-model table shows no measurable training speedup from AVX-512. Their loop order has since
-  been fixed (see [The backward kernels](#the-backward-kernels)), but they are still plain C.
-- **The AVX2 compiler split is unexplained.** The same intrinsics measure 1.35x under GCC and 0.90x
-  under Clang, with packed FMAs present in both disassemblies. The cause is somewhere in
-  instruction scheduling and was not isolated.
+  `matmul_backward_weight` have one implementation each with no selectable alternative, so nothing
+  sweeps them the way `matmul_select()`'s candidates are swept. They are no longer plain C — see
+  [The backward kernels](#the-backward-kernels) for the loop-order fix and the AVX-512 paths — but
+  their dispatch is a single `cpu_isa_available()` branch rather than a measured policy.
 - Tiles are square. A rectangular blocking scheme (different extents for `m`, `k`, and `n`) is not
   explored.

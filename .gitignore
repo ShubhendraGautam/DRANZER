@@ -6,6 +6,8 @@ src/bench.out
 src/bench_profile.out
 src/gpu_probe.out
 src/gpu_latency.out
+src/bench_parallel.out
+src/bench_quant.out
 src/app.out
 libs/src/*.o
 libs/libattention.a
@@ -23,6 +25,8 @@ src/gpu_capability_cache/
 # Remove this line if you want to commit a specific machine's history.
 bench_results*.csv
 matmul_results*.csv
+parallel_results*.csv
+quant_results*.csv
 perf.data*
 
 # Generated files

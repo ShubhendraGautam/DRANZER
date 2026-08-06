@@ -13,6 +13,7 @@
  */
 
 #include "core/matmul_simd.h"
+#include "core/parallel.h"
 
 #ifdef DRANZER_HAVE_NEON
 
@@ -111,19 +112,21 @@ void matmul_kernel_neon_mr4(const float *restrict A, const float *restrict B,
                             size_t m, size_t k, size_t n, size_t tile) {
     memset(C, 0, m * n * sizeof(float));
 
-    #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) schedule(static)
-    #endif
-    for (size_t ii = 0; ii < m; ii += tile) {
-        for (size_t jj = 0; jj < n; jj += tile) {
-            size_t i_limit = (ii + tile > m) ? m : ii + tile;
-            size_t j_limit = (jj + tile > n) ? n : jj + tile;
-            for (size_t ll = 0; ll < k; ll += tile) {
-                size_t l_limit = (ll + tile > k) ? k : ll + tile;
-                block_neon(A, B, C, k, n, ii, i_limit, jj, j_limit, ll, l_limit);
-            }
+    /* Flattened block index and work-gated region entry, matching
+     * run_blocked() in core/matmul_x86.c. */
+    const size_t i_blocks = (m + tile - 1) / tile;
+    const size_t j_blocks = (n + tile - 1) / tile;
+
+    DRANZER_PARALLEL_FOR(i_blocks * j_blocks, m * k * n, blk,
+        size_t ii = (blk / j_blocks) * tile;
+        size_t jj = (blk % j_blocks) * tile;
+        size_t i_limit = (ii + tile > m) ? m : ii + tile;
+        size_t j_limit = (jj + tile > n) ? n : jj + tile;
+        for (size_t ll = 0; ll < k; ll += tile) {
+            size_t l_limit = (ll + tile > k) ? k : ll + tile;
+            block_neon(A, B, C, k, n, ii, i_limit, jj, j_limit, ll, l_limit);
         }
-    }
+    );
 }
 
 #else /* !DRANZER_HAVE_NEON */

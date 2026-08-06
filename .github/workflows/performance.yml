@@ -184,6 +184,20 @@ jobs:
             done
           done
 
+      # The cutoff in core/parallel.c was derived on a two-hyperthread
+      # developer machine, which is the worst case for parallel speedup and
+      # the best case for not forking at all (docs/threading.md's first
+      # limitation). A hosted runner has real cores, so this records what the
+      # crossover looks like there. Not asserted on - hosted-runner timings
+      # are not reproducible enough to gate - but it is the only place this
+      # project sees the measurement on more than one physical core.
+      - name: Measure the parallel-region crossover
+        if: always()
+        working-directory: src
+        run: |
+          make bench-parallel CC=gcc OMP=1
+          ./bench_parallel.out --rounds 5
+
       - name: Check invariants and write the report
         # always(): if the measurement step above failed or timed out, the
         # report is the thing that explains why on the run page. Without this
@@ -202,6 +216,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: thread-scaling-${{ github.run_number }}
-          path: src/bench_results_v3.csv
+          path: |
+            src/bench_results_v3.csv
+            src/parallel_results_v1.csv
           if-no-files-found: warn
           retention-days: 90
