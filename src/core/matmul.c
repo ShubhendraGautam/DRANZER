@@ -362,8 +362,22 @@ void matrix_multiply_scalar(const float *restrict A, const float *restrict B,
     kernel_scalar(A, B, C, m, k, n);
 }
 
+/* Both backward functions take the AVX-512 path where the CPU has it and the
+ * portable one everywhere else. There is no kernel enum and no shape
+ * threshold here, unlike matmul_select(): these have one vector
+ * implementation, it beat the portable code on every measured shape, and a
+ * caller has nothing to choose between. cpu_isa_available() is the only gate,
+ * and it answers from cached CPUID state, so this costs a predictable branch
+ * rather than a probe. */
 void matmul_backward_input(float *restrict dC, float *restrict B, float *restrict dA,
                             size_t m, size_t k, size_t n) {
+#ifdef DRANZER_HAVE_X86_SIMD
+    if (cpu_isa_available(CPU_ISA_AVX512)) {
+        matmul_backward_input_avx512(dC, B, dA, m, k, n);
+        return;
+    }
+#endif
+
     #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
     #endif
@@ -402,6 +416,13 @@ void matmul_backward_input(float *restrict dC, float *restrict B, float *restric
  * deterministic, which is what exact resume actually requires. */
 void matmul_backward_weight(float *restrict A, float *restrict dC, float *restrict dB,
                              size_t m, size_t k, size_t n) {
+#ifdef DRANZER_HAVE_X86_SIMD
+    if (cpu_isa_available(CPU_ISA_AVX512)) {
+        matmul_backward_weight_avx512(A, dC, dB, m, k, n);
+        return;
+    }
+#endif
+
     #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
     #endif

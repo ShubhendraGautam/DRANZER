@@ -161,24 +161,37 @@ Measured with `./gpu_latency.out`, CPU against GPU on the same buffers in the sa
 
 | Shape (m×k×n) | `backward_input` | `backward_weight` |
 |---|---:|---:|
-| 1×64×1000 | 0.05x | 0.03x |
-| 1×256×4000 | 0.36x | 0.07x |
-| 64×64×64 | 0.24x | 0.16x |
-| 64×256×64 | 0.73x | 0.50x |
-| 128×256×256 | **1.60x** | **2.57x** |
-| 128×256×1024 | **2.43x** | **4.88x** |
-| 128×1024×256 | **2.29x** | **3.49x** |
+| 1×64×1000 | 0.02x | 0.01x |
+| 1×256×4000 | 0.16x | 0.05x |
+| 64×64×64 | 0.09x | 0.08x |
+| 64×256×64 | 0.23x | 0.16x |
+| 128×256×256 | 0.64x | 0.62x |
+| 128×256×1024 | 0.95x | **1.62x** |
+| 128×1024×256 | 0.93x | **1.32x** |
 
-`core/training.c` therefore dispatches both above 2²³ multiply-accumulates. Below the threshold the
-CPU runs, which is always correct and never worse than having no GPU.
+`core/training.c` dispatches `backward_weight` above 2²⁵ multiply-accumulates and `backward_input`
+above 2²⁶. Below either threshold the CPU runs, which is always correct and never worse than having
+no GPU.
 
-**These numbers replaced a much more flattering set, and the reason matters.** When the backward
-kernels were first dispatched, `backward_weight` measured up to **30x** on the GPU and crossed over
-eight times sooner, at 2²⁰. That was not the GPU being extraordinary — it was
-`matmul_backward_weight()` striding both operands in its innermost loop on the CPU. Fixing that
-loop order made the CPU side 5.6x to 21.8x faster (see
-[CPU matmul kernels](matmul.md#the-backward-kernels)) and pulled the GPU's advantage down to the
-3-5x above, moving the crossover out to meet `backward_input`'s.
+Only the weight threshold is measured. `backward_weight` wins at the two largest shapes the
+benchmark issues (both 2²⁵) and loses at 2²³, so 2²⁵ sits on the far side of an observed crossover.
+`backward_input` never won at any measured shape — it reaches 0.95x and is still climbing — so its
+threshold extrapolates that trend beyond every shape this project benchmarks. In practice
+`backward_input` runs on the CPU for every model here, which is what the measurements support; the
+path stays for larger models and faster cards, where it should be re-measured rather than trusted.
+
+**These numbers have been revised downwards twice, and the reason matters more than the numbers.**
+
+| When | `backward_weight` best | Thresholds |
+|---|---:|---|
+| Backward dispatch first added | up to **30x** | 2²⁰ / 2²³ |
+| After the CPU loop-order fix | 3–5x | 2²³ / 2²³ |
+| After AVX-512 backward kernels | 1.3–1.6x | 2²⁵ / 2²⁶ |
+
+The GPU never got slower. Each time, the CPU implementation it is measured against got faster — a
+loop order worth 5.6–21.8x, then vector kernels worth another 2–3x (see
+[CPU matmul kernels](matmul.md#the-backward-kernels)) — and the range of shapes where a device round
+trip pays shrank accordingly.
 
 The GPU did not get worse; the competition got better. The lesson for anyone reading a speedup
 table in this repository: a large ratio is a claim about *two* implementations, and the cheap one to

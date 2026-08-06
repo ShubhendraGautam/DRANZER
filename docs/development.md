@@ -32,6 +32,7 @@ fails.
 | `test_serialization_roundtrip.c` | Identical logits before and after save/load |
 | `test_model_bundle.c` | Canonical round-trip, corruption sweep, bounds, and legacy fixture |
 | `test_scalar_reference.c` | Tiled/full-model/cached-decode agreement with portable scalar matmul |
+| `test_matmul_backward.c` | Vector backward kernels against the portable reference, accumulation into a non-zero destination, and proof that dispatch reaches the vector path |
 | `test_matmul_kernels.c` | Every available kernel (portable and dispatched SIMD) at every tile size versus the scalar reference, plus selection determinism, configuration validation, and correct fallback when the instruction set is unavailable |
 | `test_batch_behavior.c` | Bounded deterministic shuffle and batch capacity checks |
 | `test_checkpoint_resume.c` | Complete-state round-trip, continued trajectory, latest selection, and retention |

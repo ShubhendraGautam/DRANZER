@@ -231,6 +231,175 @@ void matmul_kernel_avx512_mr4(const float *restrict A, const float *restrict B,
     run_blocked(block_avx512, A, B, C, m, k, n, tile);
 }
 
+/* ------------------------------------------------------- backward pass ---
+ *
+ * Both mirror the portable versions in core/matmul.c exactly - same loop
+ * order, same blocking - with the innermost loop over j issued as vector
+ * FMAs. See core/matmul_simd.h for why these are AVX-512 only.
+ */
+
+/* dB rows [l, l+4) += A_transposed @ dC, over all of m.
+ *
+ * The same shape as block_avx512() above: four independent accumulator rows
+ * fed by one broadcast scalar each, against a single shared load of dC. The
+ * difference is that the four scalars come from four adjacent columns of A
+ * (a[0..3], contiguous) rather than four rows. */
+__attribute__((target("avx512f,avx512vl")))
+static void bw_weight_block_avx512(const float *restrict A, const float *restrict dC,
+                                   float *restrict dB, size_t m, size_t k, size_t n,
+                                   size_t l) {
+    float *out0 = &dB[l * n];
+    float *out1 = out0 + n;
+    float *out2 = out1 + n;
+    float *out3 = out2 + n;
+
+    for (size_t i = 0; i < m; i++) {
+        const float *row_dc = &dC[i * n];
+        const float *a = &A[i * k + l];
+        const __m512 a0 = _mm512_set1_ps(a[0]);
+        const __m512 a1 = _mm512_set1_ps(a[1]);
+        const __m512 a2 = _mm512_set1_ps(a[2]);
+        const __m512 a3 = _mm512_set1_ps(a[3]);
+
+        size_t j = 0;
+        for (; j + 16 <= n; j += 16) {
+            const __m512 d = _mm512_loadu_ps(row_dc + j);
+            _mm512_storeu_ps(out0 + j, _mm512_fmadd_ps(a0, d, _mm512_loadu_ps(out0 + j)));
+            _mm512_storeu_ps(out1 + j, _mm512_fmadd_ps(a1, d, _mm512_loadu_ps(out1 + j)));
+            _mm512_storeu_ps(out2 + j, _mm512_fmadd_ps(a2, d, _mm512_loadu_ps(out2 + j)));
+            _mm512_storeu_ps(out3 + j, _mm512_fmadd_ps(a3, d, _mm512_loadu_ps(out3 + j)));
+        }
+        if (j < n) {
+            const __mmask16 tail = (__mmask16)((1u << (n - j)) - 1u);
+            const __m512 d = _mm512_maskz_loadu_ps(tail, row_dc + j);
+            _mm512_mask_storeu_ps(out0 + j, tail,
+                _mm512_fmadd_ps(a0, d, _mm512_maskz_loadu_ps(tail, out0 + j)));
+            _mm512_mask_storeu_ps(out1 + j, tail,
+                _mm512_fmadd_ps(a1, d, _mm512_maskz_loadu_ps(tail, out1 + j)));
+            _mm512_mask_storeu_ps(out2 + j, tail,
+                _mm512_fmadd_ps(a2, d, _mm512_maskz_loadu_ps(tail, out2 + j)));
+            _mm512_mask_storeu_ps(out3 + j, tail,
+                _mm512_fmadd_ps(a3, d, _mm512_maskz_loadu_ps(tail, out3 + j)));
+        }
+    }
+}
+
+/* One row of dB, for values of k that are not a multiple of four. */
+__attribute__((target("avx512f,avx512vl")))
+static void bw_weight_row_avx512(const float *restrict A, const float *restrict dC,
+                                 float *restrict dB, size_t m, size_t k, size_t n,
+                                 size_t l) {
+    float *row_out = &dB[l * n];
+    for (size_t i = 0; i < m; i++) {
+        const __m512 a = _mm512_set1_ps(A[i * k + l]);
+        const float *row_dc = &dC[i * n];
+        size_t j = 0;
+        for (; j + 16 <= n; j += 16) {
+            _mm512_storeu_ps(row_out + j,
+                _mm512_fmadd_ps(a, _mm512_loadu_ps(row_dc + j),
+                                _mm512_loadu_ps(row_out + j)));
+        }
+        if (j < n) {
+            const __mmask16 tail = (__mmask16)((1u << (n - j)) - 1u);
+            _mm512_mask_storeu_ps(row_out + j, tail,
+                _mm512_fmadd_ps(a, _mm512_maskz_loadu_ps(tail, row_dc + j),
+                                _mm512_maskz_loadu_ps(tail, row_out + j)));
+        }
+    }
+}
+
+void matmul_backward_weight_avx512(const float *restrict A, const float *restrict dC,
+                                   float *restrict dB, size_t m, size_t k, size_t n) {
+    const size_t blocks = k / 4;
+
+    /* Canonical OpenMP loop form: a plain counter with a simple bound. Each
+     * block owns four disjoint rows of dB, so there is no cross-thread
+     * reduction and results match a serial build bit for bit. */
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t b = 0; b < blocks; b++) {
+        bw_weight_block_avx512(A, dC, dB, m, k, n, b * 4);
+    }
+    for (size_t l = blocks * 4; l < k; l++) {
+        bw_weight_row_avx512(A, dC, dB, m, k, n, l);
+    }
+}
+
+/* dA row i += dC row i @ B_transposed.
+ *
+ * A reduction rather than an axpy: each output element is a dot product of
+ * two contiguous rows. Four rows of B are consumed at once so the single load
+ * of dC feeds four independent accumulator chains, then each is reduced
+ * across its lanes at the end. */
+__attribute__((target("avx512f,avx512vl")))
+static void bw_input_row_avx512(const float *restrict dC, const float *restrict B,
+                                float *restrict dA, size_t k, size_t n, size_t i) {
+    const float *row_dc = &dC[i * n];
+    float *out = &dA[i * k];
+    size_t l = 0;
+
+    for (; l + 4 <= k; l += 4) {
+        const float *b0 = &B[l * n];
+        const float *b1 = b0 + n;
+        const float *b2 = b1 + n;
+        const float *b3 = b2 + n;
+        __m512 acc0 = _mm512_setzero_ps();
+        __m512 acc1 = _mm512_setzero_ps();
+        __m512 acc2 = _mm512_setzero_ps();
+        __m512 acc3 = _mm512_setzero_ps();
+
+        size_t j = 0;
+        for (; j + 16 <= n; j += 16) {
+            const __m512 d = _mm512_loadu_ps(row_dc + j);
+            acc0 = _mm512_fmadd_ps(d, _mm512_loadu_ps(b0 + j), acc0);
+            acc1 = _mm512_fmadd_ps(d, _mm512_loadu_ps(b1 + j), acc1);
+            acc2 = _mm512_fmadd_ps(d, _mm512_loadu_ps(b2 + j), acc2);
+            acc3 = _mm512_fmadd_ps(d, _mm512_loadu_ps(b3 + j), acc3);
+        }
+        if (j < n) {
+            const __mmask16 tail = (__mmask16)((1u << (n - j)) - 1u);
+            const __m512 d = _mm512_maskz_loadu_ps(tail, row_dc + j);
+            acc0 = _mm512_fmadd_ps(d, _mm512_maskz_loadu_ps(tail, b0 + j), acc0);
+            acc1 = _mm512_fmadd_ps(d, _mm512_maskz_loadu_ps(tail, b1 + j), acc1);
+            acc2 = _mm512_fmadd_ps(d, _mm512_maskz_loadu_ps(tail, b2 + j), acc2);
+            acc3 = _mm512_fmadd_ps(d, _mm512_maskz_loadu_ps(tail, b3 + j), acc3);
+        }
+
+        out[l]     += _mm512_reduce_add_ps(acc0);
+        out[l + 1] += _mm512_reduce_add_ps(acc1);
+        out[l + 2] += _mm512_reduce_add_ps(acc2);
+        out[l + 3] += _mm512_reduce_add_ps(acc3);
+    }
+
+    for (; l < k; l++) {
+        const float *b = &B[l * n];
+        __m512 acc = _mm512_setzero_ps();
+        size_t j = 0;
+        for (; j + 16 <= n; j += 16) {
+            acc = _mm512_fmadd_ps(_mm512_loadu_ps(row_dc + j),
+                                  _mm512_loadu_ps(b + j), acc);
+        }
+        if (j < n) {
+            const __mmask16 tail = (__mmask16)((1u << (n - j)) - 1u);
+            acc = _mm512_fmadd_ps(_mm512_maskz_loadu_ps(tail, row_dc + j),
+                                  _mm512_maskz_loadu_ps(tail, b + j), acc);
+        }
+        out[l] += _mm512_reduce_add_ps(acc);
+    }
+}
+
+void matmul_backward_input_avx512(const float *restrict dC, const float *restrict B,
+                                  float *restrict dA, size_t m, size_t k, size_t n) {
+    /* Parallel over i: each iteration owns a disjoint row of dA. */
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t i = 0; i < m; i++) {
+        bw_input_row_avx512(dC, B, dA, k, n, i);
+    }
+}
+
 #else /* !DRANZER_HAVE_X86_SIMD */
 
 /* This file is compiled on every architecture so the build has one source

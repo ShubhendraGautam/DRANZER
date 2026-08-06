@@ -394,7 +394,45 @@ Two consequences worth stating plainly:
   gradient checks' tolerances rather than by bit-identity. Within one build it stays deterministic,
   which is what exact resume actually requires.
 
-Neither backward kernel has a SIMD path yet; that is the next roadmap item for them.
+### Vector backward kernels
+
+Both backward functions then gained an AVX-512 path, in `core/matmul_x86.c` beside the forward
+kernels and gated the same way through `cpu_isa_available()`. The weight kernel is an axpy — the
+same four-accumulator shape as `block_avx512` — while the input kernel is a reduction, taking four
+rows of `B` at once so one load of `dC` feeds four independent chains that are reduced across lanes
+at the end.
+
+**AVX-512 only, unlike the forward path**, and that asymmetry is the T11 result applied rather than
+ignored. `avx2_mr4` measured as a regression under Clang and `neon_mr4` was never measured; both
+still ship forward because `--kernel` can select them explicitly. The backward functions have no
+selection mechanism, so an AVX2 or NEON version would be code nothing could reach.
+
+Measured with `./gpu_latency.out` in one session, `DRANZER_CPU_ISA=baseline` against uncapped:
+
+| Shape (m×k×n) | `backward_input` | `backward_weight` |
+|---|---:|---:|
+| 1×64×1000 | 7.2 → 2.5 µs (2.88x) | 7.3 → 3.2 µs (2.28x) |
+| 64×256×64 | 105.3 → 36.6 (2.88x) | 79.0 → 24.9 (3.17x) |
+| 128×256×256 | 883.8 → 393.9 (2.24x) | 706.7 → 219.0 (3.23x) |
+| 128×256×1024 | 3949.2 → 1815.3 (2.18x) | 3822.2 → 1871.2 (2.04x) |
+| 128×1024×256 | 3597.5 → 1826.7 (1.97x) | 2785.0 → 1381.8 (2.02x) |
+
+Whole-model, medium tier, `--cpu-only`, two binaries differing *only* in the backward dispatch,
+interleaved ABBA, best of six each: **333.5 → 256.2 ms/step, 1.30x**, ranges non-overlapping
+(334–396 against 256–300), with inference as an unchanged control at 61.9 against 61.8 ms/token —
+1.00x.
+
+Together with the loop-order fix, both measured the same controlled way, medium-tier CPU training
+improved **2.75x × 1.30x = 3.58x** in one sitting, entirely on the CPU.
+
+`test_matmul_backward.c` pins this. It reaches the portable path by capping detection to baseline,
+which is how a CPU without AVX-512 would behave, and then does something the obvious version of
+this test misses: it calls the AVX-512 entry point *directly* and requires the dispatched result to
+match it bit for bit. Comparing capped against uncapped alone would pass just as happily if the
+uncapped run had quietly used the portable code too. The test data is deliberately scaled by 1/7
+rather than a power of two for the same reason — an earlier version used 1/8, making every product
+and partial sum exactly representable, so both paths agreed to the bit and the comparison could not
+have detected a dispatch that never fired.
 
 ## Limitations
 

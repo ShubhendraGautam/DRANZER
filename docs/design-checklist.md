@@ -324,9 +324,27 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   earlier builds - the same class of difference as switching matmul kernels, covered by the
   gradient checks' tolerances rather than by bit-identity, and still deterministic within one build.
   Documented in `docs/matmul.md`.
-- [ ] Give the backward matmuls **SIMD** kernels too. They remain portable C with no AVX-512 path,
-  which is why T11 measured no whole-model training speedup; this is separate from, and should
-  follow, the loop-order fix above.
+- [x] Give the backward matmuls **SIMD** kernels (`core/matmul_x86.c`). Both gained an AVX-512 path
+  beside the forward kernels, gated the same way through `cpu_isa_available()`: the weight kernel is
+  an axpy with the same four-accumulator shape as `block_avx512`, the input kernel a reduction that
+  consumes four rows of `B` at once so one load of `dC` feeds four independent chains reduced across
+  lanes at the end. AVX-512 only — `avx2_mr4` measured as a regression under Clang and `neon_mr4`
+  was never measured, and unlike the forward path there is no `--kernel` here to select them, so an
+  AVX2 or NEON version would be unreachable code.
+
+  Per-shape 2.0x to 3.2x, and whole-model medium-tier CPU training **333.5 -> 256.2 ms/step
+  (1.30x)**, measured with two binaries differing only in the backward dispatch, interleaved ABBA,
+  best of six each, non-overlapping ranges, inference as an unchanged control at 1.00x. Together
+  with the loop-order fix above, both measured the same controlled way, medium-tier CPU training
+  improved 2.75x x 1.30x = **3.58x**.
+
+  `test_matmul_backward.c` reaches the portable path by capping detection to baseline and then
+  requires the dispatched result to match a *direct* AVX-512 call bit for bit — comparing capped
+  against uncapped alone would pass equally well if dispatch had silently never fired. Its inputs
+  are scaled by 1/7 rather than a power of two for the same reason: an earlier 1/8 made every
+  product and partial sum exactly representable, so both paths agreed to the bit and the comparison
+  proved nothing. This also moved the GPU thresholds a third time, to 2^25 / 2^26; `backward_input`
+  now loses on the GPU at every shape this project benchmarks. Documented in `docs/matmul.md`.
 - [ ] Resolve or retire `avx2_mr4`. It measures 1.35x under GCC and 0.90x under Clang from identical
   source with packed FMAs in both disassemblies, so it ships selectable but unselected. Either
   isolate the scheduling difference and fix it, or drop the kernel rather than carry an

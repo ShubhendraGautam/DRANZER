@@ -28,22 +28,35 @@
  * cost more than the kernel saves, and the GPU path is a straight loss.
  *
  * The thresholds are the measured crossovers from `./gpu_latency.out` on this
- * project's MX450 test system (docs/gpu.md), rounded to a power of two.
+ * project's MX450 test system (docs/gpu.md), rounded to a power of two. They
+ * have now been re-derived twice, both times because the CPU got faster:
  *
- * Both are 2^23, and that is a second measurement rather than a coincidence.
- * backward_weight originally crossed over eight times sooner, at 2^20 - but
- * only because its CPU implementation was pathologically slow, striding both
- * operands in its innermost loop. Once that was fixed (see core/matmul.c) the
- * CPU side got 5.6x to 21.8x faster and the crossover moved out to meet
- * backward_input's. The GPU did not get worse; the competition got better.
+ *   2^20 / 2^23   original, against a matmul_backward_weight() that strided
+ *                 both operands in its innermost loop
+ *   2^23 / 2^23   after that loop order was fixed (CPU 5.6-21.8x faster)
+ *   2^25 / 2^26   after the backward kernels gained AVX-512 (CPU ~2-3x faster
+ *                 again)
  *
- * That is also the warning attached to these constants: they measure this
- * GPU against this CPU implementation, so a change to either invalidates
- * them. A different card moves them too. Re-run `./gpu_latency.out` before
- * trusting them elsewhere; below the threshold the CPU path is used, which is
- * always correct and never slower than not having the GPU at all. */
-#define GPU_BACKWARD_WEIGHT_MIN_WORK (1u << 23)
-#define GPU_BACKWARD_INPUT_MIN_WORK  (1u << 23)
+ * The GPU never got worse. Each time, the baseline it is measured against got
+ * better, and the range of shapes where a round trip pays shrank. That is the
+ * standing caution for these constants and for every speedup ratio in this
+ * project: a threshold measures two implementations, not one.
+ *
+ * Only the weight threshold is measured. backward_weight wins 1.62x and 1.32x
+ * at the two largest shapes the benchmark issues (both 2^25 multiply-
+ * accumulates) and loses at 2^23, so 2^25 sits on the far side of a crossover
+ * that was actually observed. backward_input never won at any measured shape -
+ * it reaches 0.95x at 2^25 and is still climbing - so its threshold is an
+ * extrapolation of that trend, deliberately set beyond every shape this
+ * project benchmarks. In practice that means backward_input runs on the CPU
+ * for every model here, which is what the measurements support; the path stays
+ * for larger models and faster cards, where it should be re-measured rather
+ * than trusted.
+ *
+ * Below either threshold the CPU path is used, which is always correct and
+ * never slower than not having the GPU at all. */
+#define GPU_BACKWARD_WEIGHT_MIN_WORK (1u << 25)
+#define GPU_BACKWARD_INPUT_MIN_WORK  (1u << 26)
 
 /* True when this shape is worth the round trip. Guards the multiplication
  * against overflow rather than trusting model dimensions to stay small. */

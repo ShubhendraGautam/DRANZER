@@ -56,4 +56,30 @@ void matmul_kernel_neon_mr4(const float *restrict A, const float *restrict B,
                             size_t m, size_t k, size_t n, size_t tile);
 #endif
 
+/* ------------------------------------------------------- backward pass ---
+ *
+ * AVX-512 counterparts of core/matmul.c's matmul_backward_input() and
+ * matmul_backward_weight(), with identical shapes and the same
+ * accumulate-into-destination contract.
+ *
+ * AVX-512 only, and that asymmetry with the forward kernels above is
+ * deliberate. T11 measured avx2_mr4 as a regression under Clang, this
+ * project's default compiler, and neon_mr4 was never measured at all; both
+ * ship for the forward path because `--kernel` can still select them
+ * explicitly. The backward functions have no such selection mechanism - one
+ * implementation, chosen by hardware - so an AVX2 or NEON version here would
+ * be code nothing could ever reach. See docs/matmul.md.
+ *
+ * Both reassociate their sums relative to the portable versions: the weight
+ * kernel because the vector lanes accumulate independently, the input kernel
+ * because its dot product is reduced across lanes at the end. That is the same
+ * class of difference the loop-order fix already introduced, and it is covered
+ * by the gradient checks' tolerances rather than by bit-identity. */
+#ifdef DRANZER_HAVE_X86_SIMD
+void matmul_backward_input_avx512(const float *restrict dC, const float *restrict B,
+                                  float *restrict dA, size_t m, size_t k, size_t n);
+void matmul_backward_weight_avx512(const float *restrict A, const float *restrict dC,
+                                   float *restrict dB, size_t m, size_t k, size_t n);
+#endif
+
 #endif // MATMUL_SIMD_H
