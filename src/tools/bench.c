@@ -392,8 +392,23 @@ int main(int argc, char **argv) {
     bench_metadata_t metadata;
     bench_collect_metadata(&metadata);
     bench_print_metadata(&metadata);
-    printf("CPU matmul kernel: %s (tile %zu)\n\n",
-           matmul_kernel_name(matmul_get_kernel()), matmul_tile_size());
+    /* Report what will actually run, not just what was asked for. A pinned
+     * kernel this CPU cannot execute silently becomes the portable one, so
+     * printing the request alone would label the whole run with a kernel that
+     * never ran. */
+    matmul_kernel_t requested = matmul_get_kernel();
+    if (requested != MATMUL_KERNEL_AUTO && !matmul_kernel_available(requested)) {
+        printf("CPU matmul kernel: %s requested, but this CPU cannot run it - "
+               "falling back to %s (tile %zu)\n\n",
+               matmul_kernel_name(requested),
+               matmul_kernel_name(MATMUL_KERNEL_TILED_MR4), matmul_tile_size());
+    } else if (requested == MATMUL_KERNEL_AUTO) {
+        printf("CPU matmul kernel: auto -> %s (tile %zu)\n\n",
+               matmul_kernel_name(matmul_select(1, 64, 64)), matmul_tile_size());
+    } else {
+        printf("CPU matmul kernel: %s (tile %zu)\n\n",
+               matmul_kernel_name(requested), matmul_tile_size());
+    }
 #ifdef _OPENMP
     printf("Built with OpenMP (OMP=1) - matmul/attention parallelize across cores internally.\n\n");
 #else

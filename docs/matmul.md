@@ -49,18 +49,24 @@ logits against.
 
 ## How the default is chosen
 
-`matmul_select()` resolves `MATMUL_KERNEL_AUTO` to the widest vector kernel this CPU can execute,
-and to `tiled_mr4` when there is none:
+`matmul_select()` resolves `MATMUL_KERNEL_AUTO` with one rule:
 
 ```text
-avx512_mr4  →  avx2_mr4  →  neon_mr4  →  tiled_mr4
+avx512_mr4 if the CPU has AVX-512F+VL, otherwise tiled_mr4
 ```
 
-It does **not** split by shape. Every shape gets the same kernel, which is a measured outcome rather
-than an unimplemented feature — see [What the measurements changed](#what-the-measurements-changed)
-for the two shape splits that were tried and rejected, and
-[Runtime dispatch](#runtime-dispatch-avx2-avx-512-neon) for why the SIMD substitution did not need
-one either.
+That is **not** "the widest kernel available", and the difference is the main result of this work.
+`avx2_mr4` and `neon_mr4` are built, correctness-checked, and selectable — but never selected. Both
+exclusions are measured outcomes, not omissions:
+
+| Kernel | Why it is not the default |
+|---|---|
+| `avx2_mr4` | 1.34x faster under GCC, 0.90x under **Clang**, which is this project's default compiler. A default must not regress the default build. |
+| `neon_mr4` | Unmeasured — no AArch64 hardware was available. It is also the only kernel offering no new instruction, since NEON is baseline on AArch64 and `tiled_mr4` already compiles to it. |
+
+It does **not** split by shape either. Every shape gets the same kernel — see
+[What the measurements changed](#what-the-measurements-changed) for the two shape splits that were
+tried and rejected.
 
 Overrides are available for measurement and debugging:
 
@@ -250,6 +256,94 @@ kernels and `bench.out --tier small --kernel ...` for the model. A two-core lapt
 other work on it — which is what produced everything above — is the environment these guards exist
 for. One cold measurement taken during this work overstated a kernel's cost by more than 10x.
 
+## What runtime dispatch changed
+
+The SIMD sweep used the same workflow, the same shapes, and the same machine as the one above:
+
+```text
+build:    {gcc 11.4.0, clang 14.0.0} -I include/ -I ../libs/include/ -O3 -ffast-math -lm
+os:       Linux 5.15.167.4-microsoft-standard-WSL2 x86_64
+cpu:      11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz (Tiger Lake), 2 online cores
+simd:     avx512 (detected: avx2, avx512)
+threads:  OMP_NUM_THREADS=2
+sweep:    ./bench.out --matmul-only --sweep --repeats 5     (all tiers, per compiler)
+```
+
+Three candidate kernels were added and swept at five tile sizes over the same six shapes per tier
+and three tiers, under both compilers — 36 (compiler, tier, shape) combinations, as before.
+
+**AVX-512 wins everywhere, and the compilers agree.**
+
+| `avx512_mr4` vs | worst | geometric mean | best | loses on |
+|---|---|---|---|---|
+| `tiled_mr4` (both compilers) | 1.07x | **1.83x** | 3.02x | 0 of 36 |
+| `tiled_mr4` (Clang only) | 1.10x | 1.83x | 3.02x | 0 of 18 |
+| `tiled_mr4` (GCC only) | 1.07x | 1.83x | 3.00x | 0 of 18 |
+| `scalar` reference | 1.48x | 8.78x | 30.89x | 0 of 36 |
+
+Two compilers landing on 1.83x independently is the strongest signal in this table: it means the
+result is a property of the instruction set, not of one optimizer's mood. Tile 256 stays the right
+single choice — never more than 1.11x off the best per-shape tile.
+
+**AVX2 splits the compilers, so it is not the default.**
+
+| `avx2_mr4` vs `tiled_mr4` | worst | geometric mean | best | loses on |
+|---|---|---|---|---|
+| Clang | 0.72x | **0.90x** | 1.12x | 14 of 18 |
+| GCC | 1.07x | **1.35x** | 2.12x | 0 of 18 |
+
+Same source, same shapes, opposite verdicts, and consistent within each compiler across all three
+tiers. This is the mirror image of the `rowwise` shape split T10 rejected for helping Clang and
+hurting GCC, and it gets the same answer for the same reason: **the project's default compiler is
+Clang, and a default must not regress the default build.**
+
+What it is *not* is a failure to vectorize. Disassembling both builds shows packed FMAs in both —
+GCC's `block_avx2` and Clang's each emit `vfmadd*ps` over `%ymm`. The gap is in scheduling around
+those FMAs, and it was not isolated further; chasing it would mean tuning against one compiler's
+scheduler rather than against the hardware. Recorded as an open question rather than resolved.
+
+**The useful generalisation.** Dispatch pays where it unlocks instructions the baseline target
+cannot emit at all, and not otherwise:
+
+| Kernel | Outside the baseline target? | Result |
+|---|---|---|
+| `avx512_mr4` | Yes — the compiler can never emit AVX-512 without `-march` | 1.83x, both compilers |
+| `avx2_mr4` | Yes, but the width gain is small enough for scheduling to erase it | Compiler-dependent |
+| `neon_mr4` | **No** — NEON is baseline on AArch64, so `tiled_mr4` already compiles to it | No new instruction to offer |
+
+That is why `neon_mr4` ships unselected rather than assumed-good. Selecting an unmeasured kernel
+over a measured one, on the theory that hand-written beats the compiler, is exactly the assumption
+`avx2_mr4` falsified.
+
+### Whole-model effect of dispatch
+
+Isolated shapes are not the deliverable, so the same binary was run end to end with the instruction
+set capped and uncapped — `DRANZER_CPU_ISA=baseline` against the detected `avx512` — six runs each,
+interleaved ABBA so run-order drift cancels instead of favouring whichever went first. Clang, small
+tier, `--cpu-only`, best of six with the observed spread beside it:
+
+| Metric (Clang, small tier) | `baseline` | `avx512` | Speedup |
+|---|---|---|---|
+| Full-context inference | 2.642 ms/token (1.11x spread) | 2.054 ms/token (1.07x) | **1.29x** |
+| Prompt prefill | 0.0515 ms/token (1.77x) | 0.0410 ms/token (1.36x) | **1.26x** |
+| Growing-cache decode | 0.0600 ms/token (1.81x) | 0.0553 ms/token (1.31x) | 1.08x |
+| Full-ring sliding decode | 0.0624 ms/token (2.51x) | 0.0566 ms/token (1.29x) | 1.10x |
+| Training step | 18.59 ms/step (1.13x) | 18.44 ms/step (1.08x) | *no measurable change* |
+
+Inference is the trustworthy row: the two sets of six runs do not overlap at all (baseline
+2.64–2.93, `avx512` 2.05–2.20), so the separation is larger than the session's noise. Prefill agrees
+in direction with a wider spread.
+
+**Training shows no measurable change, and that is the design working as documented rather than a
+disappointing result.** The backward-pass kernels are not dispatched — `matmul_backward_input` and
+`matmul_backward_weight` remain portable C — and the backward pass dominates a training step. The
+ranges overlap (baseline 18.59–21.03, `avx512` 18.44–19.93), so the honest reading is "unchanged",
+not "1.01x". Making training benefit from SIMD means dispatching the backward kernels, which is
+listed below as a limitation and not attempted here.
+
+The gap between 1.83x on isolated matmul shapes and 1.29x on whole-model inference is the ordinary
+Amdahl result: attention, softmax, layer norm, and the tokenizer are untouched by any of this.
+
 ## Limitations
 
 - **The NEON kernel is written but unmeasured.** No AArch64 machine was available. It is checked for
@@ -264,8 +358,12 @@ for. One cold measurement taken during this work overstated a kernel's cost by m
 - The kernels are register-blocked but not packed. `A` and `B` are read from their original
   row-major layout, so the innermost loop's `B` access is contiguous but its `A` access is strided.
   A packing pass is the usual next step and is not attempted here.
-- The backward-pass kernels (`matmul_backward_input`, `matmul_backward_weight`) are not part of the
-  candidate set. They have one implementation each, still portable C, and are unchanged by this
-  work — which means training benefits from SIMD only through its forward pass.
+- **The backward-pass kernels are not dispatched.** `matmul_backward_input` and
+  `matmul_backward_weight` have one portable implementation each and are not part of the candidate
+  set. Since the backward pass dominates a training step, this is why the whole-model table shows no
+  measurable training speedup; dispatching them is the obvious next win and is not attempted here.
+- **The AVX2 compiler split is unexplained.** The same intrinsics measure 1.35x under GCC and 0.90x
+  under Clang, with packed FMAs present in both disassemblies. The cause is somewhere in
+  instruction scheduling and was not isolated.
 - Tiles are square. A rectangular blocking scheme (different extents for `m`, `k`, and `n`) is not
   explored.

@@ -197,21 +197,34 @@ static void check_configuration_contract(void) {
     }
 }
 
-/* What the policy should answer here, derived from the documented preference
- * order rather than from a literal: with runtime dispatch the right answer
- * depends on the CPU, so the test has to compute it the same way the policy
- * does. What is still pinned is the order itself. */
+/* What the policy should answer here, derived the same way the policy derives
+ * it: with runtime dispatch the right answer depends on the CPU, so a literal
+ * would only pass on the machine that wrote it. What is pinned is the rule.
+ *
+ * Note what this does *not* say: it is not "the widest kernel available".
+ * avx2_mr4 and neon_mr4 are deliberately never selected (see matmul.c for the
+ * measurements), and asserting that here is the point - if someone promotes
+ * either to the default without re-running the sweep, this fails. */
 static matmul_kernel_t expected_selection(void) {
     if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
         return MATMUL_KERNEL_AVX512_MR4;
     }
-    if (matmul_kernel_available(MATMUL_KERNEL_AVX2_MR4)) {
-        return MATMUL_KERNEL_AVX2_MR4;
-    }
-    if (matmul_kernel_available(MATMUL_KERNEL_NEON_MR4)) {
-        return MATMUL_KERNEL_NEON_MR4;
-    }
     return MATMUL_KERNEL_TILED_MR4;
+}
+
+/* The unselected SIMD kernels must stay unselected on every shape, including
+ * the ones where they look most attractive. */
+static void check_unselected_kernels_stay_unselected(void) {
+    static const shape_t probes[] = {
+        { 1, 256, 4000 }, { 128, 1024, 256 }, { 64, 64, 256 }, { 1, 16, 16 },
+    };
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        matmul_kernel_t chosen =
+            matmul_select(probes[i].m, probes[i].k, probes[i].n);
+        if (chosen == MATMUL_KERNEL_AVX2_MR4 || chosen == MATMUL_KERNEL_NEON_MR4) {
+            fail("a kernel the sweep declined to select became the default");
+        }
+    }
 }
 
 /* The policy has to be a pure function of the shape: a training run that
@@ -342,6 +355,7 @@ int main(void) {
 
     check_configuration_contract();
     check_selection_is_deterministic();
+    check_unselected_kernels_stay_unselected();
     check_empty_inner_dimension();
 
     float worst = 0.0f;

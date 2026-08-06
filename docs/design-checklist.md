@@ -185,7 +185,9 @@ OS, CPU, online-core count, OpenMP version, and thread count alongside separated
 prefill, growing-cache decode, full-ring decode, training, and memory measurements. `make profile`
 builds a frame-pointer-enabled binary with documented `perf stat` and `perf record` workflows. A
 runtime-selectable portable scalar matmul is exercised both directly and through full and
-KV-cached model paths, with worst observed scalar-versus-dispatch logit error below `1e-6`.
+KV-cached model paths, against a `3e-5` tolerance; worst observed scalar-versus-dispatch logit error
+was below `1e-6` when dispatch meant the portable kernels, and is `1.43e-6` since T11 made it
+AVX-512 (the extra FMA contraction is expected and stays far inside the tolerance).
 GCC, Clang, OpenMP, AddressSanitizer, size-optimized, benchmark, profile, strict-warning, and CLI
 integration checks pass; the profiling binary was smoke-tested where `perf` itself was not
 installed.
@@ -228,22 +230,76 @@ AddressSanitizer, size-optimized, benchmark, and integration checks pass, and ex
 byte-identical. The kernels, policy, reproducibility contract, and measurement workflow are
 documented in `docs/matmul.md`.
 
-### T11. Runtime-dispatched SIMD kernels — NEXT
+### T11. Runtime-dispatched SIMD kernels — COMPLETE
 
-- [ ] Add runtime-dispatched AVX2/AVX-512 and ARM NEON kernels where supported.
-- [ ] Detect CPU features at runtime so one binary stays portable across machines.
-- [ ] Extend the kernel sweep and the equivalence test to cover every dispatched kernel.
+- [x] Add runtime-dispatched AVX2/AVX-512 and ARM NEON kernels where supported.
+- [x] Detect CPU features at runtime so one binary stays portable across machines.
+- [x] Extend the kernel sweep and the equivalence test to cover every dispatched kernel.
 
 Acceptance gate: dispatched kernels are numerically checked against the scalar reference on the
 same shapes as the portable kernels, selected by the same reproducible measurement workflow, and a
 binary built with them still runs correctly on a machine lacking the instruction set.
 
-T10 left the seam this needs: `matmul_select()` already resolves a shape to a kernel, kernels are
-runtime-selectable by name, and `test_matmul_kernels.c` checks every registered kernel against the
-reference automatically.
+Completion evidence: `avx2_mr4`, `avx512_mr4`, and `neon_mr4` live in `core/matmul_x86.c` and
+`core/matmul_arm.c` behind `core/matmul_simd.h`, which is the single place deciding which
+architectures have an implementation. They are `kernel_tiled_mr4` with the innermost loop over `j`
+issued as vector FMAs; vectorizing along `j` rather than `k` keeps every `C` element accumulating
+`l` in increasing order, so they differ from the reference by FMA contraction rather than by
+reassociation. Vector code sits in functions carrying `target` attributes, so the default build
+still passes no `-march` and the wide instructions are unreachable unless `cpu_features.c` says the
+CPU has them. That detection gates on `XCR0` via `XGETBV` as well as on the CPUID feature bit,
+because an OS that has not enabled the extended register state leaves the bit set while the first
+instruction faults.
+
+The sweep selected one kernel and rejected two, all three as measured outcomes. `avx512_mr4` beat
+`tiled_mr4` on all 36 (compiler, tier, shape) combinations — 1.07x worst, 1.83x geometric mean,
+3.02x best, and 8.78x geometric mean over the scalar reference — with GCC and Clang independently
+landing on 1.83x. `avx2_mr4` measured 1.35x under GCC and 0.90x under Clang, consistently across all
+three tiers; since Clang is this project's default compiler, it ships selectable but never selected,
+which is the same call T10 made for the `rowwise` shape split in mirror image. Disassembly confirms
+both compilers emit packed FMAs, so the split is a scheduling difference and is recorded as an open
+question rather than resolved. `neon_mr4` is unmeasured — no AArch64 hardware was available — and is
+also the one kernel offering no instruction the baseline target lacks, since NEON is mandatory on
+ARMv8-A and `tiled_mr4` already compiles to it; it ships unselected rather than assumed good.
+
+`test_matmul_kernels.c` checks every *available* kernel at every sweepable tile over 15 shapes that
+now include the 8- and 16-float vector boundaries, reports which kernels were skipped rather than
+counting them as passing, and pins that the two rejected kernels stay unselected so promoting either
+requires re-running the sweep. The unavailable-instruction-set gate is exercised by capping
+detection with `cpu_features_set_max_isa(CPU_ISA_BASELINE)`, which is what such a CPU would report:
+every kernel including the SIMD ones still computes correctly through the fallback, and selection
+returns to the portable kernel. That simulates the dispatch path, not the absence of the
+instructions themselves, and `docs/matmul.md` records the distinction. GCC, Clang, OpenMP,
+AddressSanitizer, size-optimized, and `-Wpedantic -std=c11` builds all pass.
+
+End to end, the same binary run with the instruction set capped and uncapped (six runs each,
+interleaved ABBA, small tier, Clang) improves full-context inference 1.29x and prompt prefill 1.26x,
+with the inference distributions not overlapping at all. Training shows no measurable change, which
+is the documented consequence of leaving the backward-pass matmuls undispatched rather than a
+surprise; it is now the first entry under later runtime goals.
+
+Runtime dispatch narrowed one existing contract, which is documented rather than quietly changed:
+bit-identity was always scoped to one executable and one execution backend, and the CPU's
+instruction set is now part of that backend. Exact resume on a single machine is unaffected;
+comparing artifacts across machines needs `DRANZER_CPU_ISA` pinned on both. Benchmark rows carry the
+detected instruction set in a new `simd` provenance column, which moved both results files to
+`bench_results_v3.csv` and `matmul_results_v3.csv`. Whole-model scalar-versus-dispatch logit error
+moved from below `1e-6` to `1.43e-6` against the test's unchanged `3e-5` tolerance, which is the
+expected cost of FMA contraction and is recorded in T9's evidence rather than left stale.
 
 ### Later runtime goals
 
+- [ ] Dispatch the backward-pass matmuls (`matmul_backward_input`, `matmul_backward_weight`). T11
+  measured no whole-model training speedup precisely because these stayed portable C while the
+  backward pass dominates a training step; they are the largest remaining SIMD win and the shapes
+  are already in the benchmark.
+- [ ] Resolve or retire `avx2_mr4`. It measures 1.35x under GCC and 0.90x under Clang from identical
+  source with packed FMAs in both disassemblies, so it ships selectable but unselected. Either
+  isolate the scheduling difference and fix it, or drop the kernel rather than carry an
+  unexplained one.
+- [ ] Measure `neon_mr4` on real AArch64 hardware and either promote it in `matmul_select()` or
+  remove it. It is correctness-checked but has never been timed, and unlike the x86 kernels it
+  offers no instruction the baseline target lacks.
 - [ ] Replace repeated OpenMP entry with a measured persistent worker strategy if beneficial.
 - [ ] Add INT8 and then INT4 weight-only quantization with accuracy comparisons.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.

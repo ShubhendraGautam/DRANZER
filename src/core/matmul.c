@@ -172,13 +172,37 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
  * contract that selection depends on nothing else, and because a future sweep
  * may yet find a split the current measurements do not support.
  *
- * Runtime SIMD dispatch (T11) did not change any of the above. It adds one
- * step in front of it: prefer the widest vector kernel this CPU can actually
- * execute, and fall through to the portable choice when there is none. The
- * SIMD kernels are the same blocked four-row algorithm with a vectorized j
- * loop, so this is a strictly-faster substitution rather than a different
- * policy - and it was measured the same way, over the same shapes, before
- * being made the default (docs/matmul.md). */
+ * Runtime SIMD dispatch (T11) adds one step in front of all of it, and only
+ * one: AVX-512 where the CPU has it. Not "the widest vector kernel available",
+ * which is what this function was first written to do - the sweep did not
+ * support that, and the two kernels it declines to select are as much a
+ * measured result as the one it picks.
+ *
+ *   avx512_mr4  beat tiled_mr4 on all 36 measured (compiler, tier, shape)
+ *               combinations: 1.07x worst, ~1.8x geometric mean, 3.02x best,
+ *               and both compilers agreed to within 2%. It is also the only
+ *               kernel here that reaches instructions the baseline x86-64
+ *               target cannot emit at all, which is why the win is so clean.
+ *
+ *   avx2_mr4    is worth 1.34x under GCC and 0.90x under Clang - a regression
+ *               on the compiler this project defaults to. Same source, same
+ *               shapes; both compilers emit packed FMAs, so it is a scheduling
+ *               difference rather than a failure to vectorize, and it was not
+ *               isolated further. A default must not regress the default
+ *               build, so this stays available and unselected. That is the
+ *               same call T10 made for the rowwise shape split, which helped
+ *               Clang and hurt GCC.
+ *
+ *   neon_mr4    is unmeasured: no AArch64 machine was available. It is also
+ *               the one kernel with no new instructions to offer, because
+ *               NEON is baseline on AArch64 and tiled_mr4 already compiles to
+ *               it. Selecting an unmeasured kernel over a measured one on the
+ *               assumption that hand-written beats the compiler is exactly
+ *               the assumption avx2_mr4 just falsified.
+ *
+ * Both remain selectable through matmul_set_kernel() and --kernel, and both
+ * are checked against the scalar reference wherever they can run. See
+ * docs/matmul.md for the full tables. */
 matmul_kernel_t matmul_select(size_t m, size_t k, size_t n) {
     (void)m;
     (void)k;
@@ -186,12 +210,6 @@ matmul_kernel_t matmul_select(size_t m, size_t k, size_t n) {
 
     if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
         return MATMUL_KERNEL_AVX512_MR4;
-    }
-    if (matmul_kernel_available(MATMUL_KERNEL_AVX2_MR4)) {
-        return MATMUL_KERNEL_AVX2_MR4;
-    }
-    if (matmul_kernel_available(MATMUL_KERNEL_NEON_MR4)) {
-        return MATMUL_KERNEL_NEON_MR4;
     }
     return MATMUL_KERNEL_TILED_MR4;
 }
