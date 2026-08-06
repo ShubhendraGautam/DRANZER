@@ -289,10 +289,27 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
 
 ### Later runtime goals
 
-- [ ] Dispatch the backward-pass matmuls (`matmul_backward_input`, `matmul_backward_weight`). T11
-  measured no whole-model training speedup precisely because these stayed portable C while the
-  backward pass dominates a training step; they are the largest remaining SIMD win and the shapes
-  are already in the benchmark.
+- [x] Dispatch the backward-pass matmuls to the **GPU** (`backends/gpu/gpu_matmul.c`,
+  `core/training.c`). Two hand-written PTX kernels join the forward one in a single module, with
+  accumulate-into-destination semantics matching the CPU contract. Because a backward call moves
+  four buffers where a forward call moves two — both inputs up, plus the accumulating destination
+  up *and* down — they dispatch on a measured shape threshold (2²⁰ multiply-accumulates for
+  `backward_weight`, 2²³ for `backward_input`) rather than whenever a GPU exists. Medium-tier
+  training improved 969.3 → 627.9 ms/step (1.54x, non-overlapping ranges over three runs each),
+  the first whole-model training win the GPU backend has produced. Correctness is covered by
+  `test_gpu_matmul_backward.c` (both kernels against the CPU reference, accumulating twice into a
+  non-zero destination, on shapes with no extent a multiple of the thread block) and
+  `test_gpu_training_backward.c` (CPU/GPU agreement on a model deliberately sized so the thresholds
+  are crossed — the pre-existing `test_gpu_training_step.c` model is small enough that every
+  backward shape falls below them). Documented in `docs/gpu.md`.
+- [ ] **Fix `matmul_backward_weight()`'s loop order.** It strides both operands in its innermost
+  loop, so at 128x256x1024 it costs about 40 ms against roughly 6 ms for a forward matmul of
+  identical FLOP count. Most of the 20-30x the GPU shows on that function is this inefficiency
+  rather than GPU throughput. Fixing it helps every user without a GPU and would require
+  re-deriving the dispatch thresholds above.
+- [ ] Give the backward matmuls **SIMD** kernels too. They remain portable C with no AVX-512 path,
+  which is why T11 measured no whole-model training speedup; this is separate from, and should
+  follow, the loop-order fix above.
 - [ ] Resolve or retire `avx2_mr4`. It measures 1.35x under GCC and 0.90x under Clang from identical
   source with packed FMAs in both disassemblies, so it ships selectable but unselected. Either
   isolate the scheduling difference and fix it, or drop the kernel rather than carry an

@@ -33,6 +33,37 @@ void gpu_cuda_shutdown(gpu_cuda_ctx_t *ctx);
  * success. The most recently loaded kernel is what gpu_cuda_launch_2d runs. */
 int gpu_cuda_load_kernel(gpu_cuda_ctx_t *ctx, const char *ptx_src, const char *kernel_name);
 
+/* One resolved kernel, for modules that contain more than one.
+ *
+ * The single-kernel calls above keep a "most recently loaded" kernel in the
+ * context, which is all a module with one entry point needs. A module with
+ * several - gpu_matmul.c carries a forward kernel and two backward ones -
+ * would otherwise have to re-JIT the whole module to switch between them,
+ * which costs far more than the launch it precedes. Resolving each entry
+ * point once against a single loaded module and launching by handle avoids
+ * that entirely.
+ *
+ * Handles point into storage owned by the context: they stay valid until
+ * gpu_cuda_shutdown(), and must not be freed by the caller. */
+typedef struct gpu_cuda_kernel gpu_cuda_kernel_t; /* opaque */
+
+/* JIT-compile PTX as the context's current module, resolving nothing.
+ * Returns 0 on success. */
+int gpu_cuda_load_module(gpu_cuda_ctx_t *ctx, const char *ptx_src);
+
+/* Resolve one entry point from the module loaded by gpu_cuda_load_module()
+ * (or by gpu_cuda_load_kernel()). Returns NULL if the module has no such
+ * entry point or the context is out of kernel slots. */
+gpu_cuda_kernel_t *gpu_cuda_resolve_kernel(gpu_cuda_ctx_t *ctx, const char *kernel_name);
+
+/* gpu_cuda_launch_2d_async() for an explicitly named kernel. Same
+ * no-wait contract: only use it when a synchronizing operation on the same
+ * context provably follows. */
+int gpu_cuda_launch_2d_async_with(gpu_cuda_ctx_t *ctx, gpu_cuda_kernel_t *kernel,
+                                  unsigned int grid_x, unsigned int grid_y,
+                                  unsigned int block_x, unsigned int block_y,
+                                  void **args);
+
 /* Device memory. gpu_cuda_alloc returns 0 on failure (0 is never a valid
  * device pointer). */
 uint64_t gpu_cuda_alloc(gpu_cuda_ctx_t *ctx, size_t bytes);

@@ -10,9 +10,72 @@
 #include "core/tensor_ops.h"
 #include "core/optimizer.h"
 #include "backends/gpu/gpu_matmul.h"
+#include "core/matmul.h"
 #include "common/debug.h"
-#include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <string.h>
+
+/* Backward matmuls reach the GPU only above a measured size, unlike the
+ * forward ones in transformer.c which go whenever `--gpu` is set.
+ *
+ * The asymmetry is structural, not a policy preference. A forward matmul
+ * moves two buffers (activations up, result down) and its weight operand is
+ * already device-resident. A backward matmul moves four: both inputs up, and
+ * the destination both up and down, because these functions accumulate into
+ * a gradient that earlier call sites in the same minibatch have already
+ * written. Below a certain amount of arithmetic, those two extra transfers
+ * cost more than the kernel saves, and the GPU path is a straight loss.
+ *
+ * The thresholds are the measured crossovers from `./gpu_latency.out` on this
+ * project's MX450 test system (docs/gpu.md), rounded down to a power of two
+ * for a margin. They differ between the two functions because their
+ * destinations differ in size: backward_weight writes a full weight-sized
+ * matrix and gets much more arithmetic per byte moved, so it crosses over
+ * about eight times sooner.
+ *
+ * These are GPU-specific in a way the CPU kernel policy is not - a different
+ * card moves the crossover. Re-run `./gpu_latency.out` before trusting them
+ * on other hardware; below the threshold the CPU path is used, which is
+ * always correct and never slower than not having the GPU at all. */
+#define GPU_BACKWARD_WEIGHT_MIN_WORK (1u << 20)
+#define GPU_BACKWARD_INPUT_MIN_WORK  (1u << 23)
+
+/* True when this shape is worth the round trip. Guards the multiplication
+ * against overflow rather than trusting model dimensions to stay small. */
+static int gpu_backward_worthwhile(size_t m, size_t k, size_t n, size_t min_work) {
+    if (m == 0 || k == 0 || n == 0) return 0;
+    if (k > SIZE_MAX / m) return 1; /* astronomically large: certainly worth it */
+    size_t mk = m * k;
+    if (n > SIZE_MAX / mk) return 1;
+    return mk * n >= min_work;
+}
+
+/* dA (m x k) += dC (m x n) @ B_transposed, on the GPU when that pays.
+ * A failed GPU call is not an error: it falls through to the CPU, which is
+ * what also happens when no GPU exists at all. */
+static void dispatch_backward_input(neural_model_t *model, float *dC, float *B,
+                                    float *dA, size_t m, size_t k, size_t n) {
+    if (model->use_gpu &&
+        gpu_backward_worthwhile(m, k, n, GPU_BACKWARD_INPUT_MIN_WORK) &&
+        gpu_matmul_available() &&
+        gpu_matmul_backward_input(dC, B, dA, m, k, n) == 0) {
+        return;
+    }
+    matmul_backward_input(dC, B, dA, m, k, n);
+}
+
+/* dB (k x n) += A_transposed @ dC (m x n), same contract. */
+static void dispatch_backward_weight(neural_model_t *model, float *A, float *dC,
+                                     float *dB, size_t m, size_t k, size_t n) {
+    if (model->use_gpu &&
+        gpu_backward_worthwhile(m, k, n, GPU_BACKWARD_WEIGHT_MIN_WORK) &&
+        gpu_matmul_available() &&
+        gpu_matmul_backward_weight(A, dC, dB, m, k, n) == 0) {
+        return;
+    }
+    matmul_backward_weight(A, dC, dB, m, k, n);
+}
 
 model_errors_t model_accumulate_gradients(neural_model_t *model,
                                           uint32_t *token_ids,
@@ -55,14 +118,14 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
     for (size_t i = 0; i < model->vocab_size; i++) {
         model->output_bias_grad[i] += grad_logits[i];
     }
-    matmul_backward_weight(last_hidden, grad_logits, model->output_projection_grad,
+    dispatch_backward_weight(model, last_hidden, grad_logits, model->output_projection_grad,
                             1, embedding_dim, model->vocab_size);
 
     /* Only the LAST sequence position feeds the output head, so dL/dhidden
      * is zero everywhere else - zero the whole buffer, then fill just the
      * last row. */
     memset(model->ws_dhidden_in, 0, seq_len * embedding_dim * sizeof(float));
-    matmul_backward_input(grad_logits, model->output_projection,
+    dispatch_backward_input(model, grad_logits, model->output_projection,
                            &model->ws_dhidden_in[(seq_len - 1) * embedding_dim],
                            1, embedding_dim, model->vocab_size);
 
@@ -90,11 +153,11 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
             for (size_t i = 0; i < seq_len; i++) sum += model->ws_d_ffn_dropout[i * embedding_dim + d];
             layer->b_ff2_grad[d] += sum;
         }
-        matmul_backward_weight(model->cache_ff_hidden[l], model->ws_d_ffn_dropout, layer->W_ff2_grad,
+        dispatch_backward_weight(model, model->cache_ff_hidden[l], model->ws_d_ffn_dropout, layer->W_ff2_grad,
                                 seq_len, ffn_dim, embedding_dim);
 
         memset(model->ws_d_ff_hidden, 0, seq_len * ffn_dim * sizeof(float));
-        matmul_backward_input(model->ws_d_ffn_dropout, layer->W_ff2, model->ws_d_ff_hidden,
+        dispatch_backward_input(model, model->ws_d_ffn_dropout, layer->W_ff2, model->ws_d_ff_hidden,
                                seq_len, ffn_dim, embedding_dim);
 
         /* ReLU backward, in place, using the cached post-ReLU activations as the indicator */
@@ -107,11 +170,11 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
             for (size_t i = 0; i < seq_len; i++) sum += model->ws_d_ff_hidden[i * ffn_dim + d];
             layer->b_ff1_grad[d] += sum;
         }
-        matmul_backward_weight(model->cache_attn_ln_out[l], model->ws_d_ff_hidden, layer->W_ff1_grad,
+        dispatch_backward_weight(model, model->cache_attn_ln_out[l], model->ws_d_ff_hidden, layer->W_ff1_grad,
                                 seq_len, embedding_dim, ffn_dim);
 
         memset(model->ws_d_x1_total, 0, seq_len * embedding_dim * sizeof(float));
-        matmul_backward_input(model->ws_d_ff_hidden, layer->W_ff1, model->ws_d_x1_total,
+        dispatch_backward_input(model, model->ws_d_ff_hidden, layer->W_ff1, model->ws_d_x1_total,
                                seq_len, embedding_dim, ffn_dim);
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {
             model->ws_d_x1_total[i] += model->ws_d_s2[i]; /* + residual branch (bypasses dropout) */

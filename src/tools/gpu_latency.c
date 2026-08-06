@@ -21,6 +21,7 @@
 
 #include "backends/gpu/gpu_cuda.h"
 #include "backends/gpu/gpu_matmul.h"
+#include "core/matmul.h"
 #include "tools/bench_support.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -169,6 +170,92 @@ static void measure_shape(const char *label, size_t m, size_t k, size_t n) {
     free(mm.a); free(mm.b); free(mm.c);
 }
 
+/* Backward-pass comparison.
+ *
+ * The forward table above is GPU-only because the CPU comparison lives in
+ * bench.out. For backward it has to be in the same process and the same
+ * table: the question is not "how fast is the GPU kernel" but "does moving
+ * this call to the GPU pay", and the answer is dominated by transfers that
+ * only exist on one side. Both directions are timed here on the same
+ * buffers, back to back, so the ratio is a same-run comparison. */
+typedef struct { float *a, *b, *dc, *d_dst; size_t m, k, n; } backward_t;
+
+static double time_gpu_backward_input(void *arg, int calls) {
+    backward_t *bw = arg;
+    double t0 = bench_now_sec();
+    for (int i = 0; i < calls; i++) {
+        gpu_matmul_backward_input(bw->dc, bw->b, bw->d_dst, bw->m, bw->k, bw->n);
+    }
+    return bench_now_sec() - t0;
+}
+
+static double time_cpu_backward_input(void *arg, int calls) {
+    backward_t *bw = arg;
+    double t0 = bench_now_sec();
+    for (int i = 0; i < calls; i++) {
+        matmul_backward_input(bw->dc, bw->b, bw->d_dst, bw->m, bw->k, bw->n);
+    }
+    return bench_now_sec() - t0;
+}
+
+static double time_gpu_backward_weight(void *arg, int calls) {
+    backward_t *bw = arg;
+    double t0 = bench_now_sec();
+    for (int i = 0; i < calls; i++) {
+        gpu_matmul_backward_weight(bw->a, bw->dc, bw->d_dst, bw->m, bw->k, bw->n);
+    }
+    return bench_now_sec() - t0;
+}
+
+static double time_cpu_backward_weight(void *arg, int calls) {
+    backward_t *bw = arg;
+    double t0 = bench_now_sec();
+    for (int i = 0; i < calls; i++) {
+        matmul_backward_weight(bw->a, bw->dc, bw->d_dst, bw->m, bw->k, bw->n);
+    }
+    return bench_now_sec() - t0;
+}
+
+static void measure_backward(const char *label, size_t m, size_t k, size_t n) {
+    backward_t bw = { malloc(m * k * sizeof(float)), malloc(k * n * sizeof(float)),
+                      malloc(m * n * sizeof(float)), NULL, m, k, n };
+    /* The destination is m x k for backward_input and k x n for
+     * backward_weight; one buffer sized for the larger serves both. */
+    size_t dst_floats = (m * k > k * n) ? m * k : k * n;
+    bw.d_dst = malloc(dst_floats * sizeof(float));
+    if (!bw.a || !bw.b || !bw.dc || !bw.d_dst) {
+        printf("  %-28s allocation failed\n", label);
+        free(bw.a); free(bw.b); free(bw.dc); free(bw.d_dst);
+        return;
+    }
+    /* Small magnitudes: these functions accumulate, and the timing loop calls
+     * them thousands of times without resetting the destination. */
+    for (size_t i = 0; i < m * k; i++) bw.a[i] = (float)(i % 7) * 0.01f;
+    for (size_t i = 0; i < k * n; i++) bw.b[i] = (float)(i % 5) * 0.01f;
+    for (size_t i = 0; i < m * n; i++) bw.dc[i] = (float)(i % 3) * 0.01f;
+    for (size_t i = 0; i < dst_floats; i++) bw.d_dst[i] = 0.0f;
+
+    /* Warm up so the weight cache holds B and the timed calls are steady state. */
+    if (gpu_matmul_backward_input(bw.dc, bw.b, bw.d_dst, m, k, n) != 0) {
+        printf("  %-28s call failed\n", label);
+        free(bw.a); free(bw.b); free(bw.dc); free(bw.d_dst);
+        return;
+    }
+
+    double gpu_in = best_us(time_gpu_backward_input, &bw, 30);
+    double cpu_in = best_us(time_cpu_backward_input, &bw, 30);
+    double gpu_wt = best_us(time_gpu_backward_weight, &bw, 30);
+    double cpu_wt = best_us(time_cpu_backward_weight, &bw, 30);
+
+    char shape[32];
+    snprintf(shape, sizeof(shape), "%zux%zux%zu", m, k, n);
+    printf("  %-28s %-16s %9.1f %9.1f %7.2fx | %9.1f %9.1f %7.2fx\n",
+           label, shape, cpu_in, gpu_in, cpu_in / gpu_in,
+           cpu_wt, gpu_wt, cpu_wt / gpu_wt);
+
+    free(bw.a); free(bw.b); free(bw.dc); free(bw.d_dst);
+}
+
 int main(void) {
     bench_metadata_t metadata;
     bench_collect_metadata(&metadata);
@@ -195,6 +282,23 @@ int main(void) {
 
     printf("\nCompare these against the CPU kernel on the same shapes:\n"
            "  ./bench.out --matmul-only --repeats 5\n");
+
+    printf("\nBackward pass: CPU versus GPU, same buffers, same process\n");
+    printf("  %-28s %-16s %28s | %28s\n", "", "", "backward_input (dA += dC@Bt)",
+           "backward_weight (dB += At@dC)");
+    printf("  %-28s %-16s %9s %9s %8s | %9s %9s %8s\n",
+           "call site", "m x k x n", "cpu us", "gpu us", "speedup",
+           "cpu us", "gpu us", "speedup");
+    measure_backward("decode: output head", 1, 64, 1000);
+    measure_backward("decode: output head", 1, 256, 4000);
+    measure_backward("small: attn projection", 64, 64, 64);
+    measure_backward("small: ffn down", 64, 256, 64);
+    measure_backward("medium: attn projection", 128, 256, 256);
+    measure_backward("medium: ffn up", 128, 256, 1024);
+    measure_backward("medium: ffn down", 128, 1024, 256);
+    printf("\n  A speedup below 1.00x means the CPU wins that shape: the GPU path\n"
+           "  uploads the accumulating destination as well as both inputs, so it\n"
+           "  moves four buffers where the forward path moves two.\n");
 
     gpu_matmul_shutdown();
     return 0;

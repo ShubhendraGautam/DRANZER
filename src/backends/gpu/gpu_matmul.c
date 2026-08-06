@@ -85,11 +85,163 @@ static const char *MATMUL_PTX =
 "    st.global.f32 [%rd10], %f3;\n\n"
 "DONE:\n"
 "    ret;\n"
+"}\n"
+
+/* dA (m x k) += dC (m x n) @ B_transposed (n x k), i.e.
+ *     dA[i][l] += sum_j dC[i][j] * B[l][j]
+ * one thread per (i, l): x indexes l against K, y indexes i against M.
+ *
+ * B is not transposed in memory - the kernel walks row l of B and row i of
+ * dC together, both contiguous in j, so the transpose costs nothing. This is
+ * the same access pattern matmul_backward_input() uses on the CPU.
+ *
+ * The store accumulates. Every backward call site adds into a gradient buffer
+ * that a whole minibatch shares (see training.c), so the destination arrives
+ * with a meaningful value and must be read before it is written. */
+".visible .entry matmul_backward_input_naive(\n"
+"    .param .u64 param_dC,\n"
+"    .param .u64 param_B,\n"
+"    .param .u64 param_dA,\n"
+"    .param .u32 param_M,\n"
+"    .param .u32 param_K,\n"
+"    .param .u32 param_N\n"
+")\n{\n"
+"    .reg .pred %p1, %p2, %p3;\n"
+"    .reg .f32 %f1, %f2, %f3, %f4;\n"
+"    .reg .b32 %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10;\n"
+"    .reg .b64 %rd1, %rd2, %rd3, %rd4, %rd5, %rd6, %rd7, %rd8, %rd10;\n\n"
+"    ld.param.u64 %rd1, [param_dC];\n"
+"    ld.param.u64 %rd2, [param_B];\n"
+"    ld.param.u64 %rd3, [param_dA];\n"
+"    ld.param.u32 %r6, [param_M];\n"
+"    ld.param.u32 %r7, [param_K];\n"
+"    ld.param.u32 %r8, [param_N];\n\n"
+"    mov.u32 %r1, %ctaid.x;\n"
+"    mov.u32 %r2, %ntid.x;\n"
+"    mov.u32 %r3, %tid.x;\n"
+"    mad.lo.s32 %r4, %r1, %r2, %r3;\n"
+"    mov.u32 %r1, %ctaid.y;\n"
+"    mov.u32 %r2, %ntid.y;\n"
+"    mov.u32 %r3, %tid.y;\n"
+"    mad.lo.s32 %r5, %r1, %r2, %r3;\n\n"
+"    setp.ge.s32 %p1, %r5, %r6;\n"
+"    setp.ge.s32 %p2, %r4, %r7;\n"
+"    or.pred %p3, %p1, %p2;\n"
+"    @%p3 bra BI_DONE;\n\n"
+"    cvta.to.global.u64 %rd4, %rd1;\n"
+"    cvta.to.global.u64 %rd5, %rd2;\n"
+"    cvta.to.global.u64 %rd6, %rd3;\n\n"
+"    mul.lo.s32 %r9, %r5, %r8;\n"
+"    mul.wide.s32 %rd7, %r9, 4;\n"
+"    add.s64 %rd7, %rd4, %rd7;\n\n"
+"    mul.lo.s32 %r9, %r4, %r8;\n"
+"    mul.wide.s32 %rd8, %r9, 4;\n"
+"    add.s64 %rd8, %rd5, %rd8;\n\n"
+"    mov.f32 %f3, 0f00000000;\n"
+"    mov.u32 %r10, 0;\n\n"
+"BI_LOOP_START:\n"
+"    setp.ge.s32 %p1, %r10, %r8;\n"
+"    @%p1 bra BI_LOOP_END;\n\n"
+"    ld.global.f32 %f1, [%rd7];\n"
+"    ld.global.f32 %f2, [%rd8];\n"
+"    fma.rn.f32 %f3, %f1, %f2, %f3;\n\n"
+"    add.s64 %rd7, %rd7, 4;\n"
+"    add.s64 %rd8, %rd8, 4;\n"
+"    add.s32 %r10, %r10, 1;\n"
+"    bra BI_LOOP_START;\n\n"
+"BI_LOOP_END:\n"
+"    mul.lo.s32 %r9, %r5, %r7;\n"
+"    add.s32 %r9, %r9, %r4;\n"
+"    mul.wide.s32 %rd10, %r9, 4;\n"
+"    add.s64 %rd10, %rd6, %rd10;\n"
+"    ld.global.f32 %f4, [%rd10];\n"
+"    add.f32 %f3, %f4, %f3;\n"
+"    st.global.f32 [%rd10], %f3;\n\n"
+"BI_DONE:\n"
+"    ret;\n"
+"}\n"
+
+/* dB (k x n) += A_transposed (k x m) @ dC (m x n), i.e.
+ *     dB[l][j] += sum_i A[i][l] * dC[i][j]
+ * one thread per (l, j): x indexes j against N, y indexes l against K.
+ *
+ * Unlike the other two kernels this one strides both inputs - A by K and dC
+ * by N per step of i - because the reduction runs down the rows. Adjacent
+ * threads still read adjacent j, so the dC loads coalesce across a warp;
+ * the A load is a broadcast within a row of threads. Accumulates, for the
+ * same reason as above. */
+".visible .entry matmul_backward_weight_naive(\n"
+"    .param .u64 param_A,\n"
+"    .param .u64 param_dC,\n"
+"    .param .u64 param_dB,\n"
+"    .param .u32 param_M,\n"
+"    .param .u32 param_K,\n"
+"    .param .u32 param_N\n"
+")\n{\n"
+"    .reg .pred %p1, %p2, %p3;\n"
+"    .reg .f32 %f1, %f2, %f3, %f4;\n"
+"    .reg .b32 %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10;\n"
+"    .reg .b64 %rd1, %rd2, %rd3, %rd4, %rd5, %rd6, %rd7, %rd8, %rd9, %rd10, %rd11;\n\n"
+"    ld.param.u64 %rd1, [param_A];\n"
+"    ld.param.u64 %rd2, [param_dC];\n"
+"    ld.param.u64 %rd3, [param_dB];\n"
+"    ld.param.u32 %r6, [param_M];\n"
+"    ld.param.u32 %r7, [param_K];\n"
+"    ld.param.u32 %r8, [param_N];\n\n"
+"    mov.u32 %r1, %ctaid.x;\n"
+"    mov.u32 %r2, %ntid.x;\n"
+"    mov.u32 %r3, %tid.x;\n"
+"    mad.lo.s32 %r4, %r1, %r2, %r3;\n"
+"    mov.u32 %r1, %ctaid.y;\n"
+"    mov.u32 %r2, %ntid.y;\n"
+"    mov.u32 %r3, %tid.y;\n"
+"    mad.lo.s32 %r5, %r1, %r2, %r3;\n\n"
+"    setp.ge.s32 %p1, %r5, %r7;\n"
+"    setp.ge.s32 %p2, %r4, %r8;\n"
+"    or.pred %p3, %p1, %p2;\n"
+"    @%p3 bra BW_DONE;\n\n"
+"    cvta.to.global.u64 %rd4, %rd1;\n"
+"    cvta.to.global.u64 %rd5, %rd2;\n"
+"    cvta.to.global.u64 %rd6, %rd3;\n\n"
+"    mul.wide.s32 %rd7, %r5, 4;\n"
+"    add.s64 %rd7, %rd4, %rd7;\n\n"
+"    mul.wide.s32 %rd8, %r4, 4;\n"
+"    add.s64 %rd8, %rd5, %rd8;\n\n"
+"    mul.wide.s32 %rd9, %r7, 4;\n"
+"    mul.wide.s32 %rd11, %r8, 4;\n\n"
+"    mov.f32 %f3, 0f00000000;\n"
+"    mov.u32 %r10, 0;\n\n"
+"BW_LOOP_START:\n"
+"    setp.ge.s32 %p1, %r10, %r6;\n"
+"    @%p1 bra BW_LOOP_END;\n\n"
+"    ld.global.f32 %f1, [%rd7];\n"
+"    ld.global.f32 %f2, [%rd8];\n"
+"    fma.rn.f32 %f3, %f1, %f2, %f3;\n\n"
+"    add.s64 %rd7, %rd7, %rd9;\n"
+"    add.s64 %rd8, %rd8, %rd11;\n"
+"    add.s32 %r10, %r10, 1;\n"
+"    bra BW_LOOP_START;\n\n"
+"BW_LOOP_END:\n"
+"    mul.lo.s32 %r9, %r5, %r8;\n"
+"    add.s32 %r9, %r9, %r4;\n"
+"    mul.wide.s32 %rd10, %r9, 4;\n"
+"    add.s64 %rd10, %rd6, %rd10;\n"
+"    ld.global.f32 %f4, [%rd10];\n"
+"    add.f32 %f3, %f4, %f3;\n"
+"    st.global.f32 [%rd10], %f3;\n\n"
+"BW_DONE:\n"
+"    ret;\n"
 "}\n";
 
 static gpu_cuda_ctx_t *g_ctx = NULL;
 static int g_init_attempted = 0;
 static int g_kernel_loaded = 0;
+
+/* All three entry points live in one PTX module, so the driver JITs once and
+ * switching between them costs nothing at launch time. */
+static gpu_cuda_kernel_t *g_k_forward = NULL;
+static gpu_cuda_kernel_t *g_k_backward_input = NULL;
+static gpu_cuda_kernel_t *g_k_backward_weight = NULL;
 
 /* Weight buffer cache: keyed by host pointer, revalidated by generation
  * number rather than re-checking content. gpu_matmul_invalidate_weights()
@@ -120,6 +272,13 @@ static uint64_t g_weight_generation = 1; /* 0 is never assigned, so a zeroed str
 static uint64_t g_scratch_A = 0, g_scratch_C = 0;
 static size_t g_scratch_A_bytes = 0, g_scratch_C_bytes = 0;
 
+/* Backward needs a third live buffer: its destination is read-modify-write,
+ * so the gradient being accumulated into cannot share scratch with either
+ * input. Kept separate from A/C rather than sized into them because the
+ * backward shapes and the forward shapes are different. */
+static uint64_t g_scratch_D = 0;
+static size_t g_scratch_D_bytes = 0;
+
 static int ensure_ready(void) {
     if (g_init_attempted) return g_ctx != NULL && g_kernel_loaded;
     g_init_attempted = 1;
@@ -127,7 +286,16 @@ static int ensure_ready(void) {
     g_ctx = gpu_cuda_init();
     if (!g_ctx) return 0;
 
-    if (gpu_cuda_load_kernel(g_ctx, MATMUL_PTX, "matmul_naive") != 0) {
+    if (gpu_cuda_load_module(g_ctx, MATMUL_PTX) != 0) {
+        gpu_cuda_shutdown(g_ctx);
+        g_ctx = NULL;
+        return 0;
+    }
+
+    g_k_forward = gpu_cuda_resolve_kernel(g_ctx, "matmul_naive");
+    g_k_backward_input = gpu_cuda_resolve_kernel(g_ctx, "matmul_backward_input_naive");
+    g_k_backward_weight = gpu_cuda_resolve_kernel(g_ctx, "matmul_backward_weight_naive");
+    if (!g_k_forward || !g_k_backward_input || !g_k_backward_weight) {
         gpu_cuda_shutdown(g_ctx);
         g_ctx = NULL;
         return 0;
@@ -209,9 +377,85 @@ int gpu_matmul(const float *A, const float *B, float *C, size_t m, size_t k, siz
      * itself blocking. Waiting here as well cost a full extra device
      * round-trip per matmul for nothing. A fault inside the kernel still
      * fails the call - it surfaces as an error from that download. */
-    if (gpu_cuda_launch_2d_async(g_ctx, grid_x, grid_y, BLOCK, BLOCK, args) != 0) return -1;
+    if (gpu_cuda_launch_2d_async_with(g_ctx, g_k_forward, grid_x, grid_y,
+                                      BLOCK, BLOCK, args) != 0) return -1;
 
     if (gpu_cuda_download(g_ctx, C, d_C, m * n * sizeof(float)) != 0) return -1;
+
+    return 0;
+}
+
+/* --------------------------------------------------------- backward pass ---
+ *
+ * Both entries mirror core/matmul.c's CPU signatures exactly, including the
+ * accumulate-into-destination contract, so transformer/training code can
+ * substitute one for the other without knowing which ran.
+ *
+ * They cost more per call than the forward path, structurally: the
+ * destination is read-modify-write, so it is uploaded as well as downloaded.
+ * A forward matmul moves (A in, C out); a backward one moves (two inputs in,
+ * destination in, destination out). Whether that pays is a question about
+ * shape, and the answer is measured rather than assumed - see docs/gpu.md and
+ * the dispatch thresholds in core/training.c.
+ */
+
+int gpu_matmul_backward_input(const float *dC, const float *B, float *dA,
+                              size_t m, size_t k, size_t n) {
+    if (!ensure_ready()) return -1;
+
+    /* B is a weight matrix here exactly as in the forward pass - the same
+     * host pointer, so it hits the same cache entry the forward call filled. */
+    uint64_t d_B = get_cached_weight_buffer(B, k * n * sizeof(float));
+    if (!d_B) return -1;
+
+    uint64_t d_dC = get_scratch_buffer(&g_scratch_A, &g_scratch_A_bytes, m * n * sizeof(float));
+    uint64_t d_dA = get_scratch_buffer(&g_scratch_D, &g_scratch_D_bytes, m * k * sizeof(float));
+    if (!d_dC || !d_dA) return -1;
+
+    if (gpu_cuda_upload(g_ctx, d_dC, dC, m * n * sizeof(float)) != 0) return -1;
+    /* The destination carries a partial gradient from earlier call sites in
+     * this minibatch; the kernel adds to it, so it has to go up first. */
+    if (gpu_cuda_upload(g_ctx, d_dA, dA, m * k * sizeof(float)) != 0) return -1;
+
+    unsigned int m32 = (unsigned int)m, k32 = (unsigned int)k, n32 = (unsigned int)n;
+    void *args[] = { &d_dC, &d_B, &d_dA, &m32, &k32, &n32 };
+    const unsigned int BLOCK = 16;
+    /* One thread per element of dA (m x k): x spans k, y spans m. */
+    unsigned int grid_x = ((unsigned int)k + BLOCK - 1) / BLOCK;
+    unsigned int grid_y = ((unsigned int)m + BLOCK - 1) / BLOCK;
+    if (gpu_cuda_launch_2d_async_with(g_ctx, g_k_backward_input, grid_x, grid_y,
+                                      BLOCK, BLOCK, args) != 0) return -1;
+
+    if (gpu_cuda_download(g_ctx, dA, d_dA, m * k * sizeof(float)) != 0) return -1;
+
+    return 0;
+}
+
+int gpu_matmul_backward_weight(const float *A, const float *dC, float *dB,
+                               size_t m, size_t k, size_t n) {
+    if (!ensure_ready()) return -1;
+
+    /* Neither input is a weight here: A is an activation and dC a gradient,
+     * both of which change every call. Both take scratch buffers. */
+    uint64_t d_A = get_scratch_buffer(&g_scratch_A, &g_scratch_A_bytes, m * k * sizeof(float));
+    uint64_t d_dC = get_scratch_buffer(&g_scratch_C, &g_scratch_C_bytes, m * n * sizeof(float));
+    uint64_t d_dB = get_scratch_buffer(&g_scratch_D, &g_scratch_D_bytes, k * n * sizeof(float));
+    if (!d_A || !d_dC || !d_dB) return -1;
+
+    if (gpu_cuda_upload(g_ctx, d_A, A, m * k * sizeof(float)) != 0) return -1;
+    if (gpu_cuda_upload(g_ctx, d_dC, dC, m * n * sizeof(float)) != 0) return -1;
+    if (gpu_cuda_upload(g_ctx, d_dB, dB, k * n * sizeof(float)) != 0) return -1;
+
+    unsigned int m32 = (unsigned int)m, k32 = (unsigned int)k, n32 = (unsigned int)n;
+    void *args[] = { &d_A, &d_dC, &d_dB, &m32, &k32, &n32 };
+    const unsigned int BLOCK = 16;
+    /* One thread per element of dB (k x n): x spans n, y spans k. */
+    unsigned int grid_x = ((unsigned int)n + BLOCK - 1) / BLOCK;
+    unsigned int grid_y = ((unsigned int)k + BLOCK - 1) / BLOCK;
+    if (gpu_cuda_launch_2d_async_with(g_ctx, g_k_backward_weight, grid_x, grid_y,
+                                      BLOCK, BLOCK, args) != 0) return -1;
+
+    if (gpu_cuda_download(g_ctx, dB, d_dB, k * n * sizeof(float)) != 0) return -1;
 
     return 0;
 }
@@ -226,6 +470,11 @@ void gpu_matmul_shutdown(void) {
     g_weight_cache_count = 0;
     g_weight_generation = 1;
 
+    g_k_forward = NULL;
+    g_k_backward_input = NULL;
+    g_k_backward_weight = NULL;
+
     g_scratch_A = 0; g_scratch_A_bytes = 0;
     g_scratch_C = 0; g_scratch_C_bytes = 0;
+    g_scratch_D = 0; g_scratch_D_bytes = 0;
 }

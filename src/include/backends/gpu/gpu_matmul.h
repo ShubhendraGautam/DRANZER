@@ -35,6 +35,28 @@ int gpu_matmul_available(void);
  * either case, not treat this as fatal. */
 int gpu_matmul(const float *A, const float *B, float *C, size_t m, size_t k, size_t n);
 
+/* Backward-pass counterparts of core/matmul.h's matmul_backward_input() and
+ * matmul_backward_weight(), with identical shapes and identical semantics
+ * including the accumulate-into-destination contract:
+ *
+ *   backward_input:   dA (m x k) += dC (m x n) @ B_transposed
+ *   backward_weight:  dB (k x n) += A_transposed @ dC (m x n)
+ *
+ * Same return convention as gpu_matmul(): 0 on success, -1 means "use the CPU
+ * for this one", never fatal.
+ *
+ * These are more transfer-heavy per call than gpu_matmul(). Because the
+ * destination accumulates, it is uploaded as well as downloaded - four
+ * transfers against the forward path's two, and for backward_weight the
+ * destination is a full weight-sized matrix. At small shapes that overhead
+ * exceeds the arithmetic saved, which is why core/training.c dispatches these
+ * on a measured shape threshold rather than whenever a GPU exists. See
+ * docs/gpu.md for the numbers behind that threshold. */
+int gpu_matmul_backward_input(const float *dC, const float *B, float *dA,
+                              size_t m, size_t k, size_t n);
+int gpu_matmul_backward_weight(const float *A, const float *dC, float *dB,
+                               size_t m, size_t k, size_t n);
+
 /* Marks every cached GPU-resident weight buffer stale. Must be called
  * once after anything changes ANY model weight (training.c calls this
  * once per model_optimizer_step) - without it, gpu_matmul() would keep

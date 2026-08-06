@@ -13,11 +13,14 @@ GPU acceleration is:
 - optional and disabled by default;
 - NVIDIA-only;
 - Linux-focused;
-- limited to matrix multiplications in the forward pass;
+- limited to matrix multiplications — all of them in the forward pass, and the two backward
+  matmuls above a measured shape threshold;
 - transparent when unavailable—the same call falls back to CPU.
 
-The backward pass and optimizer remain on the CPU. At tiny model sizes, GPU launch and transfer
-overhead can exceed the compute time saved.
+The optimizer step, attention scores, softmax, and layer normalization remain on the CPU, and
+activations round-trip to host memory between operations. At tiny model sizes, GPU launch and
+transfer overhead can exceed the compute time saved — for the forward pass this is now true well
+beyond tiny, see [Measured crossover](#measured-crossover).
 
 ## Request GPU execution
 
@@ -135,10 +138,71 @@ The remaining overhead is structural rather than fixable in the backend: only ma
 GPU, so activations return to host memory between every operation. Keeping them device-resident
 would require layer normalization, softmax, and attention on the device too.
 
+## Backward pass
+
+The two backward matmuls are dispatched as well, but on a threshold rather than unconditionally.
+
+```text
+backward_input   dA (m x k) += dC (m x n) @ B_transposed
+backward_weight  dB (k x n) += A_transposed @ dC (m x n)
+```
+
+Both are hand-written PTX in the same module as the forward kernel, so the driver JITs once and
+switching between the three costs nothing at launch. Both vectorize nothing and tile nothing — one
+thread per output element, matching the forward kernel's deliberately naive design.
+
+**They accumulate into their destination**, because every backward call site adds into a gradient
+buffer that a whole minibatch shares. That is the reason for the threshold: a forward matmul moves
+two buffers (activations up, result down) with its weight operand already resident, while a
+backward matmul moves four — both inputs up, and the destination both up *and* down. Below a
+certain amount of arithmetic those extra transfers cost more than the kernel saves.
+
+Measured with `./gpu_latency.out`, CPU against GPU on the same buffers in the same process:
+
+| Shape (m×k×n) | `backward_input` | `backward_weight` |
+|---|---:|---:|
+| 1×64×1000 | 0.05x | 0.65x |
+| 1×256×4000 | 0.28x | 1.12x |
+| 64×64×64 | 0.15x | 0.85x |
+| 64×256×64 | 0.63x | **4.31x** |
+| 128×256×256 | **1.54x** | **21.48x** |
+| 128×256×1024 | **2.22x** | **30.76x** |
+| 128×1024×256 | **2.12x** | **27.29x** |
+
+`core/training.c` therefore dispatches `backward_weight` above 2²⁰ multiply-accumulates and
+`backward_input` above 2²³, both rounded down from the crossovers above for margin. Below the
+threshold the CPU runs, which is always correct and never worse than having no GPU.
+
+**Read the `backward_weight` column with suspicion.** A 30x speedup is not the GPU being
+extraordinary; it is `matmul_backward_weight()` being slow on the CPU. That function strides both
+operands in its innermost loop, so at 128×256×1024 it costs about 40 ms against roughly 6 ms for a
+*forward* matmul of identical FLOP count. Fixing its loop order would narrow this gap considerably
+and would benefit every user without a GPU, which is most of them; it is filed under later runtime
+goals in the [design checklist](design-checklist.md). The thresholds above are measured against the
+CPU implementation as it exists today and should be re-derived if it changes.
+
 ## Measured crossover
 
-Historical measurements from the project's NVIDIA MX450 test system illustrate why `--gpu` is not
-automatically faster:
+`--gpu` is not automatically faster, and since the CPU gained runtime-dispatched AVX-512 kernels
+(see [CPU matmul kernels](matmul.md)) it is no longer even reliably faster for inference.
+
+Current measurements, medium tier, best of three runs each on the MX450 test system:
+
+| Workload | CPU | GPU | Result |
+|---|---:|---:|---|
+| Inference (ms/token) | 65.8 | 89.3 | **CPU wins, 0.74x** |
+| Training (ms/step) | 969.3 | 627.9 | **GPU wins, 1.54x** |
+
+The two run ranges do not overlap in either row (inference CPU 65.8–72.0 against GPU 89.3–96.6;
+training CPU 969–1102 against GPU 628–690), so both directions are larger than session noise.
+
+**This inverted an earlier result and the old table is kept below as a record of that.** Before
+AVX-512 dispatch, the same machine measured medium-tier inference about 5.1x *faster* on the GPU.
+Speeding up the CPU forward path by roughly 1.8x on matmul moved the crossover past the largest
+tier this project benchmarks. Training still favours the GPU because the backward pass is where the
+CPU is weakest — see the caveat about `matmul_backward_weight` above.
+
+Superseded, retained for context (pre-AVX-512, forward-only GPU dispatch):
 
 | Model tier | CPU inference | Cached GPU inference | Result |
 |---|---:|---:|---|
@@ -146,8 +210,9 @@ automatically faster:
 | small | 11.9 ms/token | about 2× faster | GPU begins to win |
 | medium | 542.6 ms/token | about 5.1× faster | compute dominates overhead |
 
-These numbers are not portable benchmarks; hardware, driver, thermals, and model dimensions all
-matter. Run `bench.out` on the target system before deciding whether to enable GPU execution.
+None of these are portable benchmarks; hardware, driver, thermals, compiler, and model dimensions
+all matter, and as the inversion above shows, a change on the *CPU* side can flip the answer. Run
+`bench.out` on the target system before deciding whether to enable GPU execution.
 
 ## Capability cache
 

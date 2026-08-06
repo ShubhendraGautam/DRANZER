@@ -162,11 +162,13 @@ static int bench_kv_decode(neural_model_t *model, const bench_config_t *cfg,
     return 0;
 }
 
-/* GPU forward dispatch only touches model_forward's matmuls (see
- * transformer.c) - the backward pass and optimizer step inside
- * model_train_step stay CPU-only regardless of model->use_gpu, so this
- * measures "how much does GPU-accelerating just the forward half of a
- * training step help", not a fully GPU-resident training step. */
+/* With model->use_gpu set, a training step dispatches both the forward
+ * matmuls (transformer.c) and the two backward matmuls (training.c) to the
+ * GPU - the latter only above a measured shape threshold, so at small tiers
+ * the backward half still runs on the CPU by design. The optimizer step,
+ * attention, layer norm, and softmax remain CPU-only in every case, and
+ * activations still round-trip to host memory between operations, so this is
+ * not a fully GPU-resident training step. See docs/gpu.md. */
 static double bench_training(neural_model_t *model, const bench_config_t *cfg, int iters) {
     uint32_t *tokens = malloc(cfg->max_seq_len * sizeof(uint32_t));
     for (size_t i = 0; i < cfg->max_seq_len; i++) tokens[i] = (uint32_t)((i * 17 + 3) % cfg->vocab_size);

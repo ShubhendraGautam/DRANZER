@@ -156,6 +156,7 @@ profile:
 # buffers are already resident. Links the CUDA wrapper and matmul backend
 # plus the shared benchmark provenance/timing helpers - no model code.
 GPU_LATENCY_SRC = tools/gpu_latency.c tools/bench_support.c core/cpu_features.c \
+                  core/matmul.c core/matmul_x86.c core/matmul_arm.c \
                   backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 GPU_LATENCY_OBJ = $(GPU_LATENCY_SRC:.c=.o)
 GPU_LATENCY_TARGET = gpu_latency.out
@@ -186,13 +187,23 @@ TEST_MODEL_OBJ = core/model.o core/matmul.o core/matmul_x86.o core/matmul_arm.o 
 TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/cli/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/tpu/test_*.c)
 TEST_BINS = $(TEST_SRCS:.c=.out)
 
+# tests/gpu/ binaries run with LeakSanitizer off (ASAN's buffer-overflow and
+# use-after-free checks stay on). The NVIDIA driver keeps process-global
+# allocations that outlive cuCtxDestroy, and LSan cannot attribute most of
+# them to any module, so leak-checking a process that has loaded libcuda
+# reports ~49 KB of driver state on every GPU test. Suppressing by library
+# name only caught half of it. This is scoped to tests/gpu/ so every other
+# test still gets full leak detection.
 test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
 	@failed=0; \
 	for src in $(TEST_SRCS); do \
 		bin=$${src%.c}.out; \
 		echo "=== $$src ==="; \
 		$(CC) $(CFLAGS) $$src $(TEST_MODEL_OBJ) -L$(LIB_DIR) -l$(LIB_NAME) $(LDFLAGS) -ldl -o $$bin || { echo "BUILD FAILED: $$src"; failed=1; continue; }; \
-		./$$bin || failed=1; \
+		case $$src in \
+			tests/gpu/*) ASAN_OPTIONS=detect_leaks=0 ./$$bin || failed=1 ;; \
+			*) ./$$bin || failed=1 ;; \
+		esac; \
 		rm -f $$bin; \
 		echo ""; \
 	done; \

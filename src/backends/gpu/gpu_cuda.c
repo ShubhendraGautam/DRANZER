@@ -33,12 +33,28 @@ typedef CUresult (*fn_cuCtxSynchronize)(void);
 typedef CUresult (*fn_cuGetErrorString)(CUresult, const char **);
 typedef CUresult (*fn_cuDeviceGetAttribute)(int *, int, CUdevice);
 
+/* Entry points resolvable from one loaded module at a time. Comfortably above
+ * every module this project has - gpu_matmul.c's three is the largest -
+ * and resolving past the limit fails loudly rather than reusing a slot. */
+#define GPU_CUDA_MAX_KERNELS 8
+
+struct gpu_cuda_kernel {
+    CUfunction fn;
+};
+
 struct gpu_cuda_ctx {
     void *lib;
     CUdevice device;
     CUcontext cu_ctx;
     CUmodule module;      /* most recently loaded module, if any */
     CUfunction kernel;    /* most recently resolved kernel, if any */
+
+    /* Handles handed out by gpu_cuda_resolve_kernel(). Stored inline so a
+     * handle stays valid for the context's lifetime without the caller
+     * owning anything. Reset whenever a new module is loaded: the old
+     * CUfunctions belonged to the module being replaced. */
+    struct gpu_cuda_kernel kernels[GPU_CUDA_MAX_KERNELS];
+    int kernel_count;
 
     fn_cuDeviceGetAttribute cuDeviceGetAttribute;
     fn_cuCtxDestroy cuCtxDestroy;
@@ -128,19 +144,46 @@ void gpu_cuda_shutdown(gpu_cuda_ctx_t *ctx) {
     free(ctx);
 }
 
-int gpu_cuda_load_kernel(gpu_cuda_ctx_t *ctx, const char *ptx_src, const char *kernel_name) {
+int gpu_cuda_load_module(gpu_cuda_ctx_t *ctx, const char *ptx_src) {
     CUresult rc = ctx->cuModuleLoadData(&ctx->module, ptx_src);
     if (rc != 0) {
         log_cuda_error(ctx, "cuModuleLoadData", rc);
         return -1;
     }
+    /* Any handle previously handed out referred to the module just replaced. */
+    ctx->kernel_count = 0;
+    ctx->kernel = NULL;
+    return 0;
+}
 
-    rc = ctx->cuModuleGetFunction(&ctx->kernel, ctx->module, kernel_name);
-    if (rc != 0) {
-        log_cuda_error(ctx, "cuModuleGetFunction", rc);
-        return -1;
+gpu_cuda_kernel_t *gpu_cuda_resolve_kernel(gpu_cuda_ctx_t *ctx, const char *kernel_name) {
+    if (ctx->kernel_count >= GPU_CUDA_MAX_KERNELS) {
+        fprintf(stderr, "gpu_cuda: no kernel slot left for \"%s\" (max %d)\n",
+                kernel_name, GPU_CUDA_MAX_KERNELS);
+        return NULL;
     }
 
+    CUfunction fn = NULL;
+    CUresult rc = ctx->cuModuleGetFunction(&fn, ctx->module, kernel_name);
+    if (rc != 0) {
+        log_cuda_error(ctx, "cuModuleGetFunction", rc);
+        return NULL;
+    }
+
+    struct gpu_cuda_kernel *slot = &ctx->kernels[ctx->kernel_count++];
+    slot->fn = fn;
+    return slot;
+}
+
+int gpu_cuda_load_kernel(gpu_cuda_ctx_t *ctx, const char *ptx_src, const char *kernel_name) {
+    if (gpu_cuda_load_module(ctx, ptx_src) != 0) return -1;
+
+    gpu_cuda_kernel_t *resolved = gpu_cuda_resolve_kernel(ctx, kernel_name);
+    if (!resolved) return -1;
+
+    /* Single-kernel callers launch through ctx->kernel; keep it pointing at
+     * the one they just asked for. */
+    ctx->kernel = resolved->fn;
     return 0;
 }
 
@@ -176,17 +219,32 @@ int gpu_cuda_download(gpu_cuda_ctx_t *ctx, void *host, uint64_t dptr, size_t byt
     return 0;
 }
 
-int gpu_cuda_launch_2d_async(gpu_cuda_ctx_t *ctx,
-                             unsigned int grid_x, unsigned int grid_y,
-                             unsigned int block_x, unsigned int block_y,
-                             void **args) {
-    CUresult rc = ctx->cuLaunchKernel(ctx->kernel, grid_x, grid_y, 1, block_x, block_y, 1,
+static int launch_2d_async_fn(gpu_cuda_ctx_t *ctx, CUfunction fn,
+                              unsigned int grid_x, unsigned int grid_y,
+                              unsigned int block_x, unsigned int block_y,
+                              void **args) {
+    CUresult rc = ctx->cuLaunchKernel(fn, grid_x, grid_y, 1, block_x, block_y, 1,
                                        0, NULL, args, NULL);
     if (rc != 0) {
         log_cuda_error(ctx, "cuLaunchKernel", rc);
         return -1;
     }
     return 0;
+}
+
+int gpu_cuda_launch_2d_async(gpu_cuda_ctx_t *ctx,
+                             unsigned int grid_x, unsigned int grid_y,
+                             unsigned int block_x, unsigned int block_y,
+                             void **args) {
+    return launch_2d_async_fn(ctx, ctx->kernel, grid_x, grid_y, block_x, block_y, args);
+}
+
+int gpu_cuda_launch_2d_async_with(gpu_cuda_ctx_t *ctx, gpu_cuda_kernel_t *kernel,
+                                  unsigned int grid_x, unsigned int grid_y,
+                                  unsigned int block_x, unsigned int block_y,
+                                  void **args) {
+    if (!kernel) return -1;
+    return launch_2d_async_fn(ctx, kernel->fn, grid_x, grid_y, block_x, block_y, args);
 }
 
 int gpu_cuda_launch_2d(gpu_cuda_ctx_t *ctx,

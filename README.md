@@ -14,7 +14,7 @@ dispatch.
 The default build runs anywhere with a C compiler, and stays portable while still using the vector
 instructions of whatever CPU it lands on: the AVX2, AVX-512, and NEON matmul kernels are selected at
 runtime from CPUID rather than baked in with `-march`, so one binary uses the widest it finds and
-falls back to portable C on a machine with none. On NVIDIA systems, forward-pass matrix
+falls back to portable C on a machine with none. On NVIDIA systems, forward and backward matrix
 multiplication can also run through hand-written PTX loaded directly by the CUDA driver—no CUDA
 toolkit required.
 
@@ -27,7 +27,7 @@ toolkit required.
 - Single-file model bundles and ring-KV-cached greedy/top-k/top-p decoding
 - Incremental generation callbacks, streamed CLI output, stop sequences, and repetition controls
 - Portable CPU execution, runtime-dispatched AVX2/AVX-512/NEON matmul kernels, and optional OpenMP
-- Optional NVIDIA GPU offload with persistent buffers and a validated weight cache
+- Optional NVIDIA GPU offload for forward and backward matmuls, with persistent buffers and a validated weight cache
 - Built-in tests, benchmarks, hardware probing, serialization, and GitHub Actions CI
 
 ## Quick start
@@ -101,8 +101,10 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 DRANZER is an educational and systems-research implementation, not a production LLM runtime.
 Generation can continue beyond the model context window by evicting the oldest per-layer KV rows;
 quality is still limited by that fixed retained context and by positions beyond those seen during
-training. GPU offload is NVIDIA-only and covers forward-pass matrix multiplications; training's
-backward pass remains on the CPU.
+training. GPU offload is NVIDIA-only and covers matrix multiplications: all of them in the forward
+pass, and the two backward matmuls above a measured shape threshold. The optimizer step, attention
+scores, softmax, and layer normalization stay on the CPU, and activations round-trip to host memory
+between operations, so a training step is not GPU-resident.
 
 ## License
 

@@ -49,6 +49,8 @@ fails.
 | `test_gpu_model_forward.c` | Full GPU-dispatched forward pass versus CPU |
 | `test_gpu_weight_cache.c` | Correct cache invalidation after weight changes |
 | `test_gpu_training_step.c` | CPU/GPU agreement across repeated training updates |
+| `test_gpu_matmul_backward.c` | GPU backward kernels versus the CPU reference, including accumulation into a non-zero destination |
+| `test_gpu_training_backward.c` | CPU/GPU agreement on a model large enough that the dispatched backward kernels are actually used |
 
 GPU tests return success with a clear `SKIP` message when CUDA hardware is unavailable.
 
@@ -82,6 +84,17 @@ make -C src clean all test bench gpu-probe CC=clang SIZE=1
 Always clean when switching compiler or instrumentation flags because object filenames are shared
 between build variants.
 
+**Leak detection is disabled for `tests/gpu/` only.** The `make test` recipe runs those binaries
+with `ASAN_OPTIONS=detect_leaks=0`, which overrides the setting above for them alone; every other
+test keeps full leak detection, and ASAN's buffer-overflow and use-after-free checks stay on
+everywhere including the GPU tests. The reason is the NVIDIA driver: it keeps process-global
+allocations that outlive `cuCtxDestroy`, so on any machine with a usable GPU each `tests/gpu/`
+binary reported about 49 KB of driver state with no project frames in the stack. Suppressing by
+library name caught only half of it — LeakSanitizer could not attribute the rest to any module.
+A leak in the project's own `gpu_cuda.c` or `gpu_matmul.c` is therefore not caught by this suite
+and has to be reasoned about from the shutdown paths, which `gpu_matmul_shutdown()` covers by
+destroying the context that owns every device allocation.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request. Its matrix builds the CLI and runs
@@ -89,7 +102,7 @@ the complete suite with GCC and Clang on Ubuntu 24.04.
 
 `.github/workflows/nightly.yml` runs daily at 02:17 UTC and is also manually dispatchable. It adds:
 
-- Clang AddressSanitizer with leak detection;
+- Clang AddressSanitizer with leak detection (except `tests/gpu/`, see above);
 - GCC with OpenMP enabled;
 - the size-optimized configuration;
 - compilation of the benchmark and GPU probe;
