@@ -344,6 +344,58 @@ listed below as a limitation and not attempted here.
 The gap between 1.83x on isolated matmul shapes and 1.29x on whole-model inference is the ordinary
 Amdahl result: attention, softmax, layer norm, and the tokenizer are untouched by any of this.
 
+## The backward kernels
+
+`matmul_backward_input` and `matmul_backward_weight` are not selectable kernels — one
+implementation each, no dispatch, no tile — but one of them was carrying a large and entirely
+avoidable cost.
+
+```text
+backward_input   dA (m x k) += dC (m x n) @ B_transposed
+backward_weight  dB (k x n) += A_transposed @ dC (m x n)
+```
+
+`backward_input` was always fine: its innermost loop runs over `j`, walking a row of `dC` and a row
+of `B` contiguously, which is a dot product a compiler vectorizes on its own.
+
+`backward_weight` was not. Written the obvious way — accumulate a dot product into a register and
+store each output element once — it puts `i` innermost, where it strides `A` by `k` and `dC` by `n`
+*simultaneously*. Every iteration of the hot loop touched two fresh cache lines to use one float
+from each. At 128x1024x256 it cost about 40 ms against roughly 6 ms for a forward matmul of
+identical FLOP count.
+
+Putting `j` innermost instead walks `dB` and `dC` contiguously and reduces `A` to one scalar load
+per `(l, i)`. Four rows of `dB` are kept in flight for the same reason `tiled_mr4` keeps four rows
+of `C`. Measured with `./gpu_latency.out`, which times the CPU backward path beside the GPU one:
+
+| Shape (m×k×n) | before | after | speedup |
+|---|---:|---:|---:|
+| 1×64×1000 | 229.0 µs | 10.5 µs | **21.8x** |
+| 1×256×4000 | 2432.2 | 161.1 | **15.1x** |
+| 64×64×64 | 167.0 | 29.6 | 5.6x |
+| 64×256×64 | 770.8 | 126.9 | 6.1x |
+| 128×256×256 | 9761.8 | 1038.8 | 9.4x |
+| 128×256×1024 | 39928.9 | 6499.0 | 6.1x |
+| 128×1024×256 | 39697.6 | 4662.3 | 8.5x |
+
+Whole-model, medium tier, `--cpu-only`, old and new binaries interleaved ABBA in one session, best
+of six runs each: **1125.3 → 408.6 ms/step, 2.75x.** The two ranges do not overlap (1125–1689
+against 409–547), and inference — unchanged code, measured as a control in the same runs — read
+77.9 ms/token on both sides, ratio 1.00x.
+
+Two consequences worth stating plainly:
+
+- **This is the largest single speedup in the project's history so far**, and it came from a loop
+  order rather than from SIMD or a GPU. It is also nearly twice what dispatching the backward pass
+  to the GPU was worth (1.54x), and unlike that, it helps every user.
+- **It reassociates the sum.** The old order added a fully-accumulated dot product to `dB` once;
+  the new one adds each `i`'s contribution in turn. Results differ in the last bits from builds
+  before this change — the same class of difference as switching matmul kernels, covered by the
+  gradient checks' tolerances rather than by bit-identity. Within one build it stays deterministic,
+  which is what exact resume actually requires.
+
+Neither backward kernel has a SIMD path yet; that is the next roadmap item for them.
+
 ## Limitations
 
 - **The NEON kernel is written but unmeasured.** No AArch64 machine was available. It is checked for
@@ -358,10 +410,10 @@ Amdahl result: attention, softmax, layer norm, and the tokenizer are untouched b
 - The kernels are register-blocked but not packed. `A` and `B` are read from their original
   row-major layout, so the innermost loop's `B` access is contiguous but its `A` access is strided.
   A packing pass is the usual next step and is not attempted here.
-- **The backward-pass kernels are not dispatched.** `matmul_backward_input` and
-  `matmul_backward_weight` have one portable implementation each and are not part of the candidate
-  set. Since the backward pass dominates a training step, this is why the whole-model table shows no
-  measurable training speedup; dispatching them is the obvious next win and is not attempted here.
+- **The backward-pass kernels are not part of the candidate set.** `matmul_backward_input` and
+  `matmul_backward_weight` have one portable implementation each and no SIMD path, which is why the
+  whole-model table shows no measurable training speedup from AVX-512. Their loop order has since
+  been fixed (see [The backward kernels](#the-backward-kernels)), but they are still plain C.
 - **The AVX2 compiler split is unexplained.** The same intrinsics measure 1.35x under GCC and 0.90x
   under Clang, with packed FMAs present in both disassemblies. The cause is somewhere in
   instruction scheduling and was not isolated.

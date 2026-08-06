@@ -28,17 +28,21 @@
  * cost more than the kernel saves, and the GPU path is a straight loss.
  *
  * The thresholds are the measured crossovers from `./gpu_latency.out` on this
- * project's MX450 test system (docs/gpu.md), rounded down to a power of two
- * for a margin. They differ between the two functions because their
- * destinations differ in size: backward_weight writes a full weight-sized
- * matrix and gets much more arithmetic per byte moved, so it crosses over
- * about eight times sooner.
+ * project's MX450 test system (docs/gpu.md), rounded to a power of two.
  *
- * These are GPU-specific in a way the CPU kernel policy is not - a different
- * card moves the crossover. Re-run `./gpu_latency.out` before trusting them
- * on other hardware; below the threshold the CPU path is used, which is
+ * Both are 2^23, and that is a second measurement rather than a coincidence.
+ * backward_weight originally crossed over eight times sooner, at 2^20 - but
+ * only because its CPU implementation was pathologically slow, striding both
+ * operands in its innermost loop. Once that was fixed (see core/matmul.c) the
+ * CPU side got 5.6x to 21.8x faster and the crossover moved out to meet
+ * backward_input's. The GPU did not get worse; the competition got better.
+ *
+ * That is also the warning attached to these constants: they measure this
+ * GPU against this CPU implementation, so a change to either invalidates
+ * them. A different card moves them too. Re-run `./gpu_latency.out` before
+ * trusting them elsewhere; below the threshold the CPU path is used, which is
  * always correct and never slower than not having the GPU at all. */
-#define GPU_BACKWARD_WEIGHT_MIN_WORK (1u << 20)
+#define GPU_BACKWARD_WEIGHT_MIN_WORK (1u << 23)
 #define GPU_BACKWARD_INPUT_MIN_WORK  (1u << 23)
 
 /* True when this shape is worth the round trip. Guards the multiplication

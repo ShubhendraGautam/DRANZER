@@ -378,18 +378,62 @@ void matmul_backward_input(float *restrict dC, float *restrict B, float *restric
     }
 }
 
+/* Loop order l/i/j, not l/j/i.
+ *
+ * The obvious way to write this - accumulate a dot product over i into a
+ * register, store once per output element - puts i innermost, where it strides
+ * A by k and dC by n simultaneously. Every iteration of the hot loop then
+ * touches two new cache lines and uses one float from each, which neither
+ * caches nor vectorizes. It measured about 40 ms at 128x1024x256 against
+ * roughly 6 ms for a forward matmul of the same FLOP count (docs/matmul.md).
+ *
+ * Putting j innermost instead walks dB and dC contiguously and reduces A to a
+ * single scalar load per (l, i). Four rows of dB are kept in flight for the
+ * same reason kernel_tiled_mr4 keeps four rows of C: each dC element loaded
+ * then feeds four independent accumulator rows, and the four chains hide FMA
+ * latency. Values of k that are not a multiple of four finish in the one-row
+ * body below.
+ *
+ * This reassociates the sum. The old order added a fully-accumulated dot
+ * product to dB once; this one adds each i's contribution in turn, so results
+ * differ in the last bits from builds before this change - the same class of
+ * difference as switching matmul kernels, and covered by the gradient checks'
+ * tolerances rather than by bit-identity. Within one build it stays
+ * deterministic, which is what exact resume actually requires. */
 void matmul_backward_weight(float *restrict A, float *restrict dC, float *restrict dB,
                              size_t m, size_t k, size_t n) {
     #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
     #endif
-    for (size_t l = 0; l < k; l++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
+    for (size_t l = 0; l < k; l += 4) {
+        if (l + 4 <= k) {
+            float *out0 = &dB[l * n];
+            float *out1 = out0 + n;
+            float *out2 = out1 + n;
+            float *out3 = out2 + n;
             for (size_t i = 0; i < m; i++) {
-                sum += A[i * k + l] * dC[i * n + j];
+                const float *row_dc = &dC[i * n];
+                const float *a = &A[i * k + l];
+                float a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3];
+                for (size_t j = 0; j < n; j++) {
+                    float d = row_dc[j];
+                    out0[j] += a0 * d;
+                    out1[j] += a1 * d;
+                    out2[j] += a2 * d;
+                    out3[j] += a3 * d;
+                }
             }
-            dB[l * n + j] += sum;
+        } else {
+            for (size_t ll = l; ll < k; ll++) {
+                float *row_out = &dB[ll * n];
+                for (size_t i = 0; i < m; i++) {
+                    float a = A[i * k + ll];
+                    const float *row_dc = &dC[i * n];
+                    for (size_t j = 0; j < n; j++) {
+                        row_out[j] += a * row_dc[j];
+                    }
+                }
+            }
         }
     }
 }

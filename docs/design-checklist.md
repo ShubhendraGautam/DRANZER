@@ -293,20 +293,37 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   `core/training.c`). Two hand-written PTX kernels join the forward one in a single module, with
   accumulate-into-destination semantics matching the CPU contract. Because a backward call moves
   four buffers where a forward call moves two — both inputs up, plus the accumulating destination
-  up *and* down — they dispatch on a measured shape threshold (2²⁰ multiply-accumulates for
-  `backward_weight`, 2²³ for `backward_input`) rather than whenever a GPU exists. Medium-tier
-  training improved 969.3 → 627.9 ms/step (1.54x, non-overlapping ranges over three runs each),
-  the first whole-model training win the GPU backend has produced. Correctness is covered by
+  up *and* down — they dispatch on a measured shape threshold rather than whenever a GPU exists.
+  Medium-tier training improved 969.3 → 627.9 ms/step (1.54x, non-overlapping ranges over three
+  runs each), the first whole-model training win the GPU backend has produced. Both thresholds are
+  now 2²³; the originally-measured 2²⁰ for `backward_weight` was re-derived after the CPU
+  loop-order fix below, which also reduced the whole-model figure above to 536.4 → 477.4 ms/step
+  (1.12x) by making the CPU side faster. Correctness is covered by
   `test_gpu_matmul_backward.c` (both kernels against the CPU reference, accumulating twice into a
   non-zero destination, on shapes with no extent a multiple of the thread block) and
   `test_gpu_training_backward.c` (CPU/GPU agreement on a model deliberately sized so the thresholds
   are crossed — the pre-existing `test_gpu_training_step.c` model is small enough that every
   backward shape falls below them). Documented in `docs/gpu.md`.
-- [ ] **Fix `matmul_backward_weight()`'s loop order.** It strides both operands in its innermost
-  loop, so at 128x256x1024 it costs about 40 ms against roughly 6 ms for a forward matmul of
-  identical FLOP count. Most of the 20-30x the GPU shows on that function is this inefficiency
-  rather than GPU throughput. Fixing it helps every user without a GPU and would require
-  re-deriving the dispatch thresholds above.
+- [x] **Fix `matmul_backward_weight()`'s loop order** (`core/matmul.c`). It ran `i` innermost,
+  striding `A` by `k` and `dC` by `n` simultaneously, so every iteration of the hot loop touched two
+  fresh cache lines to use one float from each. Moving `j` innermost walks `dB` and `dC`
+  contiguously and reduces `A` to one scalar load per `(l, i)`; four rows of `dB` are kept in
+  flight for the same reason `tiled_mr4` keeps four rows of `C`. Per-shape improvement is 5.6x to
+  21.8x, and whole-model medium-tier CPU training improved **1125.3 -> 408.6 ms/step (2.75x)**,
+  measured with old and new binaries interleaved ABBA in one session, best of six each,
+  non-overlapping ranges, with inference as an unchanged control reading 77.9 ms/token on both
+  sides (ratio 1.00x).
+
+  This is the largest single speedup in the project so far and it came from a loop order, not from
+  SIMD or a GPU - nearly twice what dispatching the backward pass to the GPU was worth, and unlike
+  that, it helps every user. It also invalidated the GPU thresholds set immediately above: with the
+  CPU 5.6-21.8x faster, `backward_weight`'s crossover moved out from 2^20 to 2^23 to meet
+  `backward_input`'s, and the GPU's advantage on that function fell from up to 30x to 3-5x. The GPU
+  did not get worse; the baseline got better, which is the standing caution for every speedup ratio
+  in this repository. The change reassociates the sum, so results differ in the last bits from
+  earlier builds - the same class of difference as switching matmul kernels, covered by the
+  gradient checks' tolerances rather than by bit-identity, and still deterministic within one build.
+  Documented in `docs/matmul.md`.
 - [ ] Give the backward matmuls **SIMD** kernels too. They remain portable C with no AVX-512 path,
   which is why T11 measured no whole-model training speedup; this is separate from, and should
   follow, the loop-order fix above.

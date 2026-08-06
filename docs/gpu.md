@@ -161,25 +161,29 @@ Measured with `./gpu_latency.out`, CPU against GPU on the same buffers in the sa
 
 | Shape (m×k×n) | `backward_input` | `backward_weight` |
 |---|---:|---:|
-| 1×64×1000 | 0.05x | 0.65x |
-| 1×256×4000 | 0.28x | 1.12x |
-| 64×64×64 | 0.15x | 0.85x |
-| 64×256×64 | 0.63x | **4.31x** |
-| 128×256×256 | **1.54x** | **21.48x** |
-| 128×256×1024 | **2.22x** | **30.76x** |
-| 128×1024×256 | **2.12x** | **27.29x** |
+| 1×64×1000 | 0.05x | 0.03x |
+| 1×256×4000 | 0.36x | 0.07x |
+| 64×64×64 | 0.24x | 0.16x |
+| 64×256×64 | 0.73x | 0.50x |
+| 128×256×256 | **1.60x** | **2.57x** |
+| 128×256×1024 | **2.43x** | **4.88x** |
+| 128×1024×256 | **2.29x** | **3.49x** |
 
-`core/training.c` therefore dispatches `backward_weight` above 2²⁰ multiply-accumulates and
-`backward_input` above 2²³, both rounded down from the crossovers above for margin. Below the
-threshold the CPU runs, which is always correct and never worse than having no GPU.
+`core/training.c` therefore dispatches both above 2²³ multiply-accumulates. Below the threshold the
+CPU runs, which is always correct and never worse than having no GPU.
 
-**Read the `backward_weight` column with suspicion.** A 30x speedup is not the GPU being
-extraordinary; it is `matmul_backward_weight()` being slow on the CPU. That function strides both
-operands in its innermost loop, so at 128×256×1024 it costs about 40 ms against roughly 6 ms for a
-*forward* matmul of identical FLOP count. Fixing its loop order would narrow this gap considerably
-and would benefit every user without a GPU, which is most of them; it is filed under later runtime
-goals in the [design checklist](design-checklist.md). The thresholds above are measured against the
-CPU implementation as it exists today and should be re-derived if it changes.
+**These numbers replaced a much more flattering set, and the reason matters.** When the backward
+kernels were first dispatched, `backward_weight` measured up to **30x** on the GPU and crossed over
+eight times sooner, at 2²⁰. That was not the GPU being extraordinary — it was
+`matmul_backward_weight()` striding both operands in its innermost loop on the CPU. Fixing that
+loop order made the CPU side 5.6x to 21.8x faster (see
+[CPU matmul kernels](matmul.md#the-backward-kernels)) and pulled the GPU's advantage down to the
+3-5x above, moving the crossover out to meet `backward_input`'s.
+
+The GPU did not get worse; the competition got better. The lesson for anyone reading a speedup
+table in this repository: a large ratio is a claim about *two* implementations, and the cheap one to
+suspect first is the baseline. These thresholds are measured against the CPU implementation as it
+exists today and must be re-derived if it changes again.
 
 ## Measured crossover
 
@@ -191,10 +195,16 @@ Current measurements, medium tier, best of three runs each on the MX450 test sys
 | Workload | CPU | GPU | Result |
 |---|---:|---:|---|
 | Inference (ms/token) | 65.8 | 89.3 | **CPU wins, 0.74x** |
-| Training (ms/step) | 969.3 | 627.9 | **GPU wins, 1.54x** |
+| Training (ms/step) | 536.4 | 477.4 | **GPU wins, 1.12x** |
 
-The two run ranges do not overlap in either row (inference CPU 65.8–72.0 against GPU 89.3–96.6;
-training CPU 969–1102 against GPU 628–690), so both directions are larger than session noise.
+The inference ranges do not overlap (CPU 65.8–72.0 against GPU 89.3–96.6). The training margin is
+narrow and the ranges do touch (CPU 536–601 against GPU 477–552), so treat 1.12x as "the GPU is
+still ahead on training, but not by much" rather than as a precise figure.
+
+**That training row used to read 969.3 against 627.9, a 1.54x GPU win.** Fixing
+`matmul_backward_weight()`'s loop order (see [CPU matmul kernels](matmul.md#the-backward-kernels))
+made CPU training 2.75x faster on its own and took most of the GPU's advantage with it. Both
+numbers above are honest; they were measured five hours apart against different CPU code.
 
 **This inverted an earlier result and the old table is kept below as a record of that.** Before
 AVX-512 dispatch, the same machine measured medium-tier inference about 5.1x *faster* on the GPU.
