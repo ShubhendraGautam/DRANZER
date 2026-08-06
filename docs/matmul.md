@@ -49,22 +49,24 @@ logits against.
 
 ## How the default is chosen
 
-`matmul_select()` resolves `MATMUL_KERNEL_AUTO` with one rule:
+`matmul_select()` resolves `MATMUL_KERNEL_AUTO` to the widest vector kernel the CPU can execute:
 
 ```text
-avx512_mr4 if the CPU has AVX-512F+VL, otherwise tiled_mr4
+avx512_mr4  →  avx2_mr4  →  tiled_mr4
 ```
 
-That is **not** "the widest kernel available", and the difference is the main result of this work.
-`avx2_mr4` and `neon_mr4` are built, correctness-checked, and selectable — but never selected. Both
-exclusions are measured outcomes, not omissions:
+**That ordering was measured, rejected, and then measured again**, and the history is the more
+useful part. While the SIMD kernels held their accumulators in memory, `avx2_mr4` was worth 1.47x
+under GCC and 0.92x under Clang, so the policy declined to select it — correctly, on the evidence
+then available. Rewriting the kernels to keep accumulators in registers (see
+[Accumulators in registers](#accumulators-in-registers)) removed the cause, and both compilers now
+agree the width ordering holds.
 
-| Kernel | Why it is not the default |
-|---|---|
-| `avx2_mr4` | 1.34x faster under GCC, 0.90x under **Clang**, which is this project's default compiler. A default must not regress the default build. |
-| `neon_mr4` | Unmeasured — no AArch64 hardware was available. It is also the only kernel offering no new instruction, since NEON is baseline on AArch64 and `tiled_mr4` already compiles to it. |
+`neon_mr4` is still not selected, for one reason only: no AArch64 hardware was available to measure
+it on. The earlier second reason — that a hand-written kernel cannot beat what a compiler emits for
+a baseline instruction set — is precisely the claim the rewrite falsified, so it no longer counts.
 
-It does **not** split by shape either. Every shape gets the same kernel — see
+It does **not** split by shape. Every shape gets the same kernel — see
 [What the measurements changed](#what-the-measurements-changed) for the two shape splits that were
 tried and rejected.
 
@@ -393,6 +395,57 @@ Two consequences worth stating plainly:
   before this change — the same class of difference as switching matmul kernels, covered by the
   gradient checks' tolerances rather than by bit-identity. Within one build it stays deterministic,
   which is what exact resume actually requires.
+
+### Accumulators in registers
+
+The SIMD kernels were first written with `j` innermost, reading `C`, adding, and writing `C` back on
+every step of `k`. That produced the one result in this project that a compiler disagreed about:
+`avx2_mr4` measured **1.47x** under GCC and **0.92x** under Clang, from identical source. It shipped
+unselected for that reason, with the cause recorded as unexplained.
+
+Disassembling both builds explained it. In `fmadd(a, b, load(c))` the loaded value sits in the
+addend position, which x86 can encode as an FMA memory operand:
+
+| hot loop | lines | `vfmadd_ps` | with memory operand | `vmovups` |
+|---|---:|---:|---:|---:|
+| GCC | 18 | 4 | **4 of 4** | 5 |
+| Clang | 22 | 4 | **1 of 4** | 8 |
+
+Clang folded one of four and issued three extra loads per iteration. Not scheduling, as had been
+assumed — an encoding choice, and the timing gap tracked the instruction count.
+
+The fix was to stop needing the fold. For each vector-wide strip of columns, `C` is now read once
+into accumulator registers, the whole `k` range accumulates into them, and they are written back
+once; the inner loop carries no `C` traffic at all. Nine of sixteen `ymm` registers are live, so it
+does not spill. `B` is walked with stride `n` instead of contiguously, which the existing blocking
+already keeps resident.
+
+| geometric mean vs `tiled_mr4` | before | after |
+|---|---:|---:|
+| `avx2_mr4`, GCC | 1.47x | **1.95x** |
+| `avx2_mr4`, Clang | **0.92x** | **2.02x** |
+| `avx512_mr4`, GCC | 1.83x | **~3.1x** |
+| `avx512_mr4`, Clang | 1.83x | **~3.2x** |
+
+Two things worth taking from this beyond the numbers.
+
+**The same defect was costing the shipped default kernel a further 1.7x.** `avx512_mr4` had the
+identical structure and had been selected for months on the strength of beating the portable kernel
+1.83x. It was never compared against a *better version of itself*. Between the two rewrites, the
+restructured 8-wide kernel beat the un-restructured 16-wide one on five of six shapes — width does
+not help a loop whose limit is memory traffic.
+
+**"Measured slower" is a fact about an implementation, not an instruction set.** The policy was
+right to decline `avx2_mr4` on the evidence available, and equally right to select it once the cause
+was found and removed. The general rule this project keeps relearning: when a result is surprising,
+the baseline is the cheap thing to suspect, and a kernel that loses deserves a disassembly before it
+deserves retirement.
+
+`neon_mr4` received the same restructure on the structural argument alone, since no AArch64 hardware
+was available to measure it. That exposed a separate gap: `core/matmul_arm.c` sits behind
+`#ifdef DRANZER_HAVE_NEON`, so on x86 — every developer machine and every CI runner here — its body
+had never been compiled by anything. `make arm-check` now type-checks it by cross-compiling with
+clang, which needs no AArch64 machine and confirms the kernel emits `fmla`.
 
 ### Vector backward kernels
 

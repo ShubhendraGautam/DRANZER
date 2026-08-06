@@ -345,13 +345,36 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   product and partial sum exactly representable, so both paths agreed to the bit and the comparison
   proved nothing. This also moved the GPU thresholds a third time, to 2^25 / 2^26; `backward_input`
   now loses on the GPU at every shape this project benchmarks. Documented in `docs/matmul.md`.
-- [ ] Resolve or retire `avx2_mr4`. It measures 1.35x under GCC and 0.90x under Clang from identical
-  source with packed FMAs in both disassemblies, so it ships selectable but unselected. Either
-  isolate the scheduling difference and fix it, or drop the kernel rather than carry an
-  unexplained one.
+- [x] **Resolve or retire `avx2_mr4`** — resolved. Disassembling both builds located the cause:
+  `fmadd(a, b, load(c))` puts the loaded value in the addend position, which x86 can encode as an FMA
+  memory operand. GCC folded all four such loads per iteration, Clang folded one of four and issued
+  three extra `vmovups`; the timing gap tracked the instruction count. It was an encoding choice, not
+  the scheduling difference previously assumed.
+
+  Both x86 kernels were rewritten to hold their accumulators in registers across the whole `k` range
+  rather than reading and writing `C` on every step, which removes the load instead of coaxing a
+  compiler into folding it. `avx2_mr4` went from 1.47x/0.92x (GCC/Clang) to **1.95x/2.02x**, and the
+  compilers now agree. `matmul_select()` therefore selects it where AVX-512 is absent, restoring the
+  width ordering the original measurements had correctly forbidden.
+
+  **The same defect was costing `avx512_mr4` a further 1.7x** — it had the identical structure and
+  had been the shipped default for months on the strength of beating the portable kernel 1.83x,
+  never having been compared against a better version of itself. It now measures ~3.1x (GCC) and
+  ~3.2x (Clang). Between the two rewrites the restructured 8-wide kernel beat the un-restructured
+  16-wide one on five of six shapes: width does not help a loop whose limit is memory traffic.
+
+  `neon_mr4` received the same restructure on the structural argument, being unmeasurable here. That
+  surfaced a gap worth its own note: `core/matmul_arm.c` is behind `#ifdef DRANZER_HAVE_NEON`, so on
+  x86 — every machine and CI runner this project uses — its body had never been compiled by
+  anything, and a syntax error in it would have shipped undetected. `make arm-check` now
+  cross-compiles it with clang, needs no AArch64 machine, and confirms it emits `fmla`.
+
+  Documented in `docs/matmul.md`.
 - [ ] Measure `neon_mr4` on real AArch64 hardware and either promote it in `matmul_select()` or
-  remove it. It is correctness-checked but has never been timed, and unlike the x86 kernels it
-  offers no instruction the baseline target lacks.
+  remove it. It is correctness-checked, now cross-compiled by `make arm-check`, and carries the same
+  register-resident structure as the x86 kernels — but it has never been timed. Note that the reason
+  previously given for doubting it, that a hand-written kernel cannot beat a compiler targeting a
+  baseline instruction set, was falsified by the x86 rewrite above and should not be reused.
 - [ ] Replace repeated OpenMP entry with a measured persistent worker strategy if beneficial.
 - [ ] Add INT8 and then INT4 weight-only quantization with accuracy comparisons.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.

@@ -172,37 +172,36 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
  * contract that selection depends on nothing else, and because a future sweep
  * may yet find a split the current measurements do not support.
  *
- * Runtime SIMD dispatch (T11) adds one step in front of all of it, and only
- * one: AVX-512 where the CPU has it. Not "the widest vector kernel available",
- * which is what this function was first written to do - the sweep did not
- * support that, and the two kernels it declines to select are as much a
- * measured result as the one it picks.
+ * Runtime SIMD dispatch adds one step in front of all of it: the widest
+ * vector kernel this CPU can execute.
  *
- *   avx512_mr4  beat tiled_mr4 on all 36 measured (compiler, tier, shape)
- *               combinations: 1.07x worst, ~1.8x geometric mean, 3.02x best,
- *               and both compilers agreed to within 2%. It is also the only
- *               kernel here that reaches instructions the baseline x86-64
- *               target cannot emit at all, which is why the win is so clean.
+ * That ordering was measured, rejected, and then measured again, and the
+ * history matters more than the conclusion. The SIMD kernels originally held
+ * their accumulators in memory, reading and writing C on every step of k.
+ * Under that structure avx2_mr4 was worth 1.47x on GCC and 0.92x on Clang -
+ * a regression on this project's default compiler - so the policy declined to
+ * select it, correctly on the evidence available. Disassembly later located
+ * the cause: `fmadd(a, b, load(c))` can encode the load as a memory operand,
+ * GCC folded all four and Clang folded one of four.
  *
- *   avx2_mr4    is worth 1.34x under GCC and 0.90x under Clang - a regression
- *               on the compiler this project defaults to. Same source, same
- *               shapes; both compilers emit packed FMAs, so it is a scheduling
- *               difference rather than a failure to vectorize, and it was not
- *               isolated further. A default must not regress the default
- *               build, so this stays available and unselected. That is the
- *               same call T10 made for the rowwise shape split, which helped
- *               Clang and hurt GCC.
+ * Rewriting both kernels to keep their accumulators in registers removed the
+ * load rather than the disagreement, and the numbers moved to:
  *
- *   neon_mr4    is unmeasured: no AArch64 machine was available. It is also
- *               the one kernel with no new instructions to offer, because
- *               NEON is baseline on AArch64 and tiled_mr4 already compiles to
- *               it. Selecting an unmeasured kernel over a measured one on the
- *               assumption that hand-written beats the compiler is exactly
- *               the assumption avx2_mr4 just falsified.
+ *   avx512_mr4   ~3.1x GCC, ~3.2x Clang, over tiled_mr4
+ *   avx2_mr4     1.95x GCC, 2.02x Clang
  *
- * Both remain selectable through matmul_set_kernel() and --kernel, and both
- * are checked against the scalar reference wherever they can run. See
- * docs/matmul.md for the full tables. */
+ * Both compilers now agree to within a few percent on both kernels, and the
+ * width ordering holds on every shape but the narrowest. The lesson recorded
+ * here is that "measured slower" is a fact about an implementation, not about
+ * an instruction set: the right response to a kernel that loses is to find
+ * out why before retiring it.
+ *
+ * neon_mr4 is still not selected, and now for one reason rather than two: no
+ * AArch64 hardware was available to measure it. The old second reason - that
+ * a hand-written kernel cannot beat what the compiler already emits for a
+ * baseline instruction set - is exactly the claim the rewrite above
+ * falsified, so it no longer carries weight. It remains selectable and
+ * correctness-checked; see docs/matmul.md. */
 matmul_kernel_t matmul_select(size_t m, size_t k, size_t n) {
     (void)m;
     (void)k;
@@ -210,6 +209,9 @@ matmul_kernel_t matmul_select(size_t m, size_t k, size_t n) {
 
     if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
         return MATMUL_KERNEL_AVX512_MR4;
+    }
+    if (matmul_kernel_available(MATMUL_KERNEL_AVX2_MR4)) {
+        return MATMUL_KERNEL_AVX2_MR4;
     }
     return MATMUL_KERNEL_TILED_MR4;
 }

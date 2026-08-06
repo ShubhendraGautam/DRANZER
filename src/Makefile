@@ -166,6 +166,37 @@ gpu-latency: $(GPU_LATENCY_TARGET)
 $(GPU_LATENCY_TARGET): $(GPU_LATENCY_OBJ)
 	$(CC) $(GPU_LATENCY_OBJ) $(CFLAGS) $(LDFLAGS) -ldl -o $(GPU_LATENCY_TARGET)
 
+# Compile the NEON kernel for AArch64 without needing an AArch64 machine.
+#
+# core/matmul_arm.c is behind `#ifdef DRANZER_HAVE_NEON`, so on x86 - which is
+# every developer machine and every CI runner this project uses - its body is
+# never compiled at all. A syntax error or a bad intrinsic in it would ship
+# undetected. This target type-checks the real thing.
+#
+# clang carries backends and an arm_neon.h for every target it supports, so
+# only libc headers are missing; -nostdlibinc drops the host's and the stub
+# below supplies the one declaration the file needs. Object code is discarded -
+# the point is the compile, not the artifact.
+#
+# Skips cleanly when clang has no aarch64 backend, so `make arm-check` is safe
+# to run anywhere.
+ARM_CHECK_STUB = .arm-check-stub
+
+arm-check:
+	@if ! clang --target=aarch64-linux-gnu -E -x c /dev/null >/dev/null 2>&1; then \
+		echo "arm-check: clang has no aarch64 target here - skipping"; \
+		exit 0; \
+	fi; \
+	mkdir -p $(ARM_CHECK_STUB); \
+	printf '#ifndef STUB_STRING_H\n#define STUB_STRING_H\n#include <stddef.h>\nvoid *memset(void *s, int c, size_t n);\n#endif\n' > $(ARM_CHECK_STUB)/string.h; \
+	clang --target=aarch64-linux-gnu -nostdlibinc -I $(ARM_CHECK_STUB) -I include/ \
+		$(filter-out -march=native,$(CFLAGS)) -Wall -Wextra \
+		-c core/matmul_arm.c -o /dev/null \
+	&& echo "arm-check: core/matmul_arm.c compiles for aarch64"; \
+	status=$$?; \
+	rm -rf $(ARM_CHECK_STUB); \
+	exit $$status
+
 gpu-probe: $(GPU_PROBE_TARGET)
 
 $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
@@ -219,4 +250,4 @@ clean:
 	rm -f $(OBJ) $(BENCH_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(TEST_BINS)
 	$(MAKE) -C $(LIB_DIR) clean
 
-.PHONY: all clean bench profile test gpu-probe gpu-latency
+.PHONY: all clean bench profile test gpu-probe gpu-latency arm-check

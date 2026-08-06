@@ -40,6 +40,29 @@ typedef void (*x86_block_fn)(const float *restrict A, const float *restrict B,
 
 /* ---------------------------------------------------------------- AVX2 --- */
 
+/* Loop order j/l with the accumulators held in registers, not l/j with them
+ * held in memory.
+ *
+ * The obvious arrangement - j innermost, reading and writing C every
+ * iteration - was measured at 1.47x over the portable kernel under GCC and
+ * 0.92x under Clang, from identical source. Disassembling both explained it:
+ * `fmadd(a, b, load(c))` puts the loaded value in the addend position, which
+ * x86 can encode as a memory operand. GCC folded all four loads into their
+ * FMAs; Clang folded one of four and emitted three extra `vmovups` per
+ * iteration. Same instructions, different count, and the gap tracked it.
+ *
+ * Rather than coax one compiler into an encoding, this removes the load
+ * entirely: for each 8-column strip, C is read once into four accumulator
+ * registers, the whole k-range is accumulated into them, and they are written
+ * back once. The inner loop then has no C traffic at all, so there is nothing
+ * left to fold and both compilers generate the same shape of code.
+ *
+ * Nine ymm registers are live (four accumulators, four broadcasts, one B) out
+ * of sixteen, so this does not spill. B is now walked with stride n across l
+ * instead of contiguously, but a tile of it stays resident - that is what the
+ * blocking in run_blocked() is for.
+ *
+ * Per-element accumulation order is unchanged: still l ascending. */
 __attribute__((target("avx2,fma")))
 static void block_avx2(const float *restrict A, const float *restrict B,
                        float *restrict C, size_t k, size_t n,
@@ -53,61 +76,72 @@ static void block_avx2(const float *restrict A, const float *restrict B,
         float *c1 = c0 + n;
         float *c2 = c1 + n;
         float *c3 = c2 + n;
-        for (size_t l = l_start; l < l_limit; l++) {
-            const float a0s = A[i * k + l];
-            const float a1s = A[(i + 1) * k + l];
-            const float a2s = A[(i + 2) * k + l];
-            const float a3s = A[(i + 3) * k + l];
-            const __m256 a0 = _mm256_set1_ps(a0s);
-            const __m256 a1 = _mm256_set1_ps(a1s);
-            const __m256 a2 = _mm256_set1_ps(a2s);
-            const __m256 a3 = _mm256_set1_ps(a3s);
-            const float *row_b = &B[l * n];
+        const float *a0r = &A[i * k];
+        const float *a1r = a0r + k;
+        const float *a2r = a1r + k;
+        const float *a3r = a2r + k;
 
-            size_t j = j_start;
-            for (; j + 8 <= j_limit; j += 8) {
-                const __m256 b = _mm256_loadu_ps(row_b + j);
-                _mm256_storeu_ps(c0 + j,
-                                 _mm256_fmadd_ps(a0, b, _mm256_loadu_ps(c0 + j)));
-                _mm256_storeu_ps(c1 + j,
-                                 _mm256_fmadd_ps(a1, b, _mm256_loadu_ps(c1 + j)));
-                _mm256_storeu_ps(c2 + j,
-                                 _mm256_fmadd_ps(a2, b, _mm256_loadu_ps(c2 + j)));
-                _mm256_storeu_ps(c3 + j,
-                                 _mm256_fmadd_ps(a3, b, _mm256_loadu_ps(c3 + j)));
+        size_t j = j_start;
+        for (; j + 8 <= j_limit; j += 8) {
+            __m256 acc0 = _mm256_loadu_ps(c0 + j);
+            __m256 acc1 = _mm256_loadu_ps(c1 + j);
+            __m256 acc2 = _mm256_loadu_ps(c2 + j);
+            __m256 acc3 = _mm256_loadu_ps(c3 + j);
+
+            for (size_t l = l_start; l < l_limit; l++) {
+                const __m256 b = _mm256_loadu_ps(&B[l * n + j]);
+                acc0 = _mm256_fmadd_ps(_mm256_set1_ps(a0r[l]), b, acc0);
+                acc1 = _mm256_fmadd_ps(_mm256_set1_ps(a1r[l]), b, acc1);
+                acc2 = _mm256_fmadd_ps(_mm256_set1_ps(a2r[l]), b, acc2);
+                acc3 = _mm256_fmadd_ps(_mm256_set1_ps(a3r[l]), b, acc3);
             }
-            /* Columns past the last full vector. AVX2 has no store mask for
-             * floats (maskstore exists but costs more than this loop on the
-             * handful of columns a tail can hold), so the remainder is plain
-             * scalar - the same arithmetic, one column at a time. */
-            for (; j < j_limit; j++) {
-                const float b = row_b[j];
-                c0[j] += a0s * b;
-                c1[j] += a1s * b;
-                c2[j] += a2s * b;
-                c3[j] += a3s * b;
+
+            _mm256_storeu_ps(c0 + j, acc0);
+            _mm256_storeu_ps(c1 + j, acc1);
+            _mm256_storeu_ps(c2 + j, acc2);
+            _mm256_storeu_ps(c3 + j, acc3);
+        }
+
+        /* Columns past the last full vector. AVX2 has no store mask for
+         * floats (maskstore exists but costs more than this loop on the
+         * handful of columns a tail can hold), so the remainder is plain
+         * scalar - the same arithmetic, one column at a time, and likewise
+         * accumulated in registers across l. */
+        for (; j < j_limit; j++) {
+            float s0 = c0[j], s1 = c1[j], s2 = c2[j], s3 = c3[j];
+            for (size_t l = l_start; l < l_limit; l++) {
+                const float b = B[l * n + j];
+                s0 += a0r[l] * b;
+                s1 += a1r[l] * b;
+                s2 += a2r[l] * b;
+                s3 += a3r[l] * b;
             }
+            c0[j] = s0; c1[j] = s1; c2[j] = s2; c3[j] = s3;
         }
     }
 
     /* Fewer than four rows left. Single-token decode shapes (m == 1) land
-     * here for every block, so this path is vectorized too. */
+     * here for every block, so this path is vectorized too, and accumulates
+     * in a register across l for the same reason as above. */
     for (; i < i_limit; i++) {
         float *row_out = &C[i * n];
-        for (size_t l = l_start; l < l_limit; l++) {
-            const float a_scalar = A[i * k + l];
-            const __m256 a = _mm256_set1_ps(a_scalar);
-            const float *row_b = &B[l * n];
+        const float *a_row = &A[i * k];
 
-            size_t j = j_start;
-            for (; j + 8 <= j_limit; j += 8) {
-                _mm256_storeu_ps(row_out + j,
-                                 _mm256_fmadd_ps(a, _mm256_loadu_ps(row_b + j),
-                                                 _mm256_loadu_ps(row_out + j)));
+        size_t j = j_start;
+        for (; j + 8 <= j_limit; j += 8) {
+            __m256 acc = _mm256_loadu_ps(row_out + j);
+            for (size_t l = l_start; l < l_limit; l++) {
+                acc = _mm256_fmadd_ps(_mm256_set1_ps(a_row[l]),
+                                      _mm256_loadu_ps(&B[l * n + j]), acc);
             }
-            for (; j < j_limit; j++) {
-                row_out[j] += a_scalar * row_b[j];
+            _mm256_storeu_ps(row_out + j, acc);
+        }
+        for (; j < j_limit; j++) {
+            float s = row_out[j];
+            for (size_t l = l_start; l < l_limit; l++) {
+                s += a_row[l] * B[l * n + j];
             }
+            row_out[j] = s;
         }
     }
 }
@@ -122,73 +156,90 @@ static void block_avx512(const float *restrict A, const float *restrict B,
                          size_t l_start, size_t l_limit) {
     size_t i = i_start;
 
+    /* Same j/l order and register-resident accumulators as block_avx2 above,
+     * and for the same measured reason: with the accumulators held in memory
+     * this kernel was slower than the 8-wide one on five of six shapes under
+     * both compilers, despite twice the width. Width does not help a loop
+     * whose limit is C traffic. */
     for (; i + 4 <= i_limit; i += 4) {
         float *c0 = &C[i * n];
         float *c1 = c0 + n;
         float *c2 = c1 + n;
         float *c3 = c2 + n;
-        for (size_t l = l_start; l < l_limit; l++) {
-            const __m512 a0 = _mm512_set1_ps(A[i * k + l]);
-            const __m512 a1 = _mm512_set1_ps(A[(i + 1) * k + l]);
-            const __m512 a2 = _mm512_set1_ps(A[(i + 2) * k + l]);
-            const __m512 a3 = _mm512_set1_ps(A[(i + 3) * k + l]);
-            const float *row_b = &B[l * n];
+        const float *a0r = &A[i * k];
+        const float *a1r = a0r + k;
+        const float *a2r = a1r + k;
+        const float *a3r = a2r + k;
 
-            size_t j = j_start;
-            for (; j + 16 <= j_limit; j += 16) {
-                const __m512 b = _mm512_loadu_ps(row_b + j);
-                _mm512_storeu_ps(c0 + j,
-                                 _mm512_fmadd_ps(a0, b, _mm512_loadu_ps(c0 + j)));
-                _mm512_storeu_ps(c1 + j,
-                                 _mm512_fmadd_ps(a1, b, _mm512_loadu_ps(c1 + j)));
-                _mm512_storeu_ps(c2 + j,
-                                 _mm512_fmadd_ps(a2, b, _mm512_loadu_ps(c2 + j)));
-                _mm512_storeu_ps(c3 + j,
-                                 _mm512_fmadd_ps(a3, b, _mm512_loadu_ps(c3 + j)));
+        size_t j = j_start;
+        for (; j + 16 <= j_limit; j += 16) {
+            __m512 acc0 = _mm512_loadu_ps(c0 + j);
+            __m512 acc1 = _mm512_loadu_ps(c1 + j);
+            __m512 acc2 = _mm512_loadu_ps(c2 + j);
+            __m512 acc3 = _mm512_loadu_ps(c3 + j);
+
+            for (size_t l = l_start; l < l_limit; l++) {
+                const __m512 b = _mm512_loadu_ps(&B[l * n + j]);
+                acc0 = _mm512_fmadd_ps(_mm512_set1_ps(a0r[l]), b, acc0);
+                acc1 = _mm512_fmadd_ps(_mm512_set1_ps(a1r[l]), b, acc1);
+                acc2 = _mm512_fmadd_ps(_mm512_set1_ps(a2r[l]), b, acc2);
+                acc3 = _mm512_fmadd_ps(_mm512_set1_ps(a3r[l]), b, acc3);
             }
-            /* Mask-predicated tail: AVX-512 can load and store a partial
-             * vector directly, so the remainder runs the same instructions as
-             * the body instead of dropping to scalar. This is why the kernel
-             * asks for VL as well as F - the model's decode shapes are narrow
-             * enough that the tail is a meaningful share of the work. */
-            if (j < j_limit) {
-                const __mmask16 tail = (__mmask16)((1u << (j_limit - j)) - 1u);
-                const __m512 b = _mm512_maskz_loadu_ps(tail, row_b + j);
-                _mm512_mask_storeu_ps(
-                    c0 + j, tail,
-                    _mm512_fmadd_ps(a0, b, _mm512_maskz_loadu_ps(tail, c0 + j)));
-                _mm512_mask_storeu_ps(
-                    c1 + j, tail,
-                    _mm512_fmadd_ps(a1, b, _mm512_maskz_loadu_ps(tail, c1 + j)));
-                _mm512_mask_storeu_ps(
-                    c2 + j, tail,
-                    _mm512_fmadd_ps(a2, b, _mm512_maskz_loadu_ps(tail, c2 + j)));
-                _mm512_mask_storeu_ps(
-                    c3 + j, tail,
-                    _mm512_fmadd_ps(a3, b, _mm512_maskz_loadu_ps(tail, c3 + j)));
+
+            _mm512_storeu_ps(c0 + j, acc0);
+            _mm512_storeu_ps(c1 + j, acc1);
+            _mm512_storeu_ps(c2 + j, acc2);
+            _mm512_storeu_ps(c3 + j, acc3);
+        }
+
+        /* Mask-predicated tail: AVX-512 can load and store a partial vector
+         * directly, so the remainder runs the same instructions as the body
+         * instead of dropping to scalar. This is why the kernel asks for VL as
+         * well as F - the model's decode shapes are narrow enough that the
+         * tail is a meaningful share of the work. */
+        if (j < j_limit) {
+            const __mmask16 tail = (__mmask16)((1u << (j_limit - j)) - 1u);
+            __m512 acc0 = _mm512_maskz_loadu_ps(tail, c0 + j);
+            __m512 acc1 = _mm512_maskz_loadu_ps(tail, c1 + j);
+            __m512 acc2 = _mm512_maskz_loadu_ps(tail, c2 + j);
+            __m512 acc3 = _mm512_maskz_loadu_ps(tail, c3 + j);
+
+            for (size_t l = l_start; l < l_limit; l++) {
+                const __m512 b = _mm512_maskz_loadu_ps(tail, &B[l * n + j]);
+                acc0 = _mm512_fmadd_ps(_mm512_set1_ps(a0r[l]), b, acc0);
+                acc1 = _mm512_fmadd_ps(_mm512_set1_ps(a1r[l]), b, acc1);
+                acc2 = _mm512_fmadd_ps(_mm512_set1_ps(a2r[l]), b, acc2);
+                acc3 = _mm512_fmadd_ps(_mm512_set1_ps(a3r[l]), b, acc3);
             }
+
+            _mm512_mask_storeu_ps(c0 + j, tail, acc0);
+            _mm512_mask_storeu_ps(c1 + j, tail, acc1);
+            _mm512_mask_storeu_ps(c2 + j, tail, acc2);
+            _mm512_mask_storeu_ps(c3 + j, tail, acc3);
         }
     }
 
     for (; i < i_limit; i++) {
         float *row_out = &C[i * n];
-        for (size_t l = l_start; l < l_limit; l++) {
-            const __m512 a = _mm512_set1_ps(A[i * k + l]);
-            const float *row_b = &B[l * n];
+        const float *a_row = &A[i * k];
 
-            size_t j = j_start;
-            for (; j + 16 <= j_limit; j += 16) {
-                _mm512_storeu_ps(row_out + j,
-                                 _mm512_fmadd_ps(a, _mm512_loadu_ps(row_b + j),
-                                                 _mm512_loadu_ps(row_out + j)));
+        size_t j = j_start;
+        for (; j + 16 <= j_limit; j += 16) {
+            __m512 acc = _mm512_loadu_ps(row_out + j);
+            for (size_t l = l_start; l < l_limit; l++) {
+                acc = _mm512_fmadd_ps(_mm512_set1_ps(a_row[l]),
+                                      _mm512_loadu_ps(&B[l * n + j]), acc);
             }
-            if (j < j_limit) {
-                const __mmask16 tail = (__mmask16)((1u << (j_limit - j)) - 1u);
-                _mm512_mask_storeu_ps(
-                    row_out + j, tail,
-                    _mm512_fmadd_ps(a, _mm512_maskz_loadu_ps(tail, row_b + j),
-                                    _mm512_maskz_loadu_ps(tail, row_out + j)));
+            _mm512_storeu_ps(row_out + j, acc);
+        }
+        if (j < j_limit) {
+            const __mmask16 tail = (__mmask16)((1u << (j_limit - j)) - 1u);
+            __m512 acc = _mm512_maskz_loadu_ps(tail, row_out + j);
+            for (size_t l = l_start; l < l_limit; l++) {
+                acc = _mm512_fmadd_ps(_mm512_set1_ps(a_row[l]),
+                                      _mm512_maskz_loadu_ps(tail, &B[l * n + j]), acc);
             }
+            _mm512_mask_storeu_ps(row_out + j, tail, acc);
         }
     }
 }

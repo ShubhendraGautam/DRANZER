@@ -201,19 +201,23 @@ static void check_configuration_contract(void) {
  * it: with runtime dispatch the right answer depends on the CPU, so a literal
  * would only pass on the machine that wrote it. What is pinned is the rule.
  *
- * Note what this does *not* say: it is not "the widest kernel available".
- * avx2_mr4 and neon_mr4 are deliberately never selected (see matmul.c for the
- * measurements), and asserting that here is the point - if someone promotes
- * either to the default without re-running the sweep, this fails. */
+ * This is now the widest available kernel, which it was not always: avx2_mr4
+ * was excluded while it measured slower than the portable kernel under Clang.
+ * Rewriting it to keep accumulators in registers fixed that (see matmul.c), so
+ * the exclusion was lifted on new measurements. neon_mr4 stays excluded for
+ * want of AArch64 hardware to measure it on, and the check below pins that. */
 static matmul_kernel_t expected_selection(void) {
     if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
         return MATMUL_KERNEL_AVX512_MR4;
     }
+    if (matmul_kernel_available(MATMUL_KERNEL_AVX2_MR4)) {
+        return MATMUL_KERNEL_AVX2_MR4;
+    }
     return MATMUL_KERNEL_TILED_MR4;
 }
 
-/* The unselected SIMD kernels must stay unselected on every shape, including
- * the ones where they look most attractive. */
+/* neon_mr4 must stay unselected on every shape until someone measures it on
+ * real AArch64 hardware. */
 static void check_unselected_kernels_stay_unselected(void) {
     static const shape_t probes[] = {
         { 1, 256, 4000 }, { 128, 1024, 256 }, { 64, 64, 256 }, { 1, 16, 16 },
@@ -221,8 +225,8 @@ static void check_unselected_kernels_stay_unselected(void) {
     for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
         matmul_kernel_t chosen =
             matmul_select(probes[i].m, probes[i].k, probes[i].n);
-        if (chosen == MATMUL_KERNEL_AVX2_MR4 || chosen == MATMUL_KERNEL_NEON_MR4) {
-            fail("a kernel the sweep declined to select became the default");
+        if (chosen == MATMUL_KERNEL_NEON_MR4) {
+            fail("neon_mr4 became the default while still unmeasured");
         }
     }
 }

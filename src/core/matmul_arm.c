@@ -26,55 +26,82 @@ static void block_neon(const float *restrict A, const float *restrict B,
                        size_t l_start, size_t l_limit) {
     size_t i = i_start;
 
+    /* Loop order j/l with register-resident accumulators, matching
+     * block_avx2() in core/matmul_x86.c. That arrangement replaced an l/j one
+     * that read and wrote C on every step of k, which measured 1.5-2x slower
+     * on x86 and produced a compiler disagreement that took a disassembly to
+     * explain (docs/matmul.md).
+     *
+     * Applied here on the structural argument alone: no AArch64 hardware was
+     * available to measure it. What is verified is that it still agrees with
+     * the scalar reference, which `test_matmul_kernels.c` checks wherever this
+     * kernel can run. The performance claim is x86's, not this kernel's - and
+     * `matmul_select()` still declines to select it for exactly that reason. */
     for (; i + 4 <= i_limit; i += 4) {
         float *c0 = &C[i * n];
         float *c1 = c0 + n;
         float *c2 = c1 + n;
         float *c3 = c2 + n;
-        for (size_t l = l_start; l < l_limit; l++) {
-            const float a0 = A[i * k + l];
-            const float a1 = A[(i + 1) * k + l];
-            const float a2 = A[(i + 2) * k + l];
-            const float a3 = A[(i + 3) * k + l];
-            const float *row_b = &B[l * n];
+        const float *a0r = &A[i * k];
+        const float *a1r = a0r + k;
+        const float *a2r = a1r + k;
+        const float *a3r = a2r + k;
 
-            size_t j = j_start;
-            for (; j + 4 <= j_limit; j += 4) {
+        size_t j = j_start;
+        for (; j + 4 <= j_limit; j += 4) {
+            float32x4_t acc0 = vld1q_f32(c0 + j);
+            float32x4_t acc1 = vld1q_f32(c1 + j);
+            float32x4_t acc2 = vld1q_f32(c2 + j);
+            float32x4_t acc3 = vld1q_f32(c3 + j);
+
+            for (size_t l = l_start; l < l_limit; l++) {
                 /* vfmaq_n_f32(acc, vector, scalar) is a fused multiply-add
                  * against a scalar operand, so no broadcast register is
                  * needed - the scalar rides in the instruction encoding. */
-                const float32x4_t b = vld1q_f32(row_b + j);
-                vst1q_f32(c0 + j, vfmaq_n_f32(vld1q_f32(c0 + j), b, a0));
-                vst1q_f32(c1 + j, vfmaq_n_f32(vld1q_f32(c1 + j), b, a1));
-                vst1q_f32(c2 + j, vfmaq_n_f32(vld1q_f32(c2 + j), b, a2));
-                vst1q_f32(c3 + j, vfmaq_n_f32(vld1q_f32(c3 + j), b, a3));
+                const float32x4_t b = vld1q_f32(&B[l * n + j]);
+                acc0 = vfmaq_n_f32(acc0, b, a0r[l]);
+                acc1 = vfmaq_n_f32(acc1, b, a1r[l]);
+                acc2 = vfmaq_n_f32(acc2, b, a2r[l]);
+                acc3 = vfmaq_n_f32(acc3, b, a3r[l]);
             }
-            for (; j < j_limit; j++) {
-                const float b = row_b[j];
-                c0[j] += a0 * b;
-                c1[j] += a1 * b;
-                c2[j] += a2 * b;
-                c3[j] += a3 * b;
+
+            vst1q_f32(c0 + j, acc0);
+            vst1q_f32(c1 + j, acc1);
+            vst1q_f32(c2 + j, acc2);
+            vst1q_f32(c3 + j, acc3);
+        }
+        for (; j < j_limit; j++) {
+            float s0 = c0[j], s1 = c1[j], s2 = c2[j], s3 = c3[j];
+            for (size_t l = l_start; l < l_limit; l++) {
+                const float b = B[l * n + j];
+                s0 += a0r[l] * b;
+                s1 += a1r[l] * b;
+                s2 += a2r[l] * b;
+                s3 += a3r[l] * b;
             }
+            c0[j] = s0; c1[j] = s1; c2[j] = s2; c3[j] = s3;
         }
     }
 
     /* Fewer than four rows left - the whole of a single-token decode. */
     for (; i < i_limit; i++) {
         float *row_out = &C[i * n];
-        for (size_t l = l_start; l < l_limit; l++) {
-            const float a = A[i * k + l];
-            const float *row_b = &B[l * n];
+        const float *a_row = &A[i * k];
 
-            size_t j = j_start;
-            for (; j + 4 <= j_limit; j += 4) {
-                vst1q_f32(row_out + j,
-                          vfmaq_n_f32(vld1q_f32(row_out + j),
-                                      vld1q_f32(row_b + j), a));
+        size_t j = j_start;
+        for (; j + 4 <= j_limit; j += 4) {
+            float32x4_t acc = vld1q_f32(row_out + j);
+            for (size_t l = l_start; l < l_limit; l++) {
+                acc = vfmaq_n_f32(acc, vld1q_f32(&B[l * n + j]), a_row[l]);
             }
-            for (; j < j_limit; j++) {
-                row_out[j] += a * row_b[j];
+            vst1q_f32(row_out + j, acc);
+        }
+        for (; j < j_limit; j++) {
+            float s = row_out[j];
+            for (size_t l = l_start; l < l_limit; l++) {
+                s += a_row[l] * B[l * n + j];
             }
+            row_out[j] = s;
         }
     }
 }
