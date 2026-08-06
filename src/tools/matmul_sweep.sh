@@ -26,7 +26,7 @@ tiers="tiny small medium"
 repeats=3
 quick=""
 omp=""
-csv="matmul_results_v2.csv"
+csv="matmul_results_v3.csv"
 
 while [ $# -gt 0 ]; do
     case "$1" in

@@ -7,9 +7,9 @@
  * attention internals, but the driver loop itself makes no threading
  * decisions) so the CPU numbers reflect what a single low-end core can do.
  *
- * Full-model runs append to bench_results_v2.csv. `--matmul-only` instead
+ * Full-model runs append to bench_results_v3.csv. `--matmul-only` instead
  * hands off to tools/bench_matmul.c, which compares the interchangeable CPU
- * kernels on isolated shapes and appends to matmul_results_v2.csv. Both
+ * kernels on isolated shapes and appends to matmul_results_v3.csv. Both
  * files are gitignored so local histories can accumulate without presenting
  * cross-machine numbers as directly comparable.
  *
@@ -273,9 +273,12 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
 
 static void print_usage(const char *program) {
     printf("Usage: %s [--tier tiny|small|medium] [--scalar] [--quick]\n"
-           "          [--kernel auto|scalar|rowwise|tiled|tiled_mr4] [--tile N]\n"
+           "          [--kernel auto|scalar|rowwise|tiled|tiled_mr4|avx2_mr4|\n"
+           "                    avx512_mr4|neon_mr4] [--tile N]\n"
            "          [--cpu-only] [--matmul-only [--sweep] [--repeats N] [--csv-path FILE]]\n\n"
-           "  --kernel/--tile   override the CPU matmul kernel and tile for the run\n"
+           "  --kernel/--tile   override the CPU matmul kernel and tile for the run.\n"
+           "                    A SIMD kernel this CPU cannot run falls back to\n"
+           "                    tiled_mr4 rather than failing.\n"
            "  --cpu-only        skip the GPU pass even when a CUDA device is present\n"
            "  --matmul-only     compare kernels on isolated shapes instead of whole models\n"
            "  --sweep           with --matmul-only: measure every kernel and tile candidate\n"
@@ -441,8 +444,8 @@ int main(int argc, char **argv) {
     }
 
     /* Opened only for full-model runs, so a matmul-only session never leaves
-     * a header-only bench_results_v2.csv behind. */
-    const char *csv_path = "bench_results_v2.csv";
+     * a header-only bench_results_v3.csv behind. */
+    const char *csv_path = "bench_results_v3.csv";
     int csv_existed = (access(csv_path, F_OK) == 0);
     FILE *csv = fopen(csv_path, "a");
     if (csv && !csv_existed) {

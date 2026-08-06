@@ -8,12 +8,21 @@
  * a kernel is only allowed to be faster, never different. It also pins the
  * configuration contract (defaults, validation, name round-trip) that the
  * benchmark and the model dispatch both depend on.
+ *
+ * Runtime-dispatched SIMD kernels are covered by exactly the same sweep. They
+ * are checked against the same reference on the same shapes, and the shape
+ * list carries extents around the 8- and 16-float vector widths so the
+ * vectorized body, its scalar tail, and the AVX-512 masked tail are all
+ * exercised. Kernels this machine cannot run are skipped and reported, never
+ * silently counted as passing.
  */
 
+#include "core/cpu_features.h"
 #include "core/matmul.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct { size_t m, k, n; } shape_t;
 
@@ -29,6 +38,12 @@ static const shape_t shapes[] = {
     { 32, 16, 64 },     /* prefill FFN up-projection */
     { 33, 65, 129 },    /* one past the tile in all three extents */
     { 64, 64, 64 },     /* exactly one tile */
+    /* Vector-width boundaries: 8 floats for AVX2, 16 for AVX-512, 4 for NEON.
+     * A kernel that mishandles its tail is wrong on exactly these. */
+    { 4, 8, 8 },        /* exactly one AVX2 vector, no tail */
+    { 4, 8, 15 },       /* one short of an AVX-512 vector: all tail */
+    { 4, 8, 17 },       /* one past an AVX-512 vector: body plus 1-wide tail */
+    { 2, 3, 31 },       /* fewer than four rows and a tail in both widths */
 };
 
 static const size_t tiles[] = { 1, 3, 16, 64, 128, 256 };
@@ -39,9 +54,19 @@ static const matmul_kernel_t kernels[] = {
     MATMUL_KERNEL_ROWWISE,
     MATMUL_KERNEL_TILED,
     MATMUL_KERNEL_TILED_MR4,
+    MATMUL_KERNEL_AVX2_MR4,
+    MATMUL_KERNEL_AVX512_MR4,
+    MATMUL_KERNEL_NEON_MR4,
 };
 
+#define KERNEL_COUNT (sizeof(kernels) / sizeof(kernels[0]))
+
 static int failures;
+
+/* Which kernels actually ran, so the summary can distinguish "checked and
+ * agreed" from "not available on this CPU". Without this a run on a machine
+ * without AVX-512 looks identical to one that checked it. */
+static int kernel_exercised[MATMUL_KERNEL_COUNT];
 
 static void fail(const char *what) {
     fprintf(stderr, "FAIL: %s\n", what);
@@ -79,7 +104,14 @@ static float compare_all_kernels(const shape_t *shape, float *worst_out) {
             fail("matmul_set_tile_size rejected a positive tile");
             continue;
         }
-        for (size_t ki = 0; ki < sizeof(kernels) / sizeof(kernels[0]); ki++) {
+        for (size_t ki = 0; ki < KERNEL_COUNT; ki++) {
+            /* A kernel compiled for another architecture, or for instructions
+             * this CPU lacks, would be run as the portable fallback by
+             * matmul_run(). Timing or comparing that would be measuring
+             * tiled_mr4 twice under a different name. */
+            if (!matmul_kernel_available(kernels[ki])) continue;
+            kernel_exercised[kernels[ki]] = 1;
+
             for (size_t i = 0; i < m * n; i++) output[i] = 12345.0f; /* poison */
             matmul_run(kernels[ki], a, b, output, m, k, n);
             for (size_t i = 0; i < m * n; i++) {
@@ -124,29 +156,78 @@ static void check_configuration_contract(void) {
         fail("a rejected kernel still changed the active kernel");
     }
 
-    for (size_t i = 0; i < sizeof(kernels) / sizeof(kernels[0]); i++) {
+    /* Names must round-trip for every kernel on every architecture, including
+     * the ones that cannot run here. A config file or a --kernel flag written
+     * on one machine has to remain parseable on another; refusing the name
+     * would turn a portable fallback into a startup failure. */
+    for (size_t i = 0; i < KERNEL_COUNT; i++) {
         matmul_kernel_t parsed;
         const char *name = matmul_kernel_name(kernels[i]);
         if (matmul_kernel_from_name(name, &parsed) != 0 || parsed != kernels[i]) {
             fail("kernel name did not round-trip");
         }
+        if (matmul_set_kernel(kernels[i]) != 0) {
+            fail("a valid kernel was rejected because it is unavailable here");
+        }
     }
+    matmul_set_kernel(MATMUL_KERNEL_AUTO);
+
     matmul_kernel_t ignored;
     if (matmul_kernel_from_name("tiled_mr8", &ignored) != -1 ||
         matmul_kernel_from_name("", &ignored) != -1 ||
         matmul_kernel_from_name(NULL, &ignored) != -1) {
         fail("an unknown kernel name was accepted");
     }
+
+    /* The portable kernels are unconditionally available; a SIMD kernel is
+     * available only where its ISA is. */
+    if (!matmul_kernel_available(MATMUL_KERNEL_SCALAR) ||
+        !matmul_kernel_available(MATMUL_KERNEL_TILED_MR4)) {
+        fail("a portable kernel reported itself unavailable");
+    }
+    if (matmul_kernel_isa(MATMUL_KERNEL_TILED_MR4) != CPU_ISA_BASELINE ||
+        matmul_kernel_isa(MATMUL_KERNEL_AVX512_MR4) != CPU_ISA_AVX512) {
+        fail("a kernel reported the wrong instruction-set requirement");
+    }
+    for (size_t i = 0; i < KERNEL_COUNT; i++) {
+        if (matmul_kernel_available(kernels[i]) &&
+            !cpu_isa_available(matmul_kernel_isa(kernels[i]))) {
+            fail("a kernel is available but its instruction set is not");
+        }
+    }
+}
+
+/* What the policy should answer here, derived from the documented preference
+ * order rather than from a literal: with runtime dispatch the right answer
+ * depends on the CPU, so the test has to compute it the same way the policy
+ * does. What is still pinned is the order itself. */
+static matmul_kernel_t expected_selection(void) {
+    if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
+        return MATMUL_KERNEL_AVX512_MR4;
+    }
+    if (matmul_kernel_available(MATMUL_KERNEL_AVX2_MR4)) {
+        return MATMUL_KERNEL_AVX2_MR4;
+    }
+    if (matmul_kernel_available(MATMUL_KERNEL_NEON_MR4)) {
+        return MATMUL_KERNEL_NEON_MR4;
+    }
+    return MATMUL_KERNEL_TILED_MR4;
 }
 
 /* The policy has to be a pure function of the shape: a training run that
  * repeats the same call must repeat the same accumulation order, or exact
- * resume stops being exact. */
+ * resume stops being exact. Runtime dispatch does not weaken this - the ISA
+ * is resolved once from the hardware, not per call - but it does mean the
+ * answer is only fixed within a process, which is what the exactness contract
+ * in docs/matmul.md now says. */
 static void check_selection_is_deterministic(void) {
     for (size_t i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++) {
         matmul_kernel_t first = matmul_select(shapes[i].m, shapes[i].k, shapes[i].n);
         if (first == MATMUL_KERNEL_AUTO) {
             fail("the policy resolved to auto instead of a concrete kernel");
+        }
+        if (!matmul_kernel_available(first)) {
+            fail("the policy selected a kernel this machine cannot run");
         }
         for (int repeat = 0; repeat < 4; repeat++) {
             if (matmul_select(shapes[i].m, shapes[i].k, shapes[i].n) != first) {
@@ -154,19 +235,92 @@ static void check_selection_is_deterministic(void) {
             }
         }
     }
-    /* The measured policy is currently one kernel for every shape (see
-     * matmul.c). Pinning that here is deliberate: if a future sweep adds a
-     * shape split, this assertion is what forces the documented policy in
-     * docs/matmul.md to be updated with it rather than drifting silently. */
+
+    /* The measured policy is still one kernel for every shape (see matmul.c).
+     * Pinning that here is deliberate: if a future sweep adds a shape split,
+     * this assertion is what forces the documented policy in docs/matmul.md
+     * to be updated with it rather than drifting silently. */
     matmul_kernel_t single_row = matmul_select(1, 256, 4000);
-    if (single_row != MATMUL_KERNEL_TILED_MR4) {
-        fail("the documented default kernel changed without updating the test");
+    if (single_row != expected_selection()) {
+        fail("the documented preference order changed without updating the test");
     }
     if (matmul_select(128, 1024, 256) != single_row ||
         matmul_select(1, 16, 16) != single_row ||
         matmul_select(64, 64, 256) != single_row) {
         fail("selection now splits by shape but docs/matmul.md still documents one kernel");
     }
+}
+
+/* The acceptance gate for runtime dispatch: a binary carrying SIMD kernels
+ * must still be correct on a machine that cannot execute them.
+ *
+ * That machine cannot be provisioned from inside a test, so the ISA cap
+ * simulates it at the only layer that decides anything - the dispatch. Capping
+ * to baseline is exactly what detection would have reported on such a CPU, so
+ * every branch below it runs the code that machine would run. What this does
+ * not prove is that the instructions themselves are absent from the reachable
+ * path, which is a property of the target attributes rather than of dispatch;
+ * docs/matmul.md records that distinction.
+ */
+static void check_fallback_without_simd(void) {
+    const size_t m = 6, k = 20, n = 37; /* tails in every vector width */
+    float *a = malloc(m * k * sizeof(float));
+    float *b = malloc(k * n * sizeof(float));
+    float *reference = malloc(m * n * sizeof(float));
+    float *output = malloc(m * n * sizeof(float));
+    if (!a || !b || !reference || !output) {
+        fail("allocation");
+        free(a); free(b); free(reference); free(output);
+        return;
+    }
+    for (size_t i = 0; i < m * k; i++) a[i] = (float)((int)(i % 29) - 14) / 5.0f;
+    for (size_t i = 0; i < k * n; i++) b[i] = (float)((int)((i * 7 + 3) % 31) - 15) / 6.0f;
+    matrix_multiply_scalar(a, b, reference, m, k, n);
+    float magnitude = 0.0f;
+    for (size_t i = 0; i < m * n; i++) {
+        if (fabsf(reference[i]) > magnitude) magnitude = fabsf(reference[i]);
+    }
+    const float tolerance = 1e-4f * (1.0f + magnitude);
+
+    if (cpu_features_set_max_isa(CPU_ISA_BASELINE) != 0) {
+        fail("capping the instruction set to baseline was rejected");
+    }
+    if (cpu_isa_best() != CPU_ISA_BASELINE) {
+        fail("baseline cap did not remove every SIMD instruction set");
+    }
+    for (size_t i = 0; i < KERNEL_COUNT; i++) {
+        if (matmul_kernel_isa(kernels[i]) == CPU_ISA_BASELINE) continue;
+        if (matmul_kernel_available(kernels[i])) {
+            fail("a SIMD kernel is still available under a baseline cap");
+        }
+    }
+    if (matmul_select(m, k, n) != MATMUL_KERNEL_TILED_MR4) {
+        fail("selection did not fall back to the portable kernel");
+    }
+
+    /* Every kernel, including the SIMD ones nothing can execute now, must
+     * still produce the right answer through the fallback rather than
+     * faulting or returning the poison. */
+    for (size_t ki = 0; ki < KERNEL_COUNT; ki++) {
+        for (size_t i = 0; i < m * n; i++) output[i] = 12345.0f;
+        matmul_run(kernels[ki], a, b, output, m, k, n);
+        for (size_t i = 0; i < m * n; i++) {
+            if (!(fabsf(reference[i] - output[i]) <= tolerance)) {
+                fprintf(stderr, "  %s under a baseline cap: element %zu is "
+                        "%.9g, reference %.9g\n",
+                        matmul_kernel_name(kernels[ki]), i,
+                        (double)output[i], (double)reference[i]);
+                fail("a kernel was wrong when its instruction set was unavailable");
+                break;
+            }
+        }
+    }
+
+    cpu_features_clear_max_isa();
+    if (matmul_select(m, k, n) != expected_selection()) {
+        fail("clearing the cap did not restore the selected kernel");
+    }
+    free(a); free(b); free(reference); free(output);
 }
 
 /* A zero-length inner dimension is a defined, if unusual, request: the
@@ -182,6 +336,10 @@ static void check_empty_inner_dimension(void) {
 }
 
 int main(void) {
+    printf("cpu: %s\n", cpu_features_summary());
+    printf("auto selects: %s\n\n",
+           matmul_kernel_name(matmul_select(1, 64, 64)));
+
     check_configuration_contract();
     check_selection_is_deterministic();
     check_empty_inner_dimension();
@@ -192,10 +350,34 @@ int main(void) {
     }
     matmul_set_tile_size(DRANZER_MATMUL_BLOCK_SIZE);
 
-    printf("shapes=%zu tiles=%zu kernels=%zu, worst difference from the scalar "
-           "reference: %.8g\n",
+    /* Run last: it leaves the process capped for the duration and restores
+     * the cap on the way out, so nothing above can be affected by it. */
+    check_fallback_without_simd();
+
+    /* Name which kernels were actually compared, not just how many exist. A
+     * pass on a machine without AVX-512 is a weaker result than a pass on one
+     * with it, and the output has to say so. */
+    enum { NAME_LIST_SIZE = 192 };
+    size_t checked = 0, skipped = 0;
+    char checked_names[NAME_LIST_SIZE] = "", skipped_names[NAME_LIST_SIZE] = "";
+    for (size_t i = 0; i < KERNEL_COUNT; i++) {
+        int was_run = kernel_exercised[kernels[i]];
+        char *list = was_run ? checked_names : skipped_names;
+        size_t *count = was_run ? &checked : &skipped;
+        size_t used = strlen(list);
+        snprintf(list + used, NAME_LIST_SIZE - used, "%s%s", used ? ", " : "",
+                 matmul_kernel_name(kernels[i]));
+        (*count)++;
+    }
+
+    printf("shapes=%zu tiles=%zu, kernels checked=%zu (%s)\n",
            sizeof(shapes) / sizeof(shapes[0]), sizeof(tiles) / sizeof(tiles[0]),
-           sizeof(kernels) / sizeof(kernels[0]), (double)worst);
+           checked, checked_names);
+    if (skipped != 0) {
+        printf("kernels skipped=%zu (%s) - not available on this CPU\n",
+               skipped, skipped_names);
+    }
+    printf("worst difference from the scalar reference: %.8g\n", (double)worst);
     if (failures != 0) {
         printf("\nMATMUL KERNEL CHECK FAILED (%d problem%s)\n",
                failures, failures == 1 ? "" : "s");

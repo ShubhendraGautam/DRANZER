@@ -32,7 +32,7 @@ fails.
 | `test_serialization_roundtrip.c` | Identical logits before and after save/load |
 | `test_model_bundle.c` | Canonical round-trip, corruption sweep, bounds, and legacy fixture |
 | `test_scalar_reference.c` | Tiled/full-model/cached-decode agreement with portable scalar matmul |
-| `test_matmul_kernels.c` | Every kernel and tile size versus the scalar reference, plus selection determinism and configuration validation |
+| `test_matmul_kernels.c` | Every available kernel (portable and dispatched SIMD) at every tile size versus the scalar reference, plus selection determinism, configuration validation, and correct fallback when the instruction set is unavailable |
 | `test_batch_behavior.c` | Bounded deterministic shuffle and batch capacity checks |
 | `test_checkpoint_resume.c` | Complete-state round-trip, continued trajectory, latest selection, and retention |
 | `test_cli_strict.c` | Unknown/missing/malformed/overflowing CLI input rejection |
@@ -125,7 +125,7 @@ Run the same checks locally against any CSV the tools produce:
 
 ```bash
 cd src
-python3 tools/perf_check.py --bench bench_results_v2.csv --matmul matmul_results_v2.csv
+python3 tools/perf_check.py --bench bench_results_v3.csv --matmul matmul_results_v3.csv
 ```
 
 `python3` is needed only for this report, not to build, test, or run anything.
@@ -153,10 +153,11 @@ The benchmark runs representative tiny, small, and medium model configurations. 
 - prompt-prefill, growing KV decode, and full-ring sliding decode latency as separate metrics;
 - CPU and, when available, GPU execution.
 
-Results append to `bench_results_v2.csv`, which is intentionally ignored by Git because measurements
+Results append to `bench_results_v3.csv`, which is intentionally ignored by Git because measurements
 from different machines are not directly comparable. Use a stable machine, compiler, thread count,
 and power state for before/after performance work. Each row records the exact build command,
-compiler, OS/kernel/architecture, CPU model, online CPU count, OpenMP version, and maximum thread
+compiler, OS/kernel/architecture, CPU model, detected SIMD instruction set, online CPU count,
+OpenMP version, and maximum thread
 count alongside its measurements.
 
 To isolate the matrix-multiplication kernels from the rest of the model, compare them on the decode,
@@ -170,7 +171,7 @@ tools/matmul_sweep.sh                            # the same sweep across gcc and
 
 Every candidate is checked against the scalar reference before it is timed, and each row records
 latency (fastest and median round), GFLOP/s, speedup, error, iteration counts, and the same
-machine/build metadata in `matmul_results_v2.csv`. `--kernel` and `--tile` pin a kernel for a whole
+machine/build metadata in `matmul_results_v3.csv`. `--kernel` and `--tile` pin a kernel for a whole
 run, including full-model runs, so a kernel choice can be judged end to end and not only in
 isolation. Use `--quick` only to validate the workflow; omit `--tier` to cover every model tier.
 

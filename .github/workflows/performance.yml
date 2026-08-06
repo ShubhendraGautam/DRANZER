@@ -79,7 +79,7 @@ jobs:
         working-directory: src
         run: |
           python3 tools/perf_check.py \
-            --matmul matmul_results_v2.csv \
+            --matmul matmul_results_v3.csv \
             --title "Matmul kernels (${{ matrix.compiler }})" \
             --summary "$GITHUB_STEP_SUMMARY"
 
@@ -88,7 +88,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: matmul-${{ matrix.compiler }}-${{ github.run_number }}
-          path: src/matmul_results_v2.csv
+          path: src/matmul_results_v3.csv
           if-no-files-found: warn
           retention-days: 90
 
@@ -122,7 +122,7 @@ jobs:
         working-directory: src
         run: |
           python3 tools/perf_check.py \
-            --bench bench_results_v2.csv \
+            --bench bench_results_v3.csv \
             --title "Whole-model throughput (${{ matrix.compiler }})" \
             --summary "$GITHUB_STEP_SUMMARY"
 
@@ -131,7 +131,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: whole-model-${{ matrix.compiler }}-${{ github.run_number }}
-          path: src/bench_results_v2.csv
+          path: src/bench_results_v3.csv
           if-no-files-found: warn
           retention-days: 90
 
@@ -173,7 +173,7 @@ jobs:
         working-directory: src
         run: |
           python3 tools/perf_check.py \
-            --omp bench_results_v2.csv \
+            --omp bench_results_v3.csv \
             --title "Thread scaling" \
             --summary "$GITHUB_STEP_SUMMARY"
 
@@ -182,6 +182,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: thread-scaling-${{ github.run_number }}
-          path: src/bench_results_v2.csv
+          path: src/bench_results_v3.csv
           if-no-files-found: warn
           retention-days: 90

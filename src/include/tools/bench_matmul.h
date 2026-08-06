@@ -35,7 +35,7 @@ typedef struct {
 } bench_matmul_options_t;
 
 /* Fill `options` with the documented defaults (no sweep, 3 repeats,
- * matmul_results_v2.csv). */
+ * matmul_results_v3.csv). */
 void bench_matmul_default_options(bench_matmul_options_t *options);
 
 /* Measure every tier (or only `selected_tier`, when non-NULL), print a

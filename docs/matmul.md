@@ -7,27 +7,40 @@ project with more than one implementation. This document describes the kernels, 
 chosen, what the choice guarantees about reproducibility, and how to repeat the measurements the
 choice was made from.
 
-Everything here lives in `src/core/matmul.c` behind `src/include/core/matmul.h`. The measurement
-tool is `src/tools/bench_matmul.c`, driven by `src/tools/matmul_sweep.sh`.
+The policy and the portable kernels live in `src/core/matmul.c` behind `src/include/core/matmul.h`.
+The SIMD kernels are in `src/core/matmul_x86.c` and `src/core/matmul_arm.c` behind
+`src/include/core/matmul_simd.h`, and the runtime detection that gates them is
+`src/core/cpu_features.c`. The measurement tool is `src/tools/bench_matmul.c`, driven by
+`src/tools/matmul_sweep.sh`.
 
 ## Kernels
 
-All four kernels compute the same thing — `C (m x n) = A (m x k) @ B (k x n)`, row-major, fully
-defining `C` — and differ only in the order they traverse it. `A`, `B`, and `C` must not overlap;
-the parameters are `restrict`-qualified, which is load-bearing rather than decorative (see
+All seven kernels compute the same thing — `C (m x n) = A (m x k) @ B (k x n)`, row-major, fully
+defining `C` — and differ only in the order they traverse it and the instructions they traverse it
+with. `A`, `B`, and `C` must not overlap; the parameters are `restrict`-qualified, which is
+load-bearing rather than decorative (see
 [What the measurements changed](#what-the-measurements-changed)).
 
-| Kernel | Traversal | Intended for |
-|---|---|---|
-| `scalar` | Unblocked `i/j/l`, one dot product at a time | The reference. Never selected automatically |
-| `rowwise` | Unblocked `i/l/j`, contiguous stores | Cache-resident shapes: single-token decode, small models |
-| `tiled` | Cache-blocked `i/l/j` over `tile x tile` blocks | Larger shapes where a block of `B` is reused |
-| `tiled_mr4` | Blocked, four rows of `A` per pass | Multi-row prefill and training shapes |
+| Kernel | Traversal | Requires | Intended for |
+|---|---|---|---|
+| `scalar` | Unblocked `i/j/l`, one dot product at a time | — | The reference. Never selected automatically |
+| `rowwise` | Unblocked `i/l/j`, contiguous stores | — | Cache-resident shapes: single-token decode, small models |
+| `tiled` | Cache-blocked `i/l/j` over `tile x tile` blocks | — | Larger shapes where a block of `B` is reused |
+| `tiled_mr4` | Blocked, four rows of `A` per pass | — | The portable default, and the fallback for all of the below |
+| `avx2_mr4` | `tiled_mr4` with 8-wide vector FMAs | AVX2 + FMA | x86-64 |
+| `avx512_mr4` | `tiled_mr4` with 16-wide vector FMAs and masked tails | AVX-512F + VL | x86-64 |
+| `neon_mr4` | `tiled_mr4` with 4-wide vector FMAs | NEON (baseline on AArch64) | AArch64 |
 
 `tiled_mr4` keeps four accumulator rows in flight so each loaded `B` element feeds four independent
 chains: the same number of loads does four times the arithmetic, and the four chains hide FMA
 latency. Row counts that are not a multiple of four finish through the one-row body, so every `C`
 element accumulates `l` in the same increasing order `tiled` uses.
+
+The three SIMD kernels are that same algorithm with the innermost loop over `j` issued as vector
+FMAs. **Vectorizing along `j` rather than `k` is what keeps them comparable to the reference**: each
+`C` element still accumulates its products over `l` in increasing order, so the only numerical
+difference from the portable kernel is FMA contraction, never a reassociated sum. A kernel that
+vectorized along `k` would need a horizontal reduction and a different error story.
 
 The scalar kernel exists to be correct, not fast. It is what `model->use_scalar_matmul` and
 `bench.out --scalar` select, what every candidate is checked against in
@@ -36,39 +49,81 @@ logits against.
 
 ## How the default is chosen
 
-`matmul_select()` resolves `MATMUL_KERNEL_AUTO` from the shape alone:
+`matmul_select()` resolves `MATMUL_KERNEL_AUTO` to the widest vector kernel this CPU can execute,
+and to `tiled_mr4` when there is none:
 
-- fewer than `AUTO_MIN_ROWS` (4) rows → `rowwise`. With one or two rows of `A`, `B` is streamed
-  once no matter how the loops are arranged, so blocking has nothing to reuse and its bookkeeping
-  is pure overhead.
-- fewer than `AUTO_MIN_WORK` (262144) multiply-accumulates → `rowwise`. The whole working set stays
-  cache-resident, so blocking again only adds overhead.
-- otherwise → `tiled_mr4` at `matmul_tile_size()`.
+```text
+avx512_mr4  →  avx2_mr4  →  neon_mr4  →  tiled_mr4
+```
 
-Both thresholds are named constants at the top of `src/core/matmul.c`.
+It does **not** split by shape. Every shape gets the same kernel, which is a measured outcome rather
+than an unimplemented feature — see [What the measurements changed](#what-the-measurements-changed)
+for the two shape splits that were tried and rejected, and
+[Runtime dispatch](#runtime-dispatch-avx2-avx-512-neon) for why the SIMD substitution did not need
+one either.
 
 Overrides are available for measurement and debugging:
 
 ```c
-matmul_set_kernel(MATMUL_KERNEL_TILED);  /* pin one kernel process-wide */
-matmul_set_tile_size(128);               /* change the blocked-kernel tile */
+matmul_set_kernel(MATMUL_KERNEL_TILED);      /* pin one kernel process-wide */
+matmul_set_tile_size(128);                   /* change the blocked-kernel tile */
+cpu_features_set_max_isa(CPU_ISA_BASELINE);  /* pretend the SIMD is not there */
 ```
 
-and from the benchmark: `./bench.out --kernel tiled --tile 128`. The compile-time
-`-DDRANZER_MATMUL_BLOCK_SIZE=N` still sets the starting tile. Neither setter is synchronized: set
-them before compute starts, not from inside a parallel region.
+and from the benchmark: `./bench.out --kernel tiled --tile 128`. `DRANZER_CPU_ISA=baseline|avx2|…`
+applies the same instruction-set cap from the environment, which is how one binary can be measured
+along each dispatch path without recompiling. The compile-time `-DDRANZER_MATMUL_BLOCK_SIZE=N` still
+sets the starting tile. None of these setters is synchronized: set them before compute starts, not
+from inside a parallel region.
+
+## Runtime dispatch (AVX2, AVX-512, NEON)
+
+The build deliberately does not pass `-march=native` (see `src/Makefile`): a binary tuned for the
+build machine raises SIGILL on any CPU that lacks an instruction it used. The SIMD kernels get their
+instructions a different way — each vector function carries a `__attribute__((target(...)))` — so
+the wide instructions exist in the binary but only inside functions nothing branches to unless
+`cpu_isa_available()` says so. The same executable therefore uses AVX-512 on a Tiger Lake laptop,
+AVX2 on an older x86-64, and portable C on a machine with neither.
+
+Two properties of the detection are worth stating because getting either wrong produces a crash
+rather than a slowdown:
+
+- **CPUID's feature bit is not permission to execute.** AVX and AVX-512 add register state the OS
+  must agree to preserve across context switches. `cpu_features.c` checks `XCR0` via `XGETBV` as
+  well as the feature bit, because an OS that has not enabled that state leaves the CPUID bit set
+  while the first instruction faults.
+- **A pinned kernel that cannot run is a fallback, not an error.** `--kernel avx512_mr4`,
+  a config file, and `matmul_set_kernel()` all travel to machines the person who wrote them never
+  saw. `matmul_run()` substitutes `tiled_mr4` for any unavailable kernel, and every kernel *name*
+  parses on every architecture for the same reason.
+
+The OpenMP loop sits in a plain untargeted function that calls the targeted block through a pointer.
+Keeping the parallel region out of a target-attributed function sidesteps the outlining-versus-
+target-attribute interaction between compilers entirely, and the indirect call is amortized over a
+whole `tile x tile` output block.
 
 ## Reproducibility
 
-The policy is a pure function of `(m, k, n)`, which is what keeps training runs reproducible: the
-same call shape always takes the same kernel, so a run repeats its own accumulation order exactly.
-`test_matmul_kernels.c` asserts this directly.
+Within a process the policy is a pure function of `(m, k, n)`, which is what keeps training runs
+reproducible: the same call shape always takes the same kernel, so a run repeats its own
+accumulation order exactly. The instruction set is resolved once from the hardware, not per call, so
+runtime dispatch does not weaken this. `test_matmul_kernels.c` asserts it directly.
 
-The exactness contract is unchanged and is what it always was: bit-for-bit on the same executable
-and execution backend. Different kernels sum the same products in different orders, so a build with
-a different tile size, a different compiler, or a different kernel override is equivalent within
-float tolerance, not bit-identical. Nothing in the selection policy varies at runtime — not on
-thread count, not on machine, not on wall-clock timing.
+The exactness contract is what it always was — bit-for-bit on the same executable and execution
+backend — but **runtime dispatch makes the CPU's instruction set part of "execution backend."**
+Before, one executable implied one kernel; now the same executable selects `avx512_mr4` on a machine
+that has it and `tiled_mr4` on one that does not, and those agree to within FMA contraction rather
+than bit-for-bit. Concretely:
+
+- Exact resume, checkpoint round-trips, and `--resume` remain bit-identical on one machine, which is
+  what that contract has always covered.
+- Comparing artifacts *across* machines now needs the ISA pinned on both:
+  `DRANZER_CPU_ISA=baseline` is the portable common denominator, and benchmark rows record the
+  detected ISA in a `simd` provenance column so a result file stays interpretable either way.
+
+Different kernels sum the same products in different orders, so a build with a different tile size,
+a different compiler, or a different kernel override remains equivalent within float tolerance, not
+bit-identical. Nothing in the selection policy varies on thread count or wall-clock timing.
 
 OpenMP parallelism does not change results either: blocks own disjoint regions of `C`, so there is
 no cross-thread reduction and an `OMP=1` build agrees bit-for-bit with a serial one.
@@ -84,7 +139,7 @@ tools/matmul_sweep.sh --compilers clang --omp
 
 The script cleanly rebuilds `bench.out` per compiler, sweeps every kernel and tile candidate over
 the shapes each model tier actually issues, and prints the fastest candidate per shape. Every row it
-summarises is also appended to `matmul_results_v2.csv` with the exact build command, compiler,
+summarises is also appended to `matmul_results_v3.csv` with the exact build command, compiler,
 OS, CPU model, core count, OpenMP version, and thread count.
 
 To measure one configuration without the script:
@@ -115,7 +170,7 @@ Two further guards are built into the measurement, both from mistakes made while
   window lands on every candidate instead of penalising whichever one was being measured when
   another process woke up.
 
-Results are per-machine. `matmul_results_v2.csv` is gitignored for that reason; the provenance
+Results are per-machine. `matmul_results_v3.csv` is gitignored for that reason; the provenance
 columns exist so a local history stays interpretable, not so numbers can be compared across
 machines.
 
@@ -197,11 +252,20 @@ for. One cold measurement taken during this work overstated a kernel's cost by m
 
 ## Limitations
 
-- No target-specific SIMD. Everything here is portable C that compilers vectorize on their own; the
-  build deliberately avoids `-march=native` by default (see `src/Makefile`). Runtime-dispatched
-  AVX2/AVX-512 and NEON kernels are the next roadmap goal in the
-  [design checklist](design-checklist.md).
+- **The NEON kernel is written but unmeasured.** No AArch64 machine was available. It is checked for
+  correctness by the same equivalence test wherever it is built, and the preference order places it
+  ahead of the portable kernel on the same reasoning as the x86 kernels, but no number in this
+  document was produced on ARM. Re-run `tools/matmul_sweep.sh` before trusting it there.
+- **The "runs without the instruction set" gate is tested by simulation, not by hardware.** No
+  pre-AVX2 machine was available either. `cpu_features_set_max_isa(CPU_ISA_BASELINE)` makes
+  detection report exactly what such a CPU would report, so every dispatch decision below it is the
+  real code path; what that cannot prove is the absence of a wide instruction on a reachable path,
+  which is a property of the `target` attributes rather than of dispatch.
+- The kernels are register-blocked but not packed. `A` and `B` are read from their original
+  row-major layout, so the innermost loop's `B` access is contiguous but its `A` access is strided.
+  A packing pass is the usual next step and is not attempted here.
 - The backward-pass kernels (`matmul_backward_input`, `matmul_backward_weight`) are not part of the
-  candidate set. They have one implementation each and are unchanged by this work.
+  candidate set. They have one implementation each, still portable C, and are unchanged by this
+  work — which means training benefits from SIMD only through its forward pass.
 - Tiles are square. A rectangular blocking scheme (different extents for `m`, `k`, and `n`) is not
   explored.

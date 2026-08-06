@@ -5,6 +5,7 @@
  */
 
 #include "core/matmul.h"
+#include "core/matmul_simd.h"
 #include <string.h>
 #ifdef _OPENMP
 #include <omp.h>
@@ -19,6 +20,8 @@
  * from inside OpenMP regions - see the threading note in matmul.h. */
 static matmul_kernel_t active_kernel = MATMUL_KERNEL_AUTO;
 static size_t active_tile = DRANZER_MATMUL_BLOCK_SIZE;
+
+static int kernel_in_range(matmul_kernel_t kernel);
 
 static void kernel_scalar(const float *restrict A, const float *restrict B,
                           float *restrict C,
@@ -165,14 +168,68 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
  * Re-run the sweep before adding either; `matmul_set_kernel()` already
  * covers the case where a deployment knows better than the default.
  *
- * The parameters stay in the signature because this is the seam a future
- * runtime-dispatched SIMD kernel will select on, and because the equivalence
- * test pins the contract that selection depends on nothing else. */
+ * The parameters stay in the signature because the equivalence test pins the
+ * contract that selection depends on nothing else, and because a future sweep
+ * may yet find a split the current measurements do not support.
+ *
+ * Runtime SIMD dispatch (T11) did not change any of the above. It adds one
+ * step in front of it: prefer the widest vector kernel this CPU can actually
+ * execute, and fall through to the portable choice when there is none. The
+ * SIMD kernels are the same blocked four-row algorithm with a vectorized j
+ * loop, so this is a strictly-faster substitution rather than a different
+ * policy - and it was measured the same way, over the same shapes, before
+ * being made the default (docs/matmul.md). */
 matmul_kernel_t matmul_select(size_t m, size_t k, size_t n) {
     (void)m;
     (void)k;
     (void)n;
+
+    if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
+        return MATMUL_KERNEL_AVX512_MR4;
+    }
+    if (matmul_kernel_available(MATMUL_KERNEL_AVX2_MR4)) {
+        return MATMUL_KERNEL_AVX2_MR4;
+    }
+    if (matmul_kernel_available(MATMUL_KERNEL_NEON_MR4)) {
+        return MATMUL_KERNEL_NEON_MR4;
+    }
     return MATMUL_KERNEL_TILED_MR4;
+}
+
+cpu_isa_t matmul_kernel_isa(matmul_kernel_t kernel) {
+    switch (kernel) {
+        case MATMUL_KERNEL_AVX2_MR4:   return CPU_ISA_AVX2;
+        case MATMUL_KERNEL_AVX512_MR4: return CPU_ISA_AVX512;
+        case MATMUL_KERNEL_NEON_MR4:   return CPU_ISA_NEON;
+        default:                       return CPU_ISA_BASELINE;
+    }
+}
+
+int matmul_kernel_available(matmul_kernel_t kernel) {
+    if (!kernel_in_range(kernel)) return 0;
+
+    /* Compiled in for this architecture? The DRANZER_HAVE_* macros come from
+     * core/matmul_simd.h, which is the single place that decides. */
+    switch (kernel) {
+        case MATMUL_KERNEL_AVX2_MR4:
+        case MATMUL_KERNEL_AVX512_MR4:
+#ifndef DRANZER_HAVE_X86_SIMD
+            return 0;
+#else
+            break;
+#endif
+        case MATMUL_KERNEL_NEON_MR4:
+#ifndef DRANZER_HAVE_NEON
+            return 0;
+#else
+            break;
+#endif
+        default:
+            break;
+    }
+
+    /* Executable on this CPU? */
+    return cpu_isa_available(matmul_kernel_isa(kernel));
 }
 
 void matmul_run(matmul_kernel_t kernel, const float *restrict A,
@@ -185,6 +242,12 @@ void matmul_run(matmul_kernel_t kernel, const float *restrict A,
     }
     if (kernel == MATMUL_KERNEL_AUTO) kernel = matmul_select(m, k, n);
 
+    /* An explicitly pinned SIMD kernel this machine cannot run becomes the
+     * portable kernel rather than an illegal instruction. matmul_select()
+     * never produces one - it only ever returns available kernels - so this
+     * only fires for matmul_set_kernel(), --kernel, and DRANZER_CPU_ISA. */
+    if (!matmul_kernel_available(kernel)) kernel = MATMUL_KERNEL_TILED_MR4;
+
     switch (kernel) {
         case MATMUL_KERNEL_SCALAR:
             kernel_scalar(A, B, C, m, k, n);
@@ -195,6 +258,19 @@ void matmul_run(matmul_kernel_t kernel, const float *restrict A,
         case MATMUL_KERNEL_TILED:
             kernel_tiled(A, B, C, m, k, n, active_tile);
             break;
+#ifdef DRANZER_HAVE_X86_SIMD
+        case MATMUL_KERNEL_AVX2_MR4:
+            matmul_kernel_avx2_mr4(A, B, C, m, k, n, active_tile);
+            break;
+        case MATMUL_KERNEL_AVX512_MR4:
+            matmul_kernel_avx512_mr4(A, B, C, m, k, n, active_tile);
+            break;
+#endif
+#ifdef DRANZER_HAVE_NEON
+        case MATMUL_KERNEL_NEON_MR4:
+            matmul_kernel_neon_mr4(A, B, C, m, k, n, active_tile);
+            break;
+#endif
         case MATMUL_KERNEL_TILED_MR4:
         default:
             kernel_tiled_mr4(A, B, C, m, k, n, active_tile);
@@ -230,8 +306,11 @@ size_t matmul_tile_size(void) {
     return active_tile;
 }
 
+/* Kept in the enum's order; the compiler cannot check that for a designated-
+ * initializer-free array, so a new kernel means a new name in the same slot. */
 static const char *const kernel_names[MATMUL_KERNEL_COUNT] = {
-    "auto", "scalar", "rowwise", "tiled", "tiled_mr4"
+    "auto", "scalar", "rowwise", "tiled", "tiled_mr4",
+    "avx2_mr4", "avx512_mr4", "neon_mr4"
 };
 
 const char *matmul_kernel_name(matmul_kernel_t kernel) {

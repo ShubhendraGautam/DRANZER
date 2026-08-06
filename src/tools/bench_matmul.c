@@ -9,6 +9,7 @@
  */
 
 #include "tools/bench_matmul.h"
+#include "core/cpu_features.h"
 #include "core/matmul.h"
 #include <math.h>
 #include <stdint.h>
@@ -17,7 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define DEFAULT_CSV_PATH "matmul_results_v2.csv"
+#define DEFAULT_CSV_PATH "matmul_results_v3.csv"
 #define MAX_REPEATS 16
 
 typedef struct {
@@ -63,9 +64,22 @@ void bench_matmul_default_options(bench_matmul_options_t *options) {
     options->csv_path = DEFAULT_CSV_PATH;
 }
 
+/* Every blocked kernel gets the full tile sweep. The SIMD kernels are only
+ * added where they can actually execute: on a machine without AVX-512,
+ * matmul_run() would run tiled_mr4 in their place and the row would be a
+ * duplicate measurement under a misleading name. */
+static size_t add_tiled_candidates(matmul_kernel_t kernel, candidate_t *out,
+                                   size_t count, size_t capacity) {
+    if (!matmul_kernel_available(kernel)) return count;
+    const size_t tile_count = sizeof(sweep_tiles) / sizeof(sweep_tiles[0]);
+    for (size_t i = 0; i < tile_count && count < capacity; i++) {
+        out[count++] = (candidate_t){ kernel, sweep_tiles[i] };
+    }
+    return count;
+}
+
 static size_t build_candidates(int sweep, candidate_t *out, size_t capacity) {
     size_t count = 0;
-    const size_t tile_count = sizeof(sweep_tiles) / sizeof(sweep_tiles[0]);
 
     /* Scalar first, always: every other row's speedup is relative to it. */
     if (count < capacity) out[count++] = (candidate_t){ MATMUL_KERNEL_SCALAR, 0 };
@@ -77,12 +91,11 @@ static size_t build_candidates(int sweep, candidate_t *out, size_t capacity) {
     }
 
     if (count < capacity) out[count++] = (candidate_t){ MATMUL_KERNEL_ROWWISE, 0 };
-    for (size_t i = 0; i < tile_count && count < capacity; i++) {
-        out[count++] = (candidate_t){ MATMUL_KERNEL_TILED, sweep_tiles[i] };
-    }
-    for (size_t i = 0; i < tile_count && count < capacity; i++) {
-        out[count++] = (candidate_t){ MATMUL_KERNEL_TILED_MR4, sweep_tiles[i] };
-    }
+    count = add_tiled_candidates(MATMUL_KERNEL_TILED, out, count, capacity);
+    count = add_tiled_candidates(MATMUL_KERNEL_TILED_MR4, out, count, capacity);
+    count = add_tiled_candidates(MATMUL_KERNEL_AVX2_MR4, out, count, capacity);
+    count = add_tiled_candidates(MATMUL_KERNEL_AVX512_MR4, out, count, capacity);
+    count = add_tiled_candidates(MATMUL_KERNEL_NEON_MR4, out, count, capacity);
     if (count < capacity) {
         out[count++] = (candidate_t){ MATMUL_KERNEL_AUTO, matmul_tile_size() };
     }
@@ -354,7 +367,11 @@ int bench_matmul_run(const bench_matmul_tier_t *tiers, size_t tier_count,
                      "max_abs_error,max_relative_error," BENCH_METADATA_CSV_HEADER "\n");
     }
 
-    candidate_t candidates[2 + 1 + 2 * (sizeof(sweep_tiles) / sizeof(sweep_tiles[0]))];
+    /* scalar + rowwise + auto, plus a full tile sweep for each of the five
+     * blocked kernels (tiled, tiled_mr4, and the three SIMD ones). Sized for
+     * all of them even though only this architecture's SIMD kernels are ever
+     * added, so the bound never depends on the build target. */
+    candidate_t candidates[3 + 5 * (sizeof(sweep_tiles) / sizeof(sweep_tiles[0]))];
     size_t candidate_count = build_candidates(options->sweep, candidates,
                                               sizeof(candidates) / sizeof(candidates[0]));
     double target_seconds = options->quick ? 0.01 : 0.15;
@@ -367,8 +384,10 @@ int bench_matmul_run(const bench_matmul_tier_t *tiers, size_t tier_count,
            candidate_count, repeats, target_seconds * 1000.0);
     printf("Candidates are ranked by their fastest round; the median is "
            "reported beside it as a noise indicator.\n");
-    printf("Default kernel: %s, default tile: %zu.\n\n",
-           matmul_kernel_name(matmul_get_kernel()), matmul_tile_size());
+    printf("Default kernel: %s (resolves to %s here), default tile: %zu.\n",
+           matmul_kernel_name(matmul_get_kernel()),
+           matmul_kernel_name(matmul_select(1, 64, 64)), matmul_tile_size());
+    printf("Instruction set: %s.\n\n", cpu_features_summary());
 
     int failed = 0;
     for (size_t i = 0; i < tier_count; i++) {

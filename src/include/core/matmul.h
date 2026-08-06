@@ -1,6 +1,7 @@
 #ifndef MATMUL_H
 #define MATMUL_H
 
+#include "core/cpu_features.h"
 #include <stddef.h>
 
 /* CPU matrix-multiplication kernels and their selection policy.
@@ -38,6 +39,16 @@ typedef enum {
      * feeds four independent accumulator rows. Raises arithmetic intensity
      * on the multi-row prefill/training shapes. */
     MATMUL_KERNEL_TILED_MR4,
+    /* The same blocked four-row algorithm, with the innermost loop over j
+     * issued as vector FMAs. Each is compiled only for its architecture and
+     * runs only where cpu_isa_available() says the CPU has the instructions -
+     * matmul_kernel_available() answers both questions at once. Because they
+     * vectorize along j, every C element still accumulates over l in
+     * increasing order, so they differ from the portable kernels by FMA
+     * contraction and not by reassociation. */
+    MATMUL_KERNEL_AVX2_MR4,
+    MATMUL_KERNEL_AVX512_MR4,
+    MATMUL_KERNEL_NEON_MR4,
     MATMUL_KERNEL_COUNT
 } matmul_kernel_t;
 
@@ -52,17 +63,39 @@ typedef enum {
 
 /* Run one specific kernel. MATMUL_KERNEL_AUTO applies the selection policy;
  * any other value runs exactly that kernel regardless of shape. Used by the
- * benchmark and the equivalence tests to compare candidates directly. */
+ * benchmark and the equivalence tests to compare candidates directly.
+ *
+ * Requesting a kernel this binary or this CPU cannot run is not an error and
+ * never faults: it falls back to the portable kernel and computes the right
+ * answer more slowly. That is deliberate. A pinned kernel comes from a config
+ * file, an environment variable, or a benchmark flag, all of which travel to
+ * machines the person who wrote them never saw. */
 void matmul_run(matmul_kernel_t kernel, const float *restrict A,
                 const float *restrict B, float *restrict C,
                 size_t m, size_t k, size_t n);
 
-/* The kernel MATMUL_KERNEL_AUTO resolves to for this shape. Deterministic -
- * the same shape always selects the same kernel within one binary, which is
- * what keeps training runs reproducible. It currently answers the same for
- * every shape: the measurements did not support a split (see matmul.c and
- * docs/matmul.md). It stays shape-aware in the interface because that is
- * where runtime SIMD dispatch will hook in. */
+/* Whether this kernel can actually run here: compiled into this binary for
+ * this architecture, and supported by this CPU. Always 1 for the portable
+ * kernels. The benchmark uses it to skip candidates rather than measure a
+ * fallback, and the equivalence test uses it to skip kernels it cannot
+ * exercise instead of reporting a false pass. */
+int matmul_kernel_available(matmul_kernel_t kernel);
+
+/* The instruction set a kernel needs, CPU_ISA_BASELINE for the portable ones.
+ * This is what benchmark rows and run manifests record: with runtime dispatch,
+ * the ISA is part of "which execution backend produced this number". */
+cpu_isa_t matmul_kernel_isa(matmul_kernel_t kernel);
+
+/* The kernel MATMUL_KERNEL_AUTO resolves to for this shape. Deterministic
+ * within a process - the same shape always selects the same kernel, which is
+ * what keeps a training run repeating its own accumulation order exactly.
+ *
+ * It is not deterministic *across machines*: the policy prefers the widest
+ * SIMD kernel the CPU supports, so the same executable resolves differently on
+ * different hardware. The exactness contract already scoped bit-identity to
+ * one executable and one execution backend; runtime dispatch makes the CPU's
+ * instruction set part of that backend. cpu_features_set_max_isa() pins it
+ * when a comparison needs to span machines. */
 matmul_kernel_t matmul_select(size_t m, size_t k, size_t n);
 
 /* Process-wide kernel override. MATMUL_KERNEL_AUTO (the default) restores
@@ -78,7 +111,10 @@ int matmul_set_tile_size(size_t tile);
 size_t matmul_tile_size(void);
 
 /* Stable lowercase kernel names ("auto", "scalar", "rowwise", "tiled",
- * "tiled_mr4") for CLI flags, CSV rows, and documentation.
+ * "tiled_mr4", "avx2_mr4", "avx512_mr4", "neon_mr4") for CLI flags, CSV rows,
+ * and documentation. Every name parses on every architecture, whether or not
+ * the kernel can run there - a config file naming a kernel this machine lacks
+ * is a fallback, not a parse error.
  * matmul_kernel_from_name() returns -1 for an unknown name. */
 const char *matmul_kernel_name(matmul_kernel_t kernel);
 int matmul_kernel_from_name(const char *name, matmul_kernel_t *kernel_out);

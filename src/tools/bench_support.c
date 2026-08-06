@@ -4,6 +4,7 @@
  */
 
 #include "tools/bench_support.h"
+#include "core/cpu_features.h"
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
@@ -66,6 +67,7 @@ void bench_collect_metadata(bench_metadata_t *metadata) {
         snprintf(metadata->os, sizeof(metadata->os), "unknown");
     }
     read_cpu_name(metadata->cpu, sizeof(metadata->cpu));
+    snprintf(metadata->simd, sizeof(metadata->simd), "%s", cpu_features_summary());
     metadata->build_command = DRANZER_BUILD_COMMAND;
     metadata->online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 #ifdef _OPENMP
@@ -79,9 +81,9 @@ void bench_collect_metadata(bench_metadata_t *metadata) {
 
 void bench_print_metadata(const bench_metadata_t *metadata) {
     if (!metadata) return;
-    printf("Build: %s\nCompiler: %s\nSystem: %s\nCPU: %s\n",
+    printf("Build: %s\nCompiler: %s\nSystem: %s\nCPU: %s\nSIMD: %s\n",
            metadata->build_command, metadata->compiler, metadata->os,
-           metadata->cpu);
+           metadata->cpu, metadata->simd);
     printf("Threads: online=%ld OpenMP=%ld max=%d\n\n",
            metadata->online_cpus, metadata->openmp_version,
            metadata->max_threads);
@@ -119,6 +121,8 @@ void bench_csv_metadata(FILE *csv, const bench_metadata_t *metadata) {
     bench_csv_field(csv, metadata->os);
     fputc(',', csv);
     bench_csv_field(csv, metadata->cpu);
+    fputc(',', csv);
+    bench_csv_field(csv, metadata->simd);
     fprintf(csv, ",%ld,%ld,%d\n", metadata->online_cpus,
             metadata->openmp_version, metadata->max_threads);
     fflush(csv);

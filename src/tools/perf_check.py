@@ -132,7 +132,16 @@ def check_matmul(rows, report):
         compiler = row.get("compiler", "").split(" ")[0] or "cc"
         key = (compiler, row["tier"], row["case"], row["m"], row["k"], row["n"])
         label = row["kernel"]
-        if label in ("tiled", "tiled_mr4"):
+        # Every blocked kernel is swept at several tiles, and each tile is a
+        # distinct candidate. Keying on the name alone would collapse them and
+        # silently keep only the last row, so "fastest candidate beside it"
+        # would be measured against an arbitrary tile. The unblocked kernels
+        # record tile 0 and keep their bare name.
+        #
+        # "auto" and "scalar" must stay bare whatever their tile column says:
+        # the two lookups below are by exact name, and labelling them would
+        # skip the shape entirely rather than fail loudly.
+        if label not in ("auto", "scalar") and row["tile"] not in ("", "0"):
             label = f"{label}/{row['tile']}"
         by_shape[key][label] = row
 
@@ -285,9 +294,9 @@ def check_omp(rows, report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bench", help="bench_results_v2.csv")
-    parser.add_argument("--matmul", help="matmul_results_v2.csv")
-    parser.add_argument("--omp", help="bench_results_v2.csv from a thread sweep")
+    parser.add_argument("--bench", help="bench_results_v3.csv")
+    parser.add_argument("--matmul", help="matmul_results_v3.csv")
+    parser.add_argument("--omp", help="bench_results_v3.csv from a thread sweep")
     parser.add_argument("--summary", help="write the markdown report here")
     parser.add_argument("--title", default="Performance report")
     parser.add_argument("--strict", action="store_true",

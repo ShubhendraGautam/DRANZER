@@ -166,7 +166,7 @@ with the extrapolation limitation documented. Full-prefix logits still match bef
 multi-wrap tests compare the ring against the same logical cache normalized to linear storage.
 Callback generation produced 18 sequence tokens with an 8-token retained window in CLI smoke and
 focused tests. The benchmark now times and records prompt prefill, growing-cache decode, and
-steady-state full-ring decode separately in `bench_results_v2.csv`. GCC, Clang, OpenMP,
+steady-state full-ring decode separately in `bench_results_v3.csv`. GCC, Clang, OpenMP,
 AddressSanitizer, size builds, tools, and integration tests pass.
 
 ## v0.4 — Efficient runtime

@@ -14,6 +14,11 @@ typedef struct {
     char compiler[192];
     char os[256];
     char cpu[256];
+    /* Which SIMD instruction sets this run was allowed to use, from
+     * cpu_features_summary(). Load-bearing since runtime kernel dispatch:
+     * the same executable picks a different matmul kernel on different
+     * hardware, so "which CPU" no longer implies "which code ran". */
+    char simd[160];
     const char *build_command;
     long online_cpus;
     long openmp_version;
@@ -40,7 +45,7 @@ void bench_csv_field(FILE *csv, const char *value);
 /* The trailing provenance columns shared by every results file. The header
  * text and the field order below are kept in lockstep on purpose. */
 #define BENCH_METADATA_CSV_HEADER \
-    "build_command,compiler,os,cpu,online_cpus,openmp_version,max_threads"
+    "build_command,compiler,os,cpu,simd,online_cpus,openmp_version,max_threads"
 
 /* Append the provenance columns, preceded by a separating comma, and
  * terminate the row. */

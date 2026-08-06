@@ -11,7 +11,10 @@ runtime without an ML framework or autodiff library. The result is a compact cod
 how transformers work all the way down to memory layout, numerical gradients, and GPU kernel
 dispatch.
 
-The default build runs anywhere with a C compiler. On NVIDIA systems, forward-pass matrix
+The default build runs anywhere with a C compiler, and stays portable while still using the vector
+instructions of whatever CPU it lands on: the AVX2, AVX-512, and NEON matmul kernels are selected at
+runtime from CPUID rather than baked in with `-march`, so one binary uses the widest it finds and
+falls back to portable C on a machine with none. On NVIDIA systems, forward-pass matrix
 multiplication can also run through hand-written PTX loaded directly by the CUDA driver—no CUDA
 toolkit required.
 
@@ -23,7 +26,7 @@ toolkit required.
 - Frozen tokenization with BOS/EOS, held-out perplexity, and exact resumable training checkpoints
 - Single-file model bundles and ring-KV-cached greedy/top-k/top-p decoding
 - Incremental generation callbacks, streamed CLI output, stop sequences, and repetition controls
-- Portable CPU execution plus optional OpenMP parallelism
+- Portable CPU execution, runtime-dispatched AVX2/AVX-512/NEON matmul kernels, and optional OpenMP
 - Optional NVIDIA GPU offload with persistent buffers and a validated weight cache
 - Built-in tests, benchmarks, hardware probing, serialization, and GitHub Actions CI
 
@@ -88,7 +91,7 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 | [Model bundle](docs/model-bundle.md) | Portable artifact layout, validation, and legacy compatibility |
 | [Special tokens](docs/special-tokens.md) | Stable IDs, sequence boundaries, EOS stopping, and legacy mode |
 | [Generation runtime](docs/generation.md) | Streaming callbacks, stop sequences, sampling controls, and result semantics |
-| [CPU matmul kernels](docs/matmul.md) | Kernel set, shape-directed selection, reproducibility, and the measurement workflow |
+| [CPU matmul kernels](docs/matmul.md) | Portable and SIMD kernels, runtime dispatch, reproducibility, and the measurement workflow |
 | [GPU backend](docs/gpu.md) | PTX execution, capability probing, caching, limitations, and measurements |
 | [Development](docs/development.md) | Tests, CI/nightly jobs, sanitizers, benchmarks, and contribution workflow |
 | [Design checklist](docs/design-checklist.md) | Prioritized maturity roadmap and acceptance gates |
