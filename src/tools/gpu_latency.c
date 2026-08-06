@@ -276,6 +276,14 @@ int main(void) {
     measure_shape("decode: attn projection", 1, 256, 256);
     measure_shape("decode: output head", 1, 256, 4000);
     measure_shape("prefill: attn projection", 64, 64, 64);
+    /* Intermediate sizes, spaced roughly 2x apart in multiply-accumulates.
+     * The shared-memory kernel loses to the naive one on small shapes, where
+     * its two barriers per k-tile cost more than the global traffic they
+     * save, so gpu_matmul() picks between them by shape - these are the rows
+     * that placed that threshold. */
+    measure_shape("crossover: 32x256x256", 32, 256, 256);
+    measure_shape("crossover: 64x128x256", 64, 128, 256);
+    measure_shape("crossover: 64x256x256", 64, 256, 256);
     measure_shape("prefill: attn projection", 128, 256, 256);
     measure_shape("prefill: ffn up", 128, 256, 1024);
     measure_shape("training: ffn down", 128, 1024, 256);

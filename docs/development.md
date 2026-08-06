@@ -15,7 +15,7 @@ make -C src clean all test CC=gcc
 ```
 
 `make test` discovers every `src/tests/core/test_*.c`, `src/tests/cli/test_*.c`,
-`src/tests/gpu/test_*.c`, and future `src/tests/tpu/test_*.c` file. Each source becomes an
+`src/tests/gpu/test_*.c`, `src/tests/perf/test_*.c`, and future `src/tests/tpu/test_*.c` file. Each source becomes an
 independent executable. The target runs all tests and returns a nonzero status if any build or test
 fails.
 
@@ -51,6 +51,8 @@ fails.
 | `test_gpu_weight_cache.c` | Correct cache invalidation after weight changes |
 | `test_gpu_training_step.c` | CPU/GPU agreement across repeated training updates |
 | `test_gpu_matmul_backward.c` | GPU backward kernels versus the CPU reference, including accumulation into a non-zero destination |
+| `test_perf_invariants.c` | Ratio-only CPU timing gates: backward matmuls within reach of a forward matmul of equal FLOP count, tuned kernel beats the scalar reference, and each AVX-512 path beats its portable counterpart |
+| `test_gpu_latency_invariants.c` | Ratio-only GPU timing gates: fixed per-call cost is amortized by larger work, the weight cache removes a per-call upload, and the tiled kernel is not a regression on the naive one |
 | `test_gpu_training_backward.c` | CPU/GPU agreement on a model large enough that the dispatched backward kernels are actually used |
 
 GPU tests return success with a clear `SKIP` message when CUDA hardware is unavailable.
@@ -96,6 +98,41 @@ A leak in the project's own `gpu_cuda.c` or `gpu_matmul.c` is therefore not caug
 and has to be reasoned about from the shutdown paths, which `gpu_matmul_shutdown()` covers by
 destroying the context that owns every device allocation.
 
+## Performance regression tests
+
+`src/tests/perf/` and `test_gpu_latency_invariants.c` run inside the ordinary suite and fail the
+build on performance regressions, rather than leaving them to be noticed in a benchmark table.
+
+**Every assertion in them is a ratio between two measurements taken back to back in the same
+process. None asserts an absolute time.** A slow, busy, or thermally throttled machine scales both
+sides of a ratio equally, which is what makes timing assertions safe to run alongside correctness
+tests. It is the same discipline `tools/perf_check.py` applies to CI benchmark rows.
+
+Thresholds are deliberately loose, because the defects worth catching are order-of-magnitude:
+
+| Invariant | Limit | What it catches |
+|---|---|---|
+| backward matmul vs forward of equal FLOP count | ≤ 3.0x | A traversal fighting the cache. The pre-fix `matmul_backward_weight` reports **24.7x** here. |
+| tuned forward kernel vs scalar reference | ≥ 1.5x | Kernel selection silently stopping |
+| each AVX-512 path vs its portable path | ≥ 1.2x | A dispatch that stopped firing — invisible to correctness tests, which still pass |
+| large GPU call vs 1-element call, in GFLOP/s | ≥ 1000x | Per-call overhead exploding |
+| GPU weight cache vs invalidating every call | ≥ 1.05x | The cache not being consulted |
+| tiled GPU kernel vs the naive baseline | ≥ 1.0x | The shared-memory path regressing |
+
+The backward-vs-forward gate was verified to have teeth by rebuilding the suite against the
+pre-fix kernel: it fails at 24.7x against a 3.0x limit, and also catches the AVX-512 dispatch ratio
+collapsing to 0.95x. A performance test that has never been seen to fail is not evidence of
+anything.
+
+**These tests skip themselves under a sanitizer.** Instrumentation is not applied evenly - portable
+scalar loops carry far more of it per useful operation than vector intrinsics do - so under
+AddressSanitizer the ratios inverted and inflated: the backward matmuls measured 0.69x a forward
+matmul of equal FLOP count, and the AVX-512 speedups read 8-16x instead of about 2-3x. They passed
+with enormous margin, which is worse than failing, because it looks like coverage while measuring
+the sanitizer. The correctness suite still runs under ASAN, which is where it belongs. The GPU
+tests skip there too, for an unrelated reason: the CUDA driver does not initialize under the
+sanitizer, so all of `tests/gpu/` self-skips.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request. Its matrix builds the CLI and runs
@@ -140,6 +177,22 @@ Run the same checks locally against any CSV the tools produce:
 ```bash
 cd src
 python3 tools/perf_check.py --bench bench_results_v3.csv --matmul matmul_results_v3.csv
+
+### Reading the results
+
+Every job in `.github/workflows/performance.yml` writes its full report — machine details, the
+measurement tables, and each gate's pass/fail — to its **GitHub job summary**. GitHub stacks those
+on the workflow run page, so opening the run shows every result with nothing to download.
+
+The CSV artifacts are for charting a trend across runs by hand. They are not where you look for the
+outcome of a single run, and reaching for them usually means the report is missing, which is a bug
+rather than the intended workflow.
+
+The report is written with `if: always()`, so it appears even when the measurement step failed — in
+that case it says so explicitly and names the CSV it expected, rather than leaving the run page
+blank. A blank summary alongside an uploaded artifact was the previous behaviour and is what this
+guards against: the artifact upload already ran unconditionally while the report did not, so a
+failed sweep produced downloadable numbers and no readable result.
 ```
 
 `python3` is needed only for this report, not to build, test, or run anything.

@@ -57,6 +57,19 @@ int gpu_matmul_backward_input(const float *dC, const float *B, float *dA,
 int gpu_matmul_backward_weight(const float *A, const float *dC, float *dB,
                                size_t m, size_t k, size_t n);
 
+/* Which PTX kernel gpu_matmul() launches: "tiled" (the measured default,
+ * staging 16x16 tiles through shared memory) or "naive" (one thread per
+ * output element, kept as the comparison baseline the way `scalar` is kept on
+ * the CPU side). DRANZER_GPU_MATMUL sets the same thing from the environment.
+ *
+ * Mirrors matmul_set_kernel() on the CPU: a named, process-wide override so a
+ * benchmark or test can compare both paths in one session rather than needing
+ * two processes. Returns 0, or -1 for an unknown name or when no GPU is
+ * available, leaving the current selection untouched. Not synchronized - set
+ * it before compute starts. */
+int gpu_matmul_set_forward_kernel(const char *name);
+const char *gpu_matmul_forward_kernel_name(void);
+
 /* Marks every cached GPU-resident weight buffer stale. Must be called
  * once after anything changes ANY model weight (training.c calls this
  * once per model_optimizer_step) - without it, gpu_matmul() would keep

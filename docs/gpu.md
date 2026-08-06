@@ -2,9 +2,10 @@
 
 [← Back to README](../README.md)
 
-DRANZER can offload forward-pass matrix multiplication to an NVIDIA GPU without CUDA headers,
-`nvcc`, or NVRTC. It dynamically loads `libcuda.so.1` and asks the installed driver to JIT-compile
-an embedded hand-written PTX kernel.
+DRANZER can offload matrix multiplication to an NVIDIA GPU without CUDA headers, `nvcc`, or NVRTC.
+It dynamically loads `libcuda.so.1` and asks the installed driver to JIT-compile embedded
+hand-written PTX: a shared-memory tiled forward kernel, the older non-tiled one kept for comparison,
+and two backward kernels.
 
 ## Scope
 
@@ -138,6 +139,53 @@ The remaining overhead is structural rather than fixable in the backend: only ma
 GPU, so activations return to host memory between every operation. Keeping them device-resident
 would require layer normalization, softmax, and attention on the device too.
 
+## Shared-memory tiled kernel
+
+The first PTX kernel gave each thread one output element and had it stream a whole row of `A` and a
+whole column of `B` from global memory on its own. Attributing a whole call to its parts showed why
+that was the limit:
+
+| Shape | total | launch | transfer | **kernel** | kernel GFLOP/s |
+|---|---:|---:|---:|---:|---:|
+| 1×256×256 | 98 µs | 51 | ~0 | 46 | 3 |
+| 128×256×256 | 275 | 51 | 70 | 153 | 109 |
+| 128×256×1024 | 652 | 51 | 186 | **415** | 162 |
+| 128×1024×256 | 631 | 51 | 167 | **412** | 163 |
+
+On the large shapes the kernel dominated, and 162 GFLOP/s is about **7%** of the 2348 GFLOP/s the
+same device reaches on a pure FMA microbenchmark. The ceiling was memory traffic, not arithmetic.
+
+`matmul_tiled` walks `k` in 16-wide steps, cooperatively loading one 16×16 tile of each operand into
+shared memory per step so every loaded element is used by 16 threads instead of 1. Out-of-range
+lanes store a zero rather than branching, because both `bar.sync` calls must be reached by every
+thread in the block — that also makes ragged edges correct without a separate remainder kernel.
+Accumulation order per output element is unchanged: still `k` ascending.
+
+Best of four rounds each, alternating within one session:
+
+| Shape | multiply-accumulates | naive | tiled | speedup |
+|---|---:|---:|---:|---:|
+| 64×64×64 | 262K | 62.7 µs | 60.7 | 1.03x (tie) |
+| 32×256×256 | 2.1M | 105.6 | 92.3 | 1.14x |
+| 64×256×256 | 4.2M | 122.3 | 116.0 | 1.05x |
+| 128×256×256 | 8.4M | 215.3 | 188.5 | 1.14x |
+| 128×256×1024 | 33.5M | 564.8 | 457.3 | **1.24x** |
+| 128×1024×256 | 33.5M | 552.6 | 463.6 | **1.19x** |
+
+Tiled is never slower, so it is the unconditional default — no shape threshold to maintain. The
+whole-call gains look modest because transfer and launch are now the larger share; isolating the
+kernel at 128×256×1024 gives **328 → 186 µs, 1.76x**, moving it from 7% to about 15% of the
+device's measured peak.
+
+A single round early in this work showed tiled at 0.79x on 64×64×64 and naive at 143 µs on a later
+round for the same configuration — a 2.4x swing on identical code. Small shapes on this device are
+noise-dominated; the table above is best-of-four for that reason, and the tie at 64×64×64 is the
+honest reading rather than either extreme.
+
+`DRANZER_GPU_MATMUL=naive` selects the original kernel. It is kept as the comparison baseline, the
+same role `scalar` plays for the CPU kernels, and `test_gpu_matmul.c` checks both across shapes
+chosen around the 16×16 tile: ragged edges, partial `k` tails, and extents below one tile.
+
 ## Backward pass
 
 The two backward matmuls are dispatched as well, but on a threshold rather than unconditionally.
@@ -200,30 +248,27 @@ exists today and must be re-derived if it changes again.
 
 ## Measured crossover
 
-`--gpu` is not automatically faster, and since the CPU gained runtime-dispatched AVX-512 kernels
-(see [CPU matmul kernels](matmul.md)) it is no longer even reliably faster for inference.
+`--gpu` is not automatically faster, and which side wins has changed several times as both sides
+were improved (see [CPU matmul kernels](matmul.md)).
 
-Current measurements, medium tier, best of three runs each on the MX450 test system:
+Current measurements, medium tier, best of three runs each on the MX450 test system, with the
+shared-memory kernel and after the CPU's own backward-pass work:
 
 | Workload | CPU | GPU | Result |
 |---|---:|---:|---|
-| Inference (ms/token) | 65.8 | 89.3 | **CPU wins, 0.74x** |
-| Training (ms/step) | 536.4 | 477.4 | **GPU wins, 1.12x** |
+| Inference (ms/token) | 60.48 | 50.66 | **GPU wins, 1.19x** |
+| Training (ms/step) | 263.8 | 277.5 | tie, 0.95x |
+| Prefill (ms/token) | 1.749 | 4.163 | **CPU wins, 2.4x** |
 
-The inference ranges do not overlap (CPU 65.8–72.0 against GPU 89.3–96.6). The training margin is
-narrow and the ranges do touch (CPU 536–601 against GPU 477–552), so treat 1.12x as "the GPU is
-still ahead on training, but not by much" rather than as a precise figure.
+Prefill and decode advance one token at a time, so their matmuls have `m == 1` and are dominated by
+the fixed per-call cost; that is where the GPU loses worst and no kernel improvement will change it.
+Inference over a full context has the large shapes the tiled kernel helps.
 
-**That training row used to read 969.3 against 627.9, a 1.54x GPU win.** Fixing
-`matmul_backward_weight()`'s loop order (see [CPU matmul kernels](matmul.md#the-backward-kernels))
-made CPU training 2.75x faster on its own and took most of the GPU's advantage with it. Both
-numbers above are honest; they were measured five hours apart against different CPU code.
-
-**This inverted an earlier result and the old table is kept below as a record of that.** Before
-AVX-512 dispatch, the same machine measured medium-tier inference about 5.1x *faster* on the GPU.
-Speeding up the CPU forward path by roughly 1.8x on matmul moved the crossover past the largest
-tier this project benchmarks. Training still favours the GPU because the backward pass is where the
-CPU is weakest — see the caveat about `matmul_backward_weight` above.
+**This row has now moved in both directions, which is the point.** Inference was 5.1x *faster* on
+the GPU before the CPU gained AVX-512; it then fell to 0.74x, i.e. the CPU winning outright; the
+shared-memory kernel has brought it back to 1.19x for the GPU. Three measurements, three different
+answers, all correct at the time. Treat any single figure here as a snapshot of two implementations
+rather than a property of the hardware.
 
 Superseded, retained for context (pre-AVX-512, forward-only GPU dispatch):
 

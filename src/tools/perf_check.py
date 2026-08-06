@@ -308,6 +308,23 @@ def main():
     omp_rows = read_csv(args.omp)
 
     if not (bench_rows or matmul_rows or omp_rows):
+        # Say so in the report as well as on stderr. This runs in CI with
+        # --summary pointing at the job summary, and the case that brings us
+        # here is a measurement step that died before writing a CSV. Returning
+        # quietly would leave the run page blank, which reads as "no results"
+        # rather than "the measurement failed" - the distinction a human needs
+        # in order to know whether to look at the step log.
+        missing = [f"`{p}`" for p in (args.matmul, args.bench, args.omp) if p]
+        message = (f"# {args.title}\n\n"
+                   "**No measurements were produced.** Expected "
+                   + (", ".join(missing) if missing else "an input CSV")
+                   + ", which means the step that runs the benchmark failed or "
+                     "timed out before writing anything. The gates below could "
+                     "not be evaluated - check that step's log.\n")
+        print(message)
+        if args.summary:
+            with open(args.summary, "a") as handle:
+                handle.write(message + "\n")
         print("perf_check: no input CSVs found", file=sys.stderr)
         return 1
 

@@ -184,7 +184,11 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # tests/gpu/test_gpu_matmul.c's self-skip. Needs -ldl.
 TEST_MODEL_OBJ = core/model.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
-TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/cli/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/tpu/test_*.c)
+# tests/perf/ holds timing tests. They assert ratios between measurements
+# taken in the same process, never absolute times, so a slow or busy machine
+# scales both sides and the assertion holds - see the file header for why
+# that makes them safe in an ordinary suite.
+TEST_SRCS = $(wildcard tests/core/test_*.c) $(wildcard tests/cli/test_*.c) $(wildcard tests/gpu/test_*.c) $(wildcard tests/perf/test_*.c) $(wildcard tests/tpu/test_*.c)
 TEST_BINS = $(TEST_SRCS:.c=.out)
 
 # tests/gpu/ binaries run with LeakSanitizer off (ASAN's buffer-overflow and

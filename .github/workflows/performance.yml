@@ -11,8 +11,13 @@ name: Performance
 #
 # Nothing here asserts an absolute timing. Runners vary by CPU model and
 # neighbour load, so every check compares two measurements taken in the same
-# process on the same machine (see src/tools/perf_check.py). Absolute numbers
-# are recorded as artifacts for trend-watching by a human, not gates.
+# process on the same machine (see src/tools/perf_check.py).
+#
+# WHERE THE RESULTS ARE: every job writes a full markdown report - tables,
+# ratios, and pass/fail - to its GitHub job summary, which GitHub stacks on
+# the workflow run page. Open the run and read it there; nothing needs to be
+# downloaded. The CSV artifacts exist only so a human can chart a trend across
+# runs, and are not where you look for the result of any single run.
 #
 # No GPU is present on hosted runners, so GPU offload is not measured here;
 # use `make gpu-latency && ./gpu_latency.out` on a machine that has one.
@@ -76,6 +81,11 @@ jobs:
             --repeats "$REPEATS"
 
       - name: Check invariants and write the report
+        # always(): if the measurement step above failed or timed out, the
+        # report is the thing that explains why on the run page. Without this
+        # the report is skipped while the artifact upload below still runs,
+        # which leaves results downloadable but nothing readable.
+        if: always()
         working-directory: src
         run: |
           python3 tools/perf_check.py \
@@ -119,6 +129,11 @@ jobs:
           done
 
       - name: Check invariants and write the report
+        # always(): if the measurement step above failed or timed out, the
+        # report is the thing that explains why on the run page. Without this
+        # the report is skipped while the artifact upload below still runs,
+        # which leaves results downloadable but nothing readable.
+        if: always()
         working-directory: src
         run: |
           python3 tools/perf_check.py \
@@ -170,6 +185,11 @@ jobs:
           done
 
       - name: Check invariants and write the report
+        # always(): if the measurement step above failed or timed out, the
+        # report is the thing that explains why on the run page. Without this
+        # the report is skipped while the artifact upload below still runs,
+        # which leaves results downloadable but nothing readable.
+        if: always()
         working-directory: src
         run: |
           python3 tools/perf_check.py \

@@ -22,6 +22,8 @@
 #include "backends/gpu/gpu_matmul.h"
 #include "backends/gpu/gpu_cuda.h"
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *MATMUL_PTX =
@@ -84,6 +86,136 @@ static const char *MATMUL_PTX =
 "    add.s64 %rd10, %rd6, %rd10;\n"
 "    st.global.f32 [%rd10], %f3;\n\n"
 "DONE:\n"
+"    ret;\n"
+"}\n"
+
+/* C = A @ B, with each 16x16 output tile staged through shared memory.
+ *
+ * The naive kernel above re-reads both operands from global memory for every
+ * output element: a thread computing C[row][col] streams a whole row of A and
+ * a whole column of B on its own. Measured on this project's MX450 that runs
+ * at roughly 160 GFLOP/s on prefill shapes - about 7% of the 2348 GFLOP/s the
+ * same device reaches on a pure FMA microbenchmark (docs/gpu.md), so the
+ * ceiling is memory traffic rather than arithmetic.
+ *
+ * This version walks k in 16-wide steps. On each step the block cooperatively
+ * loads one 16x16 tile of A and one of B into shared memory, synchronizes,
+ * and then every thread reads its 16 multiply-accumulate operands from shared
+ * rather than global. Each loaded element is used by 16 threads instead of 1,
+ * which cuts global traffic by the tile width.
+ *
+ * Both bar.sync calls are reached by every thread in the block: the bounds
+ * checks around the two loads write a zero into shared memory rather than
+ * branching past the barrier, because a barrier inside divergent control flow
+ * is undefined. Zero is the right filler - it contributes nothing to the
+ * accumulation - which is also what makes ragged edges correct without a
+ * separate remainder kernel.
+ *
+ * Accumulation order per output element is unchanged from the naive kernel:
+ * still k ascending, just fetched differently. */
+".visible .entry matmul_tiled(\n"
+"    .param .u64 param_A,\n"
+"    .param .u64 param_B,\n"
+"    .param .u64 param_C,\n"
+"    .param .u32 param_M,\n"
+"    .param .u32 param_K,\n"
+"    .param .u32 param_N\n"
+")\n{\n"
+"    .reg .pred %p<8>;\n"
+"    .reg .f32 %f<8>;\n"
+"    .reg .b32 %r<32>;\n"
+"    .reg .b64 %rd<16>;\n"
+"    .shared .align 4 .b8 tileA[1024];\n"
+"    .shared .align 4 .b8 tileB[1024];\n\n"
+"    ld.param.u64 %rd1, [param_A];\n"
+"    ld.param.u64 %rd2, [param_B];\n"
+"    ld.param.u64 %rd3, [param_C];\n"
+"    ld.param.u32 %r1, [param_M];\n"
+"    ld.param.u32 %r2, [param_K];\n"
+"    ld.param.u32 %r3, [param_N];\n\n"
+"    cvta.to.global.u64 %rd4, %rd1;\n"
+"    cvta.to.global.u64 %rd5, %rd2;\n"
+"    cvta.to.global.u64 %rd6, %rd3;\n\n"
+"    mov.u32 %r4, %tid.x;\n"
+"    mov.u32 %r5, %tid.y;\n"
+"    mov.u32 %r6, %ctaid.x;\n"
+"    mov.u32 %r7, %ctaid.y;\n"
+"    shl.b32 %r8, %r6, 4;\n"
+"    add.s32 %r8, %r8, %r4;\n"          /* col */
+"    shl.b32 %r9, %r7, 4;\n"
+"    add.s32 %r9, %r9, %r5;\n\n"        /* row */
+"    mov.u32 %r10, tileA;\n"
+"    mov.u32 %r11, tileB;\n"
+"    shl.b32 %r12, %r5, 4;\n"
+"    add.s32 %r12, %r12, %r4;\n"
+"    shl.b32 %r12, %r12, 2;\n"
+"    add.s32 %r13, %r10, %r12;\n"       /* &tileA[ty][tx] */
+"    add.s32 %r14, %r11, %r12;\n\n"     /* &tileB[ty][tx] */
+"    mov.f32 %f1, 0f00000000;\n"
+"    add.s32 %r15, %r2, 15;\n"
+"    shr.s32 %r15, %r15, 4;\n"          /* tiles = ceil(K/16) */
+"    mov.u32 %r16, 0;\n\n"
+"TILE_LOOP:\n"
+"    setp.ge.s32 %p1, %r16, %r15;\n"
+"    @%p1 bra TILE_DONE;\n\n"
+"    shl.b32 %r17, %r16, 4;\n"
+"    add.s32 %r18, %r17, %r4;\n"        /* a_col = t*16 + tx */
+"    mov.f32 %f2, 0f00000000;\n"
+"    setp.lt.s32 %p2, %r9, %r1;\n"
+"    setp.lt.s32 %p3, %r18, %r2;\n"
+"    and.pred %p4, %p2, %p3;\n"
+"    @!%p4 bra SKIP_A;\n"
+"    mul.lo.s32 %r19, %r9, %r2;\n"
+"    add.s32 %r19, %r19, %r18;\n"
+"    mul.wide.s32 %rd7, %r19, 4;\n"
+"    add.s64 %rd7, %rd4, %rd7;\n"
+"    ld.global.f32 %f2, [%rd7];\n"
+"SKIP_A:\n"
+"    st.shared.f32 [%r13], %f2;\n\n"
+"    add.s32 %r20, %r17, %r5;\n"        /* b_row = t*16 + ty */
+"    mov.f32 %f3, 0f00000000;\n"
+"    setp.lt.s32 %p5, %r20, %r2;\n"
+"    setp.lt.s32 %p6, %r8, %r3;\n"
+"    and.pred %p7, %p5, %p6;\n"
+"    @!%p7 bra SKIP_B;\n"
+"    mul.lo.s32 %r21, %r20, %r3;\n"
+"    add.s32 %r21, %r21, %r8;\n"
+"    mul.wide.s32 %rd8, %r21, 4;\n"
+"    add.s64 %rd8, %rd5, %rd8;\n"
+"    ld.global.f32 %f3, [%rd8];\n"
+"SKIP_B:\n"
+"    st.shared.f32 [%r14], %f3;\n\n"
+"    bar.sync 0;\n\n"
+"    shl.b32 %r22, %r5, 6;\n"
+"    add.s32 %r22, %r10, %r22;\n"       /* &tileA[ty][0] */
+"    shl.b32 %r23, %r4, 2;\n"
+"    add.s32 %r23, %r11, %r23;\n"       /* &tileB[0][tx] */
+"    mov.u32 %r24, 0;\n"
+"INNER_LOOP:\n"
+"    setp.ge.s32 %p1, %r24, 16;\n"
+"    @%p1 bra INNER_DONE;\n"
+"    ld.shared.f32 %f4, [%r22];\n"
+"    ld.shared.f32 %f5, [%r23];\n"
+"    fma.rn.f32 %f1, %f4, %f5, %f1;\n"
+"    add.s32 %r22, %r22, 4;\n"
+"    add.s32 %r23, %r23, 64;\n"
+"    add.s32 %r24, %r24, 1;\n"
+"    bra INNER_LOOP;\n"
+"INNER_DONE:\n\n"
+"    bar.sync 0;\n\n"
+"    add.s32 %r16, %r16, 1;\n"
+"    bra TILE_LOOP;\n\n"
+"TILE_DONE:\n"
+"    setp.ge.s32 %p1, %r9, %r1;\n"
+"    setp.ge.s32 %p2, %r8, %r3;\n"
+"    or.pred %p3, %p1, %p2;\n"
+"    @%p3 bra STORE_DONE;\n"
+"    mul.lo.s32 %r25, %r9, %r3;\n"
+"    add.s32 %r25, %r25, %r8;\n"
+"    mul.wide.s32 %rd9, %r25, 4;\n"
+"    add.s64 %rd9, %rd6, %rd9;\n"
+"    st.global.f32 [%rd9], %f1;\n"
+"STORE_DONE:\n"
 "    ret;\n"
 "}\n"
 
@@ -237,11 +369,35 @@ static gpu_cuda_ctx_t *g_ctx = NULL;
 static int g_init_attempted = 0;
 static int g_kernel_loaded = 0;
 
-/* All three entry points live in one PTX module, so the driver JITs once and
+/* All entry points live in one PTX module, so the driver JITs once and
  * switching between them costs nothing at launch time. */
-static gpu_cuda_kernel_t *g_k_forward = NULL;
+static gpu_cuda_kernel_t *g_k_forward_naive = NULL;
+static gpu_cuda_kernel_t *g_k_forward_tiled = NULL;
 static gpu_cuda_kernel_t *g_k_backward_input = NULL;
 static gpu_cuda_kernel_t *g_k_backward_weight = NULL;
+
+/* Which forward kernel gpu_matmul() launches. Resolved once, from
+ * DRANZER_GPU_MATMUL, so the two can be compared in the same session the way
+ * DRANZER_CPU_ISA compares CPU paths - that is how the choice below was
+ * measured rather than assumed. Unset means the measured default. */
+static gpu_cuda_kernel_t *g_k_forward = NULL;
+
+static void select_forward_kernel(void) {
+    const char *requested = getenv("DRANZER_GPU_MATMUL");
+    if (requested && strcmp(requested, "naive") == 0) {
+        g_k_forward = g_k_forward_naive;
+        return;
+    }
+    if (requested && strcmp(requested, "tiled") == 0) {
+        g_k_forward = g_k_forward_tiled;
+        return;
+    }
+    if (requested && requested[0] != '\0') {
+        fprintf(stderr, "Warning: ignoring DRANZER_GPU_MATMUL=\"%s\" "
+                        "(expected \"naive\" or \"tiled\")\n", requested);
+    }
+    g_k_forward = g_k_forward_tiled;
+}
 
 /* Weight buffer cache: keyed by host pointer, revalidated by generation
  * number rather than re-checking content. gpu_matmul_invalidate_weights()
@@ -292,14 +448,17 @@ static int ensure_ready(void) {
         return 0;
     }
 
-    g_k_forward = gpu_cuda_resolve_kernel(g_ctx, "matmul_naive");
+    g_k_forward_naive = gpu_cuda_resolve_kernel(g_ctx, "matmul_naive");
+    g_k_forward_tiled = gpu_cuda_resolve_kernel(g_ctx, "matmul_tiled");
     g_k_backward_input = gpu_cuda_resolve_kernel(g_ctx, "matmul_backward_input_naive");
     g_k_backward_weight = gpu_cuda_resolve_kernel(g_ctx, "matmul_backward_weight_naive");
-    if (!g_k_forward || !g_k_backward_input || !g_k_backward_weight) {
+    if (!g_k_forward_naive || !g_k_forward_tiled ||
+        !g_k_backward_input || !g_k_backward_weight) {
         gpu_cuda_shutdown(g_ctx);
         g_ctx = NULL;
         return 0;
     }
+    select_forward_kernel();
 
     g_kernel_loaded = 1;
     return 1;
@@ -349,6 +508,24 @@ static uint64_t get_cached_weight_buffer(const float *host_ptr, size_t bytes) {
     g_weight_cache[g_weight_cache_count].generation = g_weight_generation;
     g_weight_cache_count++;
     return dptr;
+}
+
+int gpu_matmul_set_forward_kernel(const char *name) {
+    if (!name || !ensure_ready()) return -1;
+    if (strcmp(name, "tiled") == 0) {
+        g_k_forward = g_k_forward_tiled;
+        return 0;
+    }
+    if (strcmp(name, "naive") == 0) {
+        g_k_forward = g_k_forward_naive;
+        return 0;
+    }
+    return -1;
+}
+
+const char *gpu_matmul_forward_kernel_name(void) {
+    if (!ensure_ready()) return "unavailable";
+    return g_k_forward == g_k_forward_naive ? "naive" : "tiled";
 }
 
 void gpu_matmul_invalidate_weights(void) {
@@ -471,6 +648,8 @@ void gpu_matmul_shutdown(void) {
     g_weight_generation = 1;
 
     g_k_forward = NULL;
+    g_k_forward_naive = NULL;
+    g_k_forward_tiled = NULL;
     g_k_backward_input = NULL;
     g_k_backward_weight = NULL;
 
