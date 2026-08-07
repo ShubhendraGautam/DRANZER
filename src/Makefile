@@ -139,6 +139,18 @@ $(TARGET): $(OBJ) $(LIB)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# core/quantize.c measures the error of an operation that overwrites its own
+# input, and tests/core/test_quantize.c pins that measurement by requiring the
+# in-place and out-of-place forms to agree. Under -ffast-math a compiler may
+# vectorize the accumulation loop behind a runtime alias check: the in-place
+# call (src == dst) fails that check and runs the scalar fallback, the copied
+# call runs the vector path, and the reassociated sum of squares disagrees in
+# the last bits. Clang 18 on ubuntu-24.04 does exactly this; clang 14 does not,
+# so it appears only in CI. Without reassociation permission an FP reduction
+# cannot be vectorized at all, which makes both paths the same arithmetic by
+# construction rather than by luck. Nothing here is hot enough to miss the flag.
+core/quantize.o: CFLAGS := $(filter-out -ffast-math,$(CFLAGS)) -ffp-contract=off
+
 # bench_support.c is the only file that needs the recorded build command,
 # but bench.o is listed too so touching either rebuilds with it.
 tools/bench_support.o: tools/bench_support.c

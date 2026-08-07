@@ -15,7 +15,16 @@
  * Nothing about the quantized values was wrong, so no test of the values could
  * have caught it; the whole benchmark ran and printed a column of zeros. The
  * check that catches it is requiring the in-place and out-of-place forms to
- * report identical error, and it is the reason that comparison exists.
+ * report the same error, and it is the reason that comparison exists.
+ *
+ * "The same" is a tolerance, not a bit pattern. The two forms run one function,
+ * but a compiler that vectorizes its accumulation loop guards the vector path
+ * with a runtime alias check - which the in-place call (src == dst) fails and
+ * the copied call passes, leaving the two to sum the same squares in a
+ * different order. That is a difference of ~1e-15 relative, and demanding bit
+ * equality turns every such compiler decision into a red suite. The defect
+ * above reports exactly zero against a value of order 0.1, so a bound twelve
+ * orders of magnitude tighter than the defect loses nothing that matters.
  */
 
 #include "core/quantize.h"
@@ -37,6 +46,25 @@ static const quant_granularity_t granularities[] = {
     QUANT_GRANULARITY_COLUMN,
 };
 #define GRANULARITY_COUNT (sizeof(granularities) / sizeof(granularities[0]))
+
+/* Relative agreement, with an absolute floor so that two figures near zero are
+ * not held to a relative bound they cannot meet. See the file header for why
+ * these comparisons are tolerances rather than equality. */
+static int agrees(double a, double b, double tolerance) {
+    const double difference = fabs(a - b);
+    const double magnitude = fabs(a) > fabs(b) ? fabs(a) : fabs(b);
+    return difference <= tolerance * (magnitude > 1.0 ? magnitude : 1.0);
+}
+
+/* Two reconstructions of the same tensor. A single float ULP is ~1.2e-7
+ * relative, so 1e-6 admits a differently-ordered arithmetic path and nothing
+ * that would count as a different grid. */
+static int reconstructions_agree(const float *a, const float *b, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (!agrees((double)a[i], (double)b[i], 1e-6)) return 0;
+    }
+    return 1;
+}
 
 typedef struct { size_t rows, cols; } shape_t;
 
@@ -91,19 +119,43 @@ static void check_inplace_matches_copy(void) {
                     return;
                 }
 
-                if (memcmp(in_place, copied, count * sizeof(float)) != 0) {
+                if (!reconstructions_agree(in_place, copied, count)) {
                     fail("in-place and copied reconstructions differ");
                 }
-                if (error_in_place.rms_error != error_copied.rms_error ||
-                    error_in_place.max_abs_error != error_copied.max_abs_error ||
-                    error_in_place.original_rms != error_copied.original_rms ||
-                    error_in_place.clipped != error_copied.clipped ||
-                    error_in_place.levels_used != error_copied.levels_used) {
+                /* clipped and levels_used stay exact: they are counts, and a
+                 * rounding path that moved a value onto a different level
+                 * would be a different grid rather than a different sum. */
+                const char *disagreement = NULL;
+                if (!agrees(error_in_place.rms_error, error_copied.rms_error, 1e-12)) {
+                    disagreement = "rms_error";
+                } else if (!agrees((double)error_in_place.max_abs_error,
+                                   (double)error_copied.max_abs_error, 1e-6)) {
+                    disagreement = "max_abs_error";
+                } else if (!agrees(error_in_place.original_rms,
+                                   error_copied.original_rms, 1e-12)) {
+                    disagreement = "original_rms";
+                } else if (error_in_place.clipped != error_copied.clipped) {
+                    disagreement = "clipped";
+                } else if (error_in_place.levels_used != error_copied.levels_used) {
+                    disagreement = "levels_used";
+                }
+                if (disagreement) {
+                    /* Name the field, and print the doubles at %.17g. A CI log
+                     * of this failure carrying only a %.9g rms left it unclear
+                     * whether the rms differed at all or whether a count did,
+                     * because %.9g rounds two values a bit apart onto different
+                     * digits. A failure is worth nothing that cannot be read. */
                     fprintf(stderr,
-                            "  %s %d-bit %zux%zu: in-place rms %.9g vs copied %.9g\n",
+                            "  %s %d-bit %zux%zu: %s differs | rms %.17g vs %.17g"
+                            " | max %.9g vs %.9g | clipped %zu vs %zu"
+                            " | levels %zu vs %zu\n",
                             quant_granularity_name(granularities[g]), bits,
-                            rows, cols, error_in_place.rms_error,
-                            error_copied.rms_error);
+                            rows, cols, disagreement,
+                            error_in_place.rms_error, error_copied.rms_error,
+                            (double)error_in_place.max_abs_error,
+                            (double)error_copied.max_abs_error,
+                            error_in_place.clipped, error_copied.clipped,
+                            error_in_place.levels_used, error_copied.levels_used);
                     fail("in-place error statistics disagree with the copied form");
                 }
 
