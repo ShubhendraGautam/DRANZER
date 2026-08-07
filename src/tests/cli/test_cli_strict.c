@@ -28,6 +28,12 @@ int main(void) {
         "--stop", "4", "--stop", "5", "--stop", "6",
         "--stop", "7", "--stop", "8", "--stop", "9",
     };
+    /* --train-stride accepts 0 (meaning "a whole window") where every other
+     * size option has a minimum of 1, so both halves of that are pinned:
+     * 0 parses, a non-numeric value does not. */
+    char *bad_stride[] = {"app", "train", "--train-stride", "4x"};
+    char *zero_stride[] = {"app", "train", "--train-stride", "0"};
+    char *explicit_stride[] = {"app", "train", "--train-stride", "3"};
     char *valid[] = {"app", "train", "--batch-size", "4",
                      "--gradient-accumulation", "3", "--shuffle",
                      "--checkpoint-interval", "0", "--dropout", "0.2"};
@@ -46,6 +52,11 @@ int main(void) {
                  !must_reject(4, bad_penalty) || !must_reject(4, empty_stop) ||
                  !must_reject(4, misplaced_stop) ||
                  !must_reject(20, too_many_stops) ||
+                 !must_reject(4, bad_stride) ||
+                 cli_parse(4, zero_stride, &parsed) != 0 ||
+                 parsed.train_stride != 0 ||
+                 cli_parse(4, explicit_stride, &parsed) != 0 ||
+                 parsed.train_stride != 3 ||
                  cli_parse(11, valid, &parsed) != 0 || parsed.batch_size != 4 ||
                  parsed.gradient_accumulation_steps != 3 || !parsed.shuffle ||
                  parsed.checkpoint_interval != 0 || parsed.dropout_rate != 0.2f ||

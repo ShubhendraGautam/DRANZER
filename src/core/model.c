@@ -298,11 +298,24 @@ model_errors_t model_new(neural_model_t *model,
     model->ws_d_ffn_dropout = malloc(seq_emb * sizeof(float));
     model->ws_logits = malloc(vocab_size * sizeof(float));
     model->ws_grad_logits = malloc(vocab_size * sizeof(float));
+    /* All-position head (core/lm_head.c). max_seq_len rows of vocab_size,
+     * so this is checked for overflow rather than trusting the product:
+     * both factors are caller-supplied and their product is the largest
+     * allocation the model makes at a wide vocabulary. */
+    if (max_seq_len > SIZE_MAX / vocab_size ||
+        max_seq_len * vocab_size > SIZE_MAX / sizeof(float)) {
+        model_free(model);
+        return MODEL_INVALID_INPUT;
+    }
+    size_t logits_all = max_seq_len * vocab_size;
+    model->ws_logits_all = malloc(logits_all * sizeof(float));
+    model->ws_grad_logits_all = malloc(logits_all * sizeof(float));
 
     if (!model->ws_fwd_attn_raw || !model->ws_fwd_ff_raw || !model->ws_dhidden_in || !model->ws_dhidden_out ||
         !model->ws_d_s2 || !model->ws_d_x1_total || !model->ws_d_s1 || !model->ws_d_ff_hidden ||
         !model->ws_d_attn_concat || !model->ws_d_scores || !model->ws_d_Q || !model->ws_d_K || !model->ws_d_V ||
-        !model->ws_d_attn_dropout || !model->ws_d_ffn_dropout || !model->ws_logits || !model->ws_grad_logits) {
+        !model->ws_d_attn_dropout || !model->ws_d_ffn_dropout || !model->ws_logits || !model->ws_grad_logits ||
+        !model->ws_logits_all || !model->ws_grad_logits_all) {
         model_free(model);
         return MODEL_ALLOCATION_FAILURE;
     }
@@ -397,6 +410,8 @@ void model_free(neural_model_t *model) {
     free(model->ws_d_ffn_dropout);
     free(model->ws_logits);
     free(model->ws_grad_logits);
+    free(model->ws_logits_all);
+    free(model->ws_grad_logits_all);
 
     free(model->metrics.loss_history);
 

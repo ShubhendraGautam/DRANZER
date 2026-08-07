@@ -297,6 +297,95 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
 
 ### Later runtime goals
 
+- [x] **Supervise every sequence position, not just the last** (`core/lm_head.{c,h}`,
+  `core/matmul_dispatch.{c,h}`, `core/training.c`, `core/transformer.c`, `cli/batch.c`,
+  `cli/main.c`).
+
+  The output head read `cache_hidden[num_layers][seq_len-1]` and the loss had one target, so a
+  forward+backward over a length-T window produced exactly **one** gradient signal. Every other
+  position's hidden state was computed in full — all of attention, all of the FFN — and discarded.
+  The causal mask already guarantees position `i`'s final hidden state depends only on tokens
+  `0..i`, which is precisely the condition that makes supervising every position valid, so the same
+  pass yields T signals for the cost of turning three m=1 matmuls into m=T.
+
+  **Per supervised token, best of 7 ABBA-interleaved rounds** (clang, -O3 -ffast-math, AVX-512,
+  serial): tiny 0.189 → 0.0084 ms (**22.6x**), small 7.023 → 0.116 ms (**60.5x**), medium 224.9 →
+  2.008 ms (**112.0x**). The ceiling is T by construction — 32, 64, 128 — so this reaches 71%, 95%,
+  and 88% of it. What it costs is 1.41x / 1.06x / 1.14x more time *per call*, which is the whole
+  reason the ratio lands near T: the head was always the cheap part of a pass that had already paid
+  for T positions of attention and FFN.
+
+  Read those against the rest of this section. Every kernel result above — the loop-order fix, the
+  backward AVX-512, the GPU backward dispatch — multiplies out to 3.58x on medium-tier training.
+  This is 112x on the same tier, and it came from deleting a `-1` from an index. It is not a faster
+  implementation of the same work; it is the removal of work that never needed doing, which is a
+  different category and should not be quoted alongside the kernel ratios as though it competed
+  with them.
+
+  The tiny tier's rounds spread 0.268–0.450 ms against a 0.189–0.218 ms baseline, so its 22.6x is
+  the least trustworthy of the three and is reported as the noisiest rather than the smallest.
+
+  Correctness rests on one claim and `tests/core/test_all_position_loss.c` tests exactly it: one
+  all-position pass over a length-T window must equal the **mean of T single-target passes** over
+  windows of length 1..T, since each of those can only see tokens up to its own target. It does,
+  worst relative 5.4e-5 on entries near 2e-4 (absolute ~1e-8). A leak of future context would
+  diverge here and nowhere else in that file, which is why the other three cases are described in
+  it as localizing a failure rather than establishing correctness.
+
+  One methodology note, because it invalidated a reading before being caught. The comparison first
+  used a bare relative difference with a 1e-3 floor and reported a 4.9e-5 "failure" on an entry
+  whose true values were -4.9e-8 and exactly 0.0 — noise divided by nothing, on a gradient that was
+  correct. The criterion is now `|a-b| <= ATOL + RTOL*max(|a|,|b|)` with both terms load-bearing
+  over different parts of the range, and the test prints both so a real failure says which kind it
+  is.
+
+  Separately, `-MMD -MP` header dependency tracking was added to `src/Makefile`. It was missing, so
+  adding a field to `neural_model_t` rebuilt `core/model.o` and nothing else: `core/bundle.o` and
+  all of `cli/` kept the old struct layout and the binary aborted in `free()` at the end of an eval
+  run, with both translation units individually correct and merely disagreeing about
+  `sizeof(neural_model_t)`. Any future header change was exposed to the same failure.
+
+  **The CLI loop advances by a whole window now**, behind `--train-stride` (0 = full window). It
+  slid by one token per target before, because with only the last position supervised that was the
+  only way to reach every target; the same stride under all-position supervision would present
+  every target T times per epoch and throw the win away. Stride 0/2/1 at `--train-window 4` gives
+  34/68/135 optimizer steps on the same corpus — linear in the stride, with stride 1 recovering the
+  old per-target example count of 136 and confirming the two schemes cover the same targets.
+
+  **End to end, one epoch over a 20 KB corpus at `--train-window 32`** (embedding 64, 2 layers,
+  ABBA-interleaved, three rounds each): 11044 passes at stride 1 against 346 at stride 32, best of
+  42.41 s against 3.64 s. That is 11.7x wall clock against a 31.9x reduction in passes, and the gap
+  is not a shortfall in the change — solving the two points for a fixed cost gives 3.63 ms per pass
+  and **2.38 s of tokenizer/IO/validation that neither stride can avoid**, which is 65% of the
+  3.64 s run. The training portion scales at the full 31.9x and the end-to-end figure approaches it
+  as the corpus grows.
+
+  That number is reported with a caveat this project's methodology demands: the stride-1 rounds
+  ranged 42.4–88.4 s, a 2x session spread on a contended machine. The direction is far outside that
+  noise and the pass-count ratio is exact, but 11.7x should not be quoted to two significant
+  figures.
+
+  Two contracts moved and both are enforced rather than documented-and-hoped. `CHECKPOINT_VERSION`
+  went to 3, because an example is now a window and the resume cursor counts windows where a
+  version-2 cursor counted targets — reinterpreting one in the other's unit would resume at the
+  wrong place silently, so version-2 files are rejected outright. `--train-stride` joined the
+  exact-resume rejection list beside `--train-window`. The model bundle format was deliberately
+  **not** touched: nothing about loading a model depends on the stride it was trained with, and the
+  manifest and checkpoint both carry it.
+
+  Users should expect step counts to change for the same corpus and `--epochs` — roughly
+  `train_window / train_stride` times fewer — which `docs/usage.md` states, along with the
+  consequence for `--total-steps` schedules. The integration test's expected total moved 34 -> 10
+  for the same reason and its derivation is written into the assertion rather than left as a bare
+  constant.
+
+  Not measured: whether overlapping windows buy any held-out quality. The first position of a
+  non-overlapping window has one token of context, and a smaller stride fixes that at proportional
+  cost. The flag exists so the comparison is possible; making it is a v0.5 experiment and must be
+  run against the seed-variance floor, which at these model sizes may well swamp it.
+
+  GCC, Clang, GCC+OpenMP, ASan, size-optimized, `-Wpedantic -std=c11`, and both CLI integration
+  checks pass; exact resume remains byte-identical.
 - [x] Dispatch the backward-pass matmuls to the **GPU** (`backends/gpu/gpu_matmul.c`,
   `core/training.c`). Two hand-written PTX kernels join the forward one in a single module, with
   accumulate-into-destination semantics matching the CPU contract. Because a backward call moves

@@ -13,6 +13,7 @@ typedef struct {
     uint64_t input_fingerprint;
     uint64_t input_bytes;
     size_t train_window;
+    size_t train_stride;        /* resolved: never 0 here, always the effective value */
     unsigned int seed;
     int batch_size;
     int gradient_accumulation_steps;

@@ -11,11 +11,16 @@
 
 typedef struct {
     uint32_t **token_sequences;  // Array of token ID sequences
-    uint32_t *target_tokens;     // Target tokens for each sequence
+    /* Per-POSITION targets, parallel to token_sequences: for example i,
+     * target_sequences[i][p] is the token that should follow position p.
+     * This was a single uint32_t per example while only the last position
+     * of a window was supervised; every position is now (core/lm_head.h),
+     * so a window of length L carries L targets. */
+    uint32_t **target_sequences;
     size_t *sequence_lengths;    // Length of each sequence
     size_t batch_size;           // Number of sequences in batch
     size_t current_idx;          // Current position for iteration
-    size_t max_seq_len;          // Capacity of each token sequence
+    size_t max_seq_len;          // Capacity of each token/target sequence
 } batch_t;
 
 /**
@@ -31,10 +36,13 @@ batch_t *batch_create(size_t batch_size, size_t max_seq_len);
  * @param batch: Batch to add to
  * @param tokens: Token IDs to add
  * @param seq_len: Length of sequence
- * @param target_token: Target/label token
+ * @param targets: seq_len targets, one per position - targets[p] is the
+ *   token that should follow tokens[p]. Entries may be
+ *   LM_HEAD_IGNORE_TARGET to leave a position unsupervised.
  * @return 0 on success, -1 if batch full
  */
-int batch_add_sequence(batch_t *batch, uint32_t *tokens, size_t seq_len, uint32_t target_token);
+int batch_add_sequence(batch_t *batch, const uint32_t *tokens, size_t seq_len,
+                       const uint32_t *targets);
 
 /**
  * Check if batch is full

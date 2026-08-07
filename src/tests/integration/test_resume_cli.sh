@@ -58,9 +58,21 @@ test -f model.pth.tokenizer
 test "$model_hash" = "$(sha256sum model.pth | awk '{print $1}')"
 test "$checkpoint_hash" = "$(sha256sum "$final_checkpoint" | awk '{print $1}')"
 cmp -s uninterrupted-final.ckpt "$final_checkpoint"
+# 24 is the resume cursor: 3 completed optimizer steps x (--batch-size 4 x
+# --gradient-accumulation 2) = 24 examples replayed. It is unchanged by
+# all-position supervision only because it counts examples, and an example
+# is still one submission - but an example is now a whole window rather than
+# a single target, which is why CHECKPOINT_VERSION was bumped to 3 rather
+# than letting a version-2 cursor be reinterpreted in the new unit.
 grep -Eq "Resumed .* at epoch 1 after 24 predictions" resumed.log
 grep -q "Corpus tokens streamed:" resumed.log
-grep -q "Total optimizer steps: 34" resumed.log
+# 10, down from 34 before every position was supervised, and the drop is the
+# stride: --train-window 4 with the default full-window stride turns ~136
+# per-target examples per epoch into ~34 window examples. At 8 examples per
+# optimizer step that is 4 full steps plus the epoch-end commit of the
+# remainder, so 5 per epoch over 2 epochs. The old 34 was 136/8 = 17 per
+# epoch. Same corpus, same tokens supervised, a quarter of the steps.
+grep -q "Total optimizer steps: 10" resumed.log
 
 # `latest` resolves the terminal checkpoint and is a valid no-op resume. It
 # still restores the tokenizer sidecar and validation provenance.

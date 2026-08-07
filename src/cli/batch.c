@@ -31,37 +31,35 @@ batch_t *batch_create(size_t batch_size, size_t max_seq_len) {
     batch->current_idx = 0;
     batch->max_seq_len = max_seq_len;
     
-    /* Pre-allocate storage for sequences */
-    batch->token_sequences = malloc(batch_size * sizeof(uint32_t *));
-    batch->target_tokens = malloc(batch_size * sizeof(uint32_t));
+    /* Pre-allocate storage for sequences. target_sequences mirrors
+     * token_sequences one-for-one: every position now carries its own
+     * target, where a single target_tokens[i] used to serve the whole
+     * window (see batch.h). */
+    batch->token_sequences = calloc(batch_size, sizeof(uint32_t *));
+    batch->target_sequences = calloc(batch_size, sizeof(uint32_t *));
     batch->sequence_lengths = malloc(batch_size * sizeof(size_t));
     
-    if (!batch->token_sequences || !batch->target_tokens || !batch->sequence_lengths) {
+    if (!batch->token_sequences || !batch->target_sequences || !batch->sequence_lengths) {
         free(batch->token_sequences);
-        free(batch->target_tokens);
+        free(batch->target_sequences);
         free(batch->sequence_lengths);
         free(batch);
         return NULL;
     }
     
-    /* Allocate individual sequences */
+    /* Allocate individual sequences. The calloc above means a partial
+     * failure here leaves every unallocated slot NULL, so batch_free can
+     * clean up the whole thing without tracking how far we got. */
     for (size_t i = 0; i < batch_size; i++) {
         batch->token_sequences[i] = malloc(max_seq_len * sizeof(uint32_t));
-        if (!batch->token_sequences[i]) {
-            /* Cleanup on partial failure */
-            for (size_t j = 0; j < i; j++) {
-                free(batch->token_sequences[j]);
-            }
-            free(batch->token_sequences);
-            free(batch->target_tokens);
-            free(batch->sequence_lengths);
-            free(batch);
+        batch->target_sequences[i] = malloc(max_seq_len * sizeof(uint32_t));
+        if (!batch->token_sequences[i] || !batch->target_sequences[i]) {
+            batch_free(batch);
             return NULL;
         }
     }
     
     /* Initialize */
-    memset(batch->target_tokens, 0, batch_size * sizeof(uint32_t));
     memset(batch->sequence_lengths, 0, batch_size * sizeof(size_t));
     
     DEBUG_PRINT("Batch created with size %zu, max_seq_len %zu\n", batch_size, max_seq_len);
@@ -70,8 +68,10 @@ batch_t *batch_create(size_t batch_size, size_t max_seq_len) {
 }
 
 /* Add sequence to batch */
-int batch_add_sequence(batch_t *batch, uint32_t *tokens, size_t seq_len, uint32_t target_token) {
-    if (!batch || !tokens || seq_len == 0 || seq_len > batch->max_seq_len) return -1;
+int batch_add_sequence(batch_t *batch, const uint32_t *tokens, size_t seq_len,
+                       const uint32_t *targets) {
+    if (!batch || !tokens || !targets || seq_len == 0 ||
+        seq_len > batch->max_seq_len) return -1;
     
     if (batch->current_idx >= batch->batch_size) {
         DEBUG_PRINT("Batch is full (current_idx=%zu, batch_size=%zu)\n", batch->current_idx, batch->batch_size);
@@ -79,8 +79,8 @@ int batch_add_sequence(batch_t *batch, uint32_t *tokens, size_t seq_len, uint32_
     }
     
     memcpy(batch->token_sequences[batch->current_idx], tokens, seq_len * sizeof(uint32_t));
+    memcpy(batch->target_sequences[batch->current_idx], targets, seq_len * sizeof(uint32_t));
     batch->sequence_lengths[batch->current_idx] = seq_len;
-    batch->target_tokens[batch->current_idx] = target_token;
     
     batch->current_idx++;
     
@@ -114,9 +114,9 @@ void batch_shuffle(batch_t *batch, uint64_t seed) {
         batch->token_sequences[i] = batch->token_sequences[j];
         batch->token_sequences[j] = tokens;
 
-        uint32_t target = batch->target_tokens[i];
-        batch->target_tokens[i] = batch->target_tokens[j];
-        batch->target_tokens[j] = target;
+        uint32_t *targets = batch->target_sequences[i];
+        batch->target_sequences[i] = batch->target_sequences[j];
+        batch->target_sequences[j] = targets;
 
         size_t length = batch->sequence_lengths[i];
         batch->sequence_lengths[i] = batch->sequence_lengths[j];
@@ -129,7 +129,6 @@ void batch_reset(batch_t *batch) {
     if (!batch) return;
     
     batch->current_idx = 0;
-    memset(batch->target_tokens, 0, batch->batch_size * sizeof(uint32_t));
     memset(batch->sequence_lengths, 0, batch->batch_size * sizeof(size_t));
 }
 
@@ -138,10 +137,11 @@ void batch_free(batch_t *batch) {
     if (!batch) return;
     
     for (size_t i = 0; i < batch->batch_size; i++) {
-        free(batch->token_sequences[i]);
+        if (batch->token_sequences) free(batch->token_sequences[i]);
+        if (batch->target_sequences) free(batch->target_sequences[i]);
     }
     free(batch->token_sequences);
-    free(batch->target_tokens);
+    free(batch->target_sequences);
     free(batch->sequence_lengths);
     free(batch);
 }

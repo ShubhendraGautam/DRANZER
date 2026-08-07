@@ -35,6 +35,7 @@ void cli_get_defaults(cli_args_t *out_args) {
     out_args->num_layers = 2;
     out_args->max_seq_len = 32;
     out_args->train_window = 16;
+    out_args->train_stride = 0;   /* 0 = advance by a whole window */
     out_args->eval_window = 0;
 
     /* Training defaults */
@@ -109,7 +110,11 @@ void cli_print_help(const char *program_name) {
     printf("  --num-heads N             Attention heads (default: 2)\n");
     printf("  --num-layers N            Stacked transformer layers (default: 2)\n");
     printf("  --max-seq-len N           Training workspace and retained KV window (default: 32)\n");
-    printf("  --train-window N          Sliding context window used during training; clamped to --max-seq-len (default: 16)\n\n");
+    printf("  --train-window N          Sliding context window used during training; clamped to --max-seq-len (default: 16)\n");
+    printf("  --train-stride N          Tokens the training window advances between examples; 0 = a whole window (default: 0).\n");
+    printf("                            Every position in a window is supervised, so a full-window stride covers each corpus\n");
+    printf("                            token exactly once per epoch. A smaller stride overlaps windows, giving early positions\n");
+    printf("                            more context at a proportional cost in compute.\n\n");
 
     printf("EVALUATION OPTIONS:\n");
     printf("  --input FILE              Explicit held-out corpus (required by eval mode)\n");
@@ -419,8 +424,12 @@ int cli_parse(int argc, char *argv[], cli_args_t *out_args) {
                    strcmp(arg, "--embedding-dim") == 0 ||
                    strcmp(arg, "--num-heads") == 0 || strcmp(arg, "--num-layers") == 0 ||
                    strcmp(arg, "--max-seq-len") == 0 ||
-                   strcmp(arg, "--train-window") == 0 || strcmp(arg, "--eval-window") == 0) {
-            size_t minimum = strcmp(arg, "--eval-window") == 0 ? 0 : 1;
+                   strcmp(arg, "--train-window") == 0 ||
+                   strcmp(arg, "--train-stride") == 0 ||
+                   strcmp(arg, "--eval-window") == 0) {
+            /* --train-stride accepts 0, meaning "the whole window". */
+            size_t minimum = (strcmp(arg, "--eval-window") == 0 ||
+                              strcmp(arg, "--train-stride") == 0) ? 0 : 1;
             if (strcmp(arg, "--vocab-size") == 0) minimum = 256;
             size_t parsed = 0;
             ok = option_value(argc, argv, &i, arg, &value) == 0 &&
@@ -431,6 +440,7 @@ int cli_parse(int argc, char *argv[], cli_args_t *out_args) {
             else if (ok && strcmp(arg, "--num-layers") == 0) out_args->num_layers = parsed;
             else if (ok && strcmp(arg, "--max-seq-len") == 0) out_args->max_seq_len = parsed;
             else if (ok && strcmp(arg, "--train-window") == 0) out_args->train_window = parsed;
+            else if (ok && strcmp(arg, "--train-stride") == 0) out_args->train_stride = parsed;
             else if (ok) out_args->eval_window = parsed;
         } else if (strcmp(arg, "--warmup-steps") == 0 ||
                    strcmp(arg, "--total-steps") == 0 || strcmp(arg, "--seed") == 0) {
@@ -495,9 +505,10 @@ void cli_print_args(const cli_args_t *args) {
             printf("  Model: %s\n", args->model_path);
             printf("  Tokenizer: %s\n", args->tokenizer_path[0] ? args->tokenizer_path : "<model>.tokenizer");
             printf("  Checkpoints: %s\n", args->checkpoint_dir);
-            printf("  Architecture: vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu train_window=%zu\n",
+            printf("  Architecture: vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu train_window=%zu train_stride=%zu\n",
                    args->vocab_size, args->embedding_dim, args->num_heads, args->num_layers,
-                   args->max_seq_len, args->train_window);
+                   args->max_seq_len, args->train_window,
+                   args->train_stride ? args->train_stride : args->train_window);
             printf("  Epochs: %d\n", args->epochs);
             printf("  Batch size: %d\n", args->batch_size);
             printf("  Gradient accumulation: %d minibatch(es) per optimizer step\n",

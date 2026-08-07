@@ -9,7 +9,17 @@ CC = clang
 # (e.g. "core/model.h", "backends/gpu/gpu_cuda.h") regardless of which
 # subdirectory the including .c file itself lives in - see include/'s
 # layout, which mirrors src/'s (core/, backends/gpu/, cli/, common/).
-CFLAGS = -I include/ -I ../libs/include/ -O3 -ffast-math
+#
+# -MMD -MP emits a .d file beside every .o listing the headers that object
+# actually included, and the -include at the bottom of this file feeds them
+# back to make. Without it make compares only .c timestamps, so editing a
+# header rebuilds nothing: adding a field to neural_model_t (model_types.h)
+# left core/model.o with the new struct layout and core/bundle.o and the
+# whole of cli/ with the old one, and the resulting binary aborted in
+# free() at the end of an eval run. Nothing was wrong with either
+# translation unit - they simply disagreed about sizeof(neural_model_t).
+# That failure mode costs more to diagnose than the depfiles cost to carry.
+CFLAGS = -I include/ -I ../libs/include/ -O3 -ffast-math -MMD -MP
 LDFLAGS = -lm
 
 # Tune for the exact CPU you're building on: make NATIVE=1
@@ -78,7 +88,7 @@ MAIN_SOURCE = cli/main.c
 # core/transformer.c's dispatch_matmul(). Needs -ldl.
 SRC = $(MAIN_SOURCE) \
       cli/tokenizer.c cli/evaluation.c cli/generation.c cli/attention.c cli/config.c cli/manifest.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
-      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
+      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
       backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 OBJ = $(SRC:.c=.o)
 
@@ -88,7 +98,7 @@ TARGET = app.out
 # model modules it actually needs, not cli/*.o. A separate binary on
 # purpose: it has nothing to do with training-run orchestration.
 BENCH_SRC = tools/bench.c tools/bench_matmul.c tools/bench_support.c \
-            core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/transformer.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
+            core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
             backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 BENCH_TARGET = bench.out
@@ -160,7 +170,7 @@ profile:
 BENCH_QUANT_SRC = tools/bench_quant.c tools/bench_support.c \
                   core/model.c core/model_params.c core/model_quantize.c core/quantize.c \
                   core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c \
-                  core/cpu_features.c core/tensor_ops.c core/transformer.c \
+                  core/cpu_features.c core/tensor_ops.c core/transformer.c core/matmul_dispatch.c core/lm_head.c \
                   core/optimizer.c core/training.c core/evaluation.c core/metrics.c \
                   backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_QUANT_OBJ = $(BENCH_QUANT_SRC:.c=.o)
@@ -248,7 +258,7 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # they compile and link on any Linux machine and simply report
 # "unavailable" if no NVIDIA driver is present - see
 # tests/gpu/test_gpu_matmul.c's self-skip. Needs -ldl.
-TEST_MODEL_OBJ = core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/transformer.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
+TEST_MODEL_OBJ = core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
 # tests/perf/ holds timing tests. They assert ratios between measurements
 # taken in the same process, never absolute times, so a slow or busy machine
@@ -281,8 +291,18 @@ test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
 	@bash tests/integration/test_eval_cli.sh ./$(TARGET)
 	@bash tests/integration/test_resume_cli.sh ./$(TARGET)
 
+# Every .d generated by -MMD, matching the .o list it was derived from.
+DEPS = $(OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(BENCH_PARALLEL_OBJ:.o=.d) \
+       $(BENCH_QUANT_OBJ:.o=.d) $(GPU_PROBE_OBJ:.o=.d) $(GPU_LATENCY_OBJ:.o=.d) \
+       $(TEST_MODEL_OBJ:.o=.d)
+
 clean:
 	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(TEST_BINS)
+	rm -f $(DEPS)
 	$(MAKE) -C $(LIB_DIR) clean
+
+# Header dependencies discovered by -MMD. The leading dash keeps a missing
+# .d (first build, or straight after clean) from being an error.
+-include $(DEPS)
 
 .PHONY: all clean bench bench-parallel bench-quant profile test gpu-probe gpu-latency arm-check

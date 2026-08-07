@@ -151,13 +151,37 @@ honest bounded streaming shuffle, not a global whole-corpus permutation.
 | `--num-heads N` | `2` | Attention heads per layer |
 | `--num-layers N` | `2` | Transformer block count |
 | `--max-seq-len N` | `32` | Retained training and ring-KV attention window |
-| `--train-window N` | `16` | Sliding training context, clamped to max sequence length |
+| `--train-window N` | `16` | Training context length, clamped to max sequence length |
+| `--train-stride N` | `0` | Tokens the window advances between examples; `0` means a whole window |
 | `--optimizer NAME` | `adam` | `adam` or `sgd` |
 | `--dropout RATE` | `0.0` | Sublayer-output dropout rate |
 | `--grad-clip NORM` | `1.0` | Global gradient norm limit; `0` disables it |
 | `--weight-decay W` | `0.01` | Decoupled AdamW weight decay |
 | `--warmup-steps N` | `0` | Linear learning-rate warmup length |
 | `--total-steps N` | `0` | Warmup/cosine horizon; `0` uses plateau decay |
+
+### Windows, stride, and what one training example is
+
+Every position in a training window is supervised: a window of `--train-window` tokens carries a
+target for each of its positions, so one forward and backward pass produces that many gradient
+signals rather than one. The causal mask makes this sound — position `i` cannot have seen token
+`i+1` — and `core/lm_head.h` explains the mechanics.
+
+`--train-stride` decides how far the window moves between examples, and the default of a whole
+window means non-overlapping: every corpus token is supervised exactly once per epoch. A smaller
+stride overlaps windows, so early positions get more preceding context — the first position of a
+non-overlapping window has exactly one token of it — at a proportional cost in compute and
+optimizer steps.
+
+On a 20 KB corpus at `--train-window 32`, stride 1 and stride 32 cover the same targets in 11044
+and 346 passes respectively. Whether the extra context buys any held-out quality is **unmeasured**
+at this project's model sizes and should be compared against the seed-variance floor before being
+believed; the flag exists so that comparison is possible rather than assumed.
+
+Expect step counts to differ from runs made before this change. The same corpus and the same
+`--epochs` now produce roughly `train_window / train_stride` times fewer optimizer steps, because
+an example is a window rather than a single target. Learning-rate schedules configured with
+`--total-steps` need rescaling to match.
 
 ## Evaluation
 

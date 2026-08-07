@@ -21,12 +21,39 @@ model_errors_t model_train_step(neural_model_t *model,
 
 /* Add one example's backward pass to model->grads without changing any
  * parameter, optimizer, scheduler, or metric state. Call
- * model_zero_gradients() once at the beginning of an accumulation cycle. */
+ * model_zero_gradients() once at the beginning of an accumulation cycle.
+ *
+ * Supervises the LAST position only: one forward pass, one target, one
+ * gradient signal. Prefer model_accumulate_gradients_all() below, which gets
+ * seq_len signals out of the same pass. This form is kept because it is what
+ * the gradient checks and the single-step tests are written against, and
+ * because it is the reference the all-position path is verified to agree
+ * with (tests/core/test_all_position_loss.c). */
 model_errors_t model_accumulate_gradients(neural_model_t *model,
                                           uint32_t *token_ids,
                                           uint32_t target_id,
                                           size_t seq_len,
                                           float *out_loss);
+
+/* Same, but supervising EVERY position: targets[i] is the token that should
+ * follow position i, and the loss is the mean cross-entropy over the
+ * positions that are not LM_HEAD_IGNORE_TARGET (see core/lm_head.h).
+ *
+ * The causal mask makes this valid without any change to the model - row i
+ * cannot have seen token i+1 - so this is the same forward pass yielding
+ * seq_len training signals instead of one. The per-layer backward is shared
+ * verbatim with the single-target form above; only the head differs.
+ *
+ * @param out_loss: mean loss over supervised positions; may be NULL.
+ * @param out_supervised: how many positions were counted; may be NULL. Zero
+ *   means no gradient was contributed at all.
+ */
+model_errors_t model_accumulate_gradients_all(neural_model_t *model,
+                                              uint32_t *token_ids,
+                                              const uint32_t *targets,
+                                              size_t seq_len,
+                                              float *out_loss,
+                                              size_t *out_supervised);
 
 /* Average the accumulated gradients over sample_count, perform one
  * optimizer update, and record average_loss as one optimizer-step metric. */

@@ -40,6 +40,21 @@ typedef struct {
     size_t num_layers;
     size_t max_seq_len;
     size_t train_window;   // sliding-window context length used during training; clamped to max_seq_len
+    /* How far the training window advances between examples. 0 means the
+     * whole window, i.e. non-overlapping: every corpus token is supervised
+     * exactly once per epoch, which is what all-position supervision
+     * (core/lm_head.h) makes the natural default.
+     *
+     * The loop used to advance by one token per target because only the
+     * last position of a window was supervised, so a stride of 1 was the
+     * only way to reach every target. Keeping the stride configurable makes
+     * the resulting trade measurable rather than assumed: a smaller stride
+     * gives early positions of each window more context (the first position
+     * of a non-overlapping window has exactly one token of it) at a
+     * proportional cost in compute. Whether that buys any held-out quality
+     * at this project's model sizes is unmeasured, and should be compared
+     * against the seed-variance floor before being believed. */
+    size_t train_stride;
     size_t eval_window;    // 0 = loaded model's max_seq_len
 
     /* Training hyperparameters */

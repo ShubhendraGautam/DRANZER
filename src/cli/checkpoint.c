@@ -11,7 +11,12 @@
 #define CHECKPOINT_MAGIC "DRNZCKP1"
 #define CHECKPOINT_END "DRNZEND1"
 #define CHECKPOINT_MAGIC_SIZE 8
-#define CHECKPOINT_VERSION UINT32_C(2)
+/* 3: added train_stride to the run scalars. Bumped rather than appended
+ * so a version-2 checkpoint is rejected outright instead of resuming with a
+ * garbage stride - it was written by a binary that supervised one position
+ * per window, so its step_in_epoch cursor counts targets where this one
+ * counts windows, and replaying it would silently train on the wrong data. */
+#define CHECKPOINT_VERSION UINT32_C(3)
 
 static int write_exact(FILE *file, const void *data, size_t size) {
     return fwrite(data, 1, size, file) == size;
@@ -67,8 +72,9 @@ static int write_checkpoint(FILE *file, const neural_model_t *model,
     uint32_t is_training = (uint32_t)model->is_training;
     uint32_t has_adam = model->adam_m && model->adam_v;
     uint64_t history_size = model->metrics.history_size;
-    uint64_t run_scalars[4] = {state->step_in_epoch, state->input_fingerprint,
-                               state->input_bytes, state->train_window};
+    uint64_t run_scalars[5] = {state->step_in_epoch, state->input_fingerprint,
+                               state->input_bytes, state->train_window,
+                               state->train_stride};
     int32_t run_ints[4] = {state->batch_size, state->checkpoint_interval,
                            state->keep_checkpoints, state->use_gpu};
     int32_t batching_ints[2] = {state->gradient_accumulation_steps, state->shuffle};
@@ -198,7 +204,7 @@ static int read_checkpoint(FILE *file, neural_model_t *model, bpe_encoder_t **ou
                            checkpoint_run_state_t *state) {
     char magic[CHECKPOINT_MAGIC_SIZE];
     uint32_t version = 0;
-    uint64_t run_scalars[4];
+    uint64_t run_scalars[5];
     int32_t run_ints[4];
     int32_t batching_ints[2];
     uint64_t dims[6];
@@ -225,6 +231,7 @@ static int read_checkpoint(FILE *file, neural_model_t *model, bpe_encoder_t **ou
     state->input_fingerprint = run_scalars[1];
     state->input_bytes = run_scalars[2];
     state->train_window = (size_t)run_scalars[3];
+    state->train_stride = (size_t)run_scalars[4];
     state->batch_size = run_ints[0];
     state->gradient_accumulation_steps = batching_ints[0];
     state->shuffle = batching_ints[1];

@@ -85,6 +85,7 @@ int run_manifest_write(const cli_args_t *args,
                      "num_layers = %zu\n"
                      "max_seq_len = %zu\n"
                      "train_window = %zu\n"
+                     "train_stride = %zu\n"
                      "epochs = %d\n"
                      "batch_size = %d\n"
                      "gradient_accumulation_steps = %d\n"
@@ -110,7 +111,8 @@ int run_manifest_write(const cli_args_t *args,
                      bpe_encoder_special_token_id(encoder, BPE_SPECIAL_EOS),
                      model->embedding_dim,
                      model->num_heads, model->num_layers, model->max_seq_len,
-                     run_state->train_window, args->epochs, args->batch_size,
+                     run_state->train_window, run_state->train_stride,
+                     args->epochs, args->batch_size,
                      args->gradient_accumulation_steps, effective_batch, args->shuffle,
                      model->optimizer_type == OPTIMIZER_SGD ? "sgd" : "adam",
                      model->metrics.initial_learning_rate, model->dropout_rate,

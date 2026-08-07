@@ -176,6 +176,20 @@ typedef struct {
     // Logits scratch, shared by training and inference.
     float *ws_logits, *ws_grad_logits;                   // vocab_size each
 
+    // All-position logits and their gradient, for the training head in
+    // core/lm_head.c: max_seq_len*vocab_size each, row-major by position.
+    // Separate from ws_logits above rather than an enlargement of it,
+    // because inference and generation pass ws_logits as a plain
+    // vocab_size buffer and must keep reading row 0.
+    //
+    // This is the largest workspace in the model at wide vocabularies -
+    // max_seq_len*vocab_size*4 bytes twice over - and unlike the cache_*
+    // arrays it is dead weight for an inference-only process. Sized eagerly
+    // anyway, on the same "allocate once in model_new, never per step"
+    // policy as everything else here; a lazy allocation is the obvious
+    // change if that ever costs more than it saves.
+    float *ws_logits_all, *ws_grad_logits_all;
+
 } neural_model_t;
 
 #endif // MODEL_TYPES_H

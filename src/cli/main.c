@@ -97,6 +97,12 @@ static int reject_resume_override(const cli_args_t *requested,
     REJECT_DIFFERENT("--num-layers", requested->num_layers != model->num_layers);
     REJECT_DIFFERENT("--max-seq-len", requested->max_seq_len != model->max_seq_len);
     REJECT_DIFFERENT("--train-window", requested->train_window != state->train_window);
+    /* state->train_stride is the resolved value (never 0), so compare the
+     * resolved request against it rather than the raw flag. */
+    REJECT_DIFFERENT("--train-stride",
+                     (requested->train_stride ? requested->train_stride
+                                              : requested->train_window) !=
+                         state->train_stride);
     REJECT_DIFFERENT("--batch-size", requested->batch_size != state->batch_size);
     REJECT_DIFFERENT("--gradient-accumulation",
                      requested->gradient_accumulation_steps !=
@@ -368,10 +374,18 @@ static int process_training_microbatch(neural_model_t *model,
 
     for (size_t i = 0; i < count; i++) {
         float loss = 0.0f;
-        if (model_accumulate_gradients(
+        /* Each example contributes the MEAN cross-entropy over its own
+         * supervised positions, and pending_samples counts examples, so the
+         * optimizer step averages a mean of means. Windows are equal-length
+         * except possibly the last one of an epoch, which is therefore
+         * weighted slightly above its token count. That is the same
+         * convention the per-example loss already used and it keeps one
+         * optimizer step comparable to another regardless of window length. */
+        if (model_accumulate_gradients_all(
                 model, accumulator->microbatch->token_sequences[i],
-                accumulator->microbatch->target_tokens[i],
-                accumulator->microbatch->sequence_lengths[i], &loss) != MODEL_SUCCESS) {
+                accumulator->microbatch->target_sequences[i],
+                accumulator->microbatch->sequence_lengths[i],
+                &loss, NULL) != MODEL_SUCCESS) {
             return -1;
         }
         accumulator->pending_loss += loss;
@@ -391,7 +405,8 @@ static int process_training_microbatch(neural_model_t *model,
 static int submit_training_prediction(neural_model_t *model,
                                       const bpe_encoder_t *encoder,
                                       training_accumulator_t *accumulator,
-                                      uint32_t *window, uint32_t target_token,
+                                      const uint32_t *window,
+                                      const uint32_t *targets,
                                       size_t window_len, uint32_t epoch_index,
                                       checkpoint_run_state_t *checkpoint_state,
                                       const cli_args_t *args) {
@@ -409,7 +424,7 @@ static int submit_training_prediction(neural_model_t *model,
      * inside a minibatch. */
     if (accumulator->replay_slots != 0) return -1;
     if (batch_add_sequence(accumulator->microbatch, window, window_len,
-                           target_token) != 0) return -1;
+                           targets) != 0) return -1;
     if (batch_is_full(accumulator->microbatch)) {
         return process_training_microbatch(model, encoder, accumulator,
                                            epoch_index, checkpoint_state, args);
@@ -417,27 +432,65 @@ static int submit_training_prediction(neural_model_t *model,
     return 0;
 }
 
+/* Walk the token stream in windows, submitting each as one training example
+ * with a target for every position.
+ *
+ * One example is now a whole window rather than a single target, so the unit
+ * the resume cursor counts changed with it: accumulator->prediction_cursor
+ * counts windows here where it counted targets before. CHECKPOINT_VERSION
+ * was bumped to 3 for exactly that reason - a version-2 cursor would resume
+ * at the wrong place, silently, and it is rejected instead.
+ *
+ * A window starting at token `start` spans up to train_window tokens and its
+ * targets are those same tokens shifted by one, so it must stop one short of
+ * the end of the stream: the position holding the final token has nothing to
+ * predict.
+ *
+ * allow_partial_window distinguishes the two reasons a window can come up
+ * short. Mid-file the stream is a chunk buffer, so a short window means the
+ * chunk boundary landed there and the rest of the tokens simply have not
+ * been read yet - emitting it would train on a truncation that is an
+ * artifact of the I/O size. At end of stream a short window is genuine and
+ * must be emitted or the corpus tail is never trained on. The caller passes
+ * 0 for the first case and 1 for the second.
+ *
+ * *out_next_start receives the offset of the first window NOT emitted, so
+ * the caller knows exactly how much of the buffer to retain.
+ */
 static int process_training_token_range(neural_model_t *model,
                                         const bpe_encoder_t *encoder,
                                         training_accumulator_t *accumulator,
                                         token_stream_t *stream,
-                                        size_t first_target,
+                                        size_t first_start,
                                         size_t train_window,
+                                        size_t train_stride,
+                                        int allow_partial_window,
+                                        size_t *out_next_start,
                                         uint32_t epoch_index,
                                         checkpoint_run_state_t *checkpoint_state,
                                         const cli_args_t *args) {
     size_t size = token_stream_get_size(stream);
-    if (first_target > size) return -1;
-    for (size_t target_index = first_target; target_index < size; target_index++) {
-        size_t window_len = target_index < train_window
-                                ? target_index : train_window;
-        if (window_len == 0) continue;
-        uint32_t *window = &stream->token_buffer[target_index - window_len];
+    if (train_window == 0 || train_stride == 0) return -1;
+
+    size_t start = first_start;
+    for (; start < size; start += train_stride) {
+        /* Tokens from `start` that have a successor to predict. */
+        size_t available = size - 1 - start;
+        if (start + 1 > size - 1) available = 0;
+        if (available == 0) break;
+
+        size_t window_len = available < train_window ? available : train_window;
+        if (!allow_partial_window && window_len < train_window) break;
+
+        const uint32_t *window = &stream->token_buffer[start];
+        const uint32_t *targets = &stream->token_buffer[start + 1];
+
         if (submit_training_prediction(
-                model, encoder, accumulator, window,
-                stream->token_buffer[target_index], window_len, epoch_index,
-                checkpoint_state, args) != 0) return -1;
+                model, encoder, accumulator, window, targets, window_len,
+                epoch_index, checkpoint_state, args) != 0) return -1;
     }
+
+    if (out_next_start) *out_next_start = start < size ? start : size;
     return 0;
 }
 
@@ -597,6 +650,7 @@ int mode_train(const cli_args_t *args) {
         effective_args.num_layers = model.num_layers;
         effective_args.max_seq_len = model.max_seq_len;
         effective_args.train_window = checkpoint_state.train_window;
+        effective_args.train_stride = checkpoint_state.train_stride;
         effective_args.batch_size = checkpoint_state.batch_size;
         effective_args.gradient_accumulation_steps =
             checkpoint_state.gradient_accumulation_steps;
@@ -720,6 +774,17 @@ int mode_train(const cli_args_t *args) {
                 train_window, args->max_seq_len, args->max_seq_len);
         train_window = args->max_seq_len;
     }
+
+    /* 0 means a whole window: non-overlapping, so every corpus token is
+     * supervised exactly once per epoch. A stride above the window would
+     * skip tokens entirely, which is never what anyone means. */
+    size_t train_stride = args->train_stride ? args->train_stride : train_window;
+    if (train_stride > train_window) {
+        fprintf(stderr, "Warning: --train-stride %zu > effective window %zu, clamping to %zu"
+                        " (a larger stride would skip corpus tokens)\n",
+                train_stride, train_window, train_window);
+        train_stride = train_window;
+    }
     batch_t *training_batch = batch_create((size_t)args->batch_size, train_window);
     if (!training_batch) {
         fprintf(stderr, "Error: Failed to allocate training minibatch\n");
@@ -760,6 +825,7 @@ int mode_train(const cli_args_t *args) {
         checkpoint_state.input_fingerprint = corpus_stats.fingerprint;
         checkpoint_state.input_bytes = corpus_stats.byte_count;
         checkpoint_state.train_window = train_window;
+        checkpoint_state.train_stride = train_stride;
         checkpoint_state.seed = args->seed;
         checkpoint_state.batch_size = args->batch_size;
         checkpoint_state.gradient_accumulation_steps = args->gradient_accumulation_steps;
@@ -895,9 +961,12 @@ int mode_train(const cli_args_t *args) {
                 /* Process batch when threshold reached */
                 if (token_stream_ready_to_flush(token_stream)) {
                     size_t stream_size = token_stream_get_size(token_stream);
+                    size_t next_start = next_target;
                     if (process_training_token_range(
                             &model, encoder, &accumulator, token_stream,
-                            next_target, train_window, (uint32_t)epoch,
+                            next_target, train_window, train_stride,
+                            0 /* mid-file: never emit a chunk-truncated window */,
+                            &next_start, (uint32_t)epoch,
                             &checkpoint_state, args) != 0) {
                         fprintf(stderr, "Error: Training or checkpoint step failed\n");
                         training_failed = 1;
@@ -914,13 +983,17 @@ int mode_train(const cli_args_t *args) {
                                stream_get_total_read(epoch_stream) / (1024.0f * 1024.0f));
                     }
                     
-                    /* Retain enough prefix to preserve context across file
-                     * chunks. Those retained tokens are context only; the
-                     * first newly appended token is the next target. */
-                    size_t retained = stream_size < train_window
-                                          ? stream_size : train_window;
+                    /* Keep everything from the first window that was not
+                     * emitted. Unlike the sliding-by-one loop this replaced,
+                     * no extra context prefix is retained: a window is
+                     * self-contained under all-position supervision, so the
+                     * tokens before next_start have been fully trained on and
+                     * are not context for anything still to come. The next
+                     * window therefore starts at offset 0 of the retained
+                     * buffer. */
+                    size_t retained = stream_size - next_start;
                     token_stream_retain_tail(token_stream, retained);
-                    next_target = retained;
+                    next_target = 0;
                 }
             }
             
@@ -942,7 +1015,9 @@ int mode_train(const cli_args_t *args) {
         if (!training_failed &&
             process_training_token_range(
                 &model, encoder, &accumulator, token_stream, next_target,
-                train_window, (uint32_t)epoch, &checkpoint_state, args) != 0) {
+                train_window, train_stride,
+                1 /* end of stream: a short window here is the real corpus tail */,
+                NULL, (uint32_t)epoch, &checkpoint_state, args) != 0) {
             fprintf(stderr, "Error: Training or checkpoint step failed\n");
             training_failed = 1;
         }
@@ -1085,6 +1160,11 @@ int mode_train(const cli_args_t *args) {
 
     /* ===== STEP 5: Model Persistence ===== */
     printf("[5] Saving versioned model bundle to %s\n", args->model_path);
+    /* train_stride is deliberately NOT recorded here. The bundle is a
+     * versioned artifact with compatibility fixtures, and adding a field
+     * means a format bump; nothing about loading a model depends on the
+     * stride it was trained with. The run manifest and the checkpoint both
+     * carry it, which is where this project keeps run provenance. */
     model_bundle_metadata_t bundle_metadata = {
         .train_window = train_window,
         .seed = args->seed,

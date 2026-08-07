@@ -47,11 +47,25 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
 void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_len,
                                    float *dL_dattn_raw, float *dL_dhidden_accum);
 
+/* Embeddings, positional encoding, and every transformer layer, leaving the
+ * final hidden states in model->cache_hidden[model->num_layers] as a
+ * [seq_len x embedding_dim] row-major block. Stops short of the output head
+ * so that callers can project either the last position (model_forward, for
+ * inference) or every position (core/lm_head.c, for training) from one pass.
+ * Populates the whole activation cache, which is what makes the backward
+ * pass possible without further allocation.
+ * @return MODEL_SUCCESS, or MODEL_INVALID_INPUT for a null model/tokens or a
+ *   seq_len of zero or above model->max_seq_len.
+ */
+model_errors_t model_forward_hidden(neural_model_t *model,
+                                    uint32_t *token_ids,
+                                    size_t seq_len);
+
 /* Forward pass through the full stack of transformer layers plus the
- * output head. Populates the activation cache as a side effect (needed by
- * model_train_step's backward pass) but this is harmless for standalone
- * inference use (infer/generate) - just some extra writes into memory
- * nothing else reads afterward.
+ * output head, projecting the LAST position only. Populates the activation
+ * cache as a side effect (needed by model_train_step's backward pass) but
+ * this is harmless for standalone inference use (infer/generate) - just some
+ * extra writes into memory nothing else reads afterward.
  * @param model: The neural model
  * @param token_ids: Input token IDs
  * @param seq_len: Length of sequence

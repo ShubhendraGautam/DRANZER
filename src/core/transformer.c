@@ -9,33 +9,16 @@
 #include "core/transformer.h"
 #include "core/parallel.h"
 #include "core/tensor_ops.h"
-#include "backends/gpu/gpu_matmul.h"
+#include "core/matmul_dispatch.h"
 #include "common/debug.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-/* Forward-pass matmul dispatch: GPU (hand-written PTX, gpu_matmul.c) when
- * model->use_gpu is set and a CUDA GPU is actually usable, CPU otherwise.
- * gpu_matmul_available() is checked at every call (not cached once) so a
- * model can be constructed and used identically regardless of whether the
- * machine has an NVIDIA GPU - the flag is simply a no-op without one.
- * Backward-pass matmuls (matmul_backward_input/matmul_backward_weight,
- * called directly from training.c) are CPU-only for now; see gpu_matmul.h
- * for why the forward-only, opt-in scope was chosen first (host<->device
- * transfer overhead needs to be measured against actual compute savings
- * at this project's model sizes before it's worth extending). */
-static void dispatch_matmul(neural_model_t *model, float *A, float *B, float *C,
-                             size_t m, size_t k, size_t n) {
-    if (model->use_scalar_matmul) {
-        matrix_multiply_scalar(A, B, C, m, k, n);
-        return;
-    }
-    if (model->use_gpu && gpu_matmul_available() && gpu_matmul(A, B, C, m, k, n) == 0) {
-        return;
-    }
-    matrix_multiply(A, B, C, m, k, n);
-}
+/* Forward-pass matmul dispatch (GPU when the model opts in and one is
+ * usable, CPU otherwise) moved to core/matmul_dispatch.c when core/lm_head.c
+ * became a third caller needing the same policy; call sites below use
+ * model_dispatch_matmul() directly. */
 
 /* One head of the forward pass, lifted out of the loop below so the loop body
  * is a single call and DRANZER_PARALLEL_FOR can guard it without duplicating
@@ -93,9 +76,9 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
     float *probs = model->cache_probs[l];
     float *concat = model->cache_attn_concat[l];
 
-    dispatch_matmul(model, sequence, layer->W_q, Q, seq_len, embedding_dim, embedding_dim);
-    dispatch_matmul(model, sequence, layer->W_k, K, seq_len, embedding_dim, embedding_dim);
-    dispatch_matmul(model, sequence, layer->W_v, V, seq_len, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, sequence, layer->W_q, Q, seq_len, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, sequence, layer->W_k, K, seq_len, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, sequence, layer->W_v, V, seq_len, embedding_dim, embedding_dim);
 
     memset(concat, 0, seq_len * embedding_dim * sizeof(float));
 
@@ -116,7 +99,7 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
                                Q, K, V, probs, concat);
     );
 
-    dispatch_matmul(model, concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
 }
 
 /* One head of the backward pass, lifted out for the same reason as
@@ -233,12 +216,11 @@ void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_le
     matmul_backward_input(dV, layer->W_v, dL_dhidden_accum, seq_len, embedding_dim, embedding_dim);
 }
 
-model_errors_t model_forward(neural_model_t *model,
-                              uint32_t *token_ids,
-                              size_t seq_len,
-                              float *output_logits) {
+model_errors_t model_forward_hidden(neural_model_t *model,
+                                    uint32_t *token_ids,
+                                    size_t seq_len) {
 
-    if (!model || !token_ids || !output_logits) {
+    if (!model || !token_ids) {
         return MODEL_INVALID_INPUT;
     }
 
@@ -285,14 +267,14 @@ model_errors_t model_forward(neural_model_t *model,
 
         /* FFN sub-block: matmul -> bias -> ReLU -> matmul -> bias -> dropout -> residual -> LN */
         float *x1 = model->cache_attn_ln_out[l];
-        dispatch_matmul(model, x1, layer->W_ff1, model->cache_ff_hidden[l], seq_len, embedding_dim, ffn_dim);
+        model_dispatch_matmul(model, x1, layer->W_ff1, model->cache_ff_hidden[l], seq_len, embedding_dim, ffn_dim);
         for (size_t i = 0; i < seq_len; i++) {
             for (size_t d = 0; d < ffn_dim; d++) {
                 float *v = &model->cache_ff_hidden[l][i * ffn_dim + d];
                 *v = relu(*v + layer->b_ff1[d]);
             }
         }
-        dispatch_matmul(model, model->cache_ff_hidden[l], layer->W_ff2, model->ws_fwd_ff_raw,
+        model_dispatch_matmul(model, model->cache_ff_hidden[l], layer->W_ff2, model->ws_fwd_ff_raw,
                        seq_len, ffn_dim, embedding_dim);
         for (size_t i = 0; i < seq_len; i++) {
             for (size_t d = 0; d < embedding_dim; d++) {
@@ -310,9 +292,34 @@ model_errors_t model_forward(neural_model_t *model,
                                    seq_len, embedding_dim, epsilon);
     }
 
-    /* 3. Output projection to vocabulary, from the last layer's last position */
+    return MODEL_SUCCESS;
+}
+
+model_errors_t model_forward(neural_model_t *model,
+                              uint32_t *token_ids,
+                              size_t seq_len,
+                              float *output_logits) {
+    if (!output_logits) {
+        return MODEL_INVALID_INPUT;
+    }
+
+    model_errors_t rc = model_forward_hidden(model, token_ids, seq_len);
+    if (rc != MODEL_SUCCESS) {
+        return rc;
+    }
+
+    /* Output projection to vocabulary, from the last layer's LAST position
+     * only. That is all inference ever needs: the causal mask means every
+     * earlier position's row predicts a token the caller already has.
+     *
+     * Training goes through lm_head.c instead, which projects every row -
+     * the same arithmetic, seq_len times over, for seq_len times the
+     * supervision out of this one forward pass. Keeping the m=1 path here
+     * matters: routing prefill through the all-positions head would multiply
+     * its output-projection cost by seq_len for logits nothing reads. */
+    size_t embedding_dim = model->embedding_dim;
     float *last_hidden = &model->cache_hidden[model->num_layers][(seq_len - 1) * embedding_dim];
-    dispatch_matmul(model, last_hidden, model->output_projection, output_logits, 1, embedding_dim, model->vocab_size);
+    model_dispatch_matmul(model, last_hidden, model->output_projection, output_logits, 1, embedding_dim, model->vocab_size);
 
     for (size_t i = 0; i < model->vocab_size; i++) {
         output_logits[i] += model->output_bias[i];
@@ -455,9 +462,9 @@ static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cac
 
     float *key = &cache->keys[layer_index][slot * embedding_dim];
     float *value = &cache->values[layer_index][slot * embedding_dim];
-    dispatch_matmul(model, cache->hidden, layer->W_q, cache->query, 1, embedding_dim, embedding_dim);
-    dispatch_matmul(model, cache->hidden, layer->W_k, key, 1, embedding_dim, embedding_dim);
-    dispatch_matmul(model, cache->hidden, layer->W_v, value, 1, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, cache->hidden, layer->W_q, cache->query, 1, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, cache->hidden, layer->W_k, key, 1, embedding_dim, embedding_dim);
+    model_dispatch_matmul(model, cache->hidden, layer->W_v, value, 1, embedding_dim, embedding_dim);
 
     memset(cache->attn_concat, 0, embedding_dim * sizeof(float));
 
@@ -474,7 +481,7 @@ static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cac
                                      embedding_dim, head_dim);
     );
 
-    dispatch_matmul(model, cache->attn_concat, layer->W_o, cache->attn_raw,
+    model_dispatch_matmul(model, cache->attn_concat, layer->W_o, cache->attn_raw,
                     1, embedding_dim, embedding_dim);
 }
 
@@ -532,12 +539,12 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
         layer_normalize(cache->attn_raw, cache->attn_norm, embedding_dim,
                         layer->ln_gamma_attn, layer->ln_beta_attn, epsilon);
 
-        dispatch_matmul(model, cache->attn_norm, layer->W_ff1, cache->ff_hidden,
+        model_dispatch_matmul(model, cache->attn_norm, layer->W_ff1, cache->ff_hidden,
                         1, embedding_dim, ffn_dim);
         for (size_t d = 0; d < ffn_dim; d++) {
             cache->ff_hidden[d] = relu(cache->ff_hidden[d] + layer->b_ff1[d]);
         }
-        dispatch_matmul(model, cache->ff_hidden, layer->W_ff2, cache->ff_raw,
+        model_dispatch_matmul(model, cache->ff_hidden, layer->W_ff2, cache->ff_raw,
                         1, ffn_dim, embedding_dim);
         for (size_t d = 0; d < embedding_dim; d++) {
             cache->ff_raw[d] += layer->b_ff2[d] + cache->attn_norm[d];
@@ -546,7 +553,7 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
                         layer->ln_gamma_ffn, layer->ln_beta_ffn, epsilon);
     }
 
-    dispatch_matmul(model, cache->hidden, model->output_projection, output_logits,
+    model_dispatch_matmul(model, cache->hidden, model->output_projection, output_logits,
                     1, embedding_dim, model->vocab_size);
     for (size_t i = 0; i < model->vocab_size; i++) {
         output_logits[i] += model->output_bias[i];

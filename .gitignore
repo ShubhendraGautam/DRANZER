@@ -2,6 +2,8 @@
 # src/ is split into core/, backends/{gpu,tpu}/, cli/, tools/ - **/*.o
 # catches object files at any depth under those, not just top-level.
 src/**/*.o
+# Header dependency files written beside each .o by the Makefile's -MMD -MP.
+src/**/*.d
 src/bench.out
 src/bench_profile.out
 src/gpu_probe.out
@@ -10,6 +12,7 @@ src/bench_parallel.out
 src/bench_quant.out
 src/app.out
 libs/src/*.o
+libs/src/*.d
 libs/libattention.a
 build/
 

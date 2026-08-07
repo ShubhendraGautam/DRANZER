@@ -9,6 +9,8 @@
 #include "core/transformer.h"
 #include "core/tensor_ops.h"
 #include "core/optimizer.h"
+#include "core/lm_head.h"
+#include "core/matmul_dispatch.h"
 #include "backends/gpu/gpu_matmul.h"
 #include "core/matmul.h"
 #include "common/debug.h"
@@ -16,135 +18,25 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Backward matmuls reach the GPU only above a measured size, unlike the
- * forward ones in transformer.c which go whenever `--gpu` is set.
- *
- * The asymmetry is structural, not a policy preference. A forward matmul
- * moves two buffers (activations up, result down) and its weight operand is
- * already device-resident. A backward matmul moves four: both inputs up, and
- * the destination both up and down, because these functions accumulate into
- * a gradient that earlier call sites in the same minibatch have already
- * written. Below a certain amount of arithmetic, those two extra transfers
- * cost more than the kernel saves, and the GPU path is a straight loss.
- *
- * The thresholds are the measured crossovers from `./gpu_latency.out` on this
- * project's MX450 test system (docs/gpu.md), rounded to a power of two. They
- * have now been re-derived twice, both times because the CPU got faster:
- *
- *   2^20 / 2^23   original, against a matmul_backward_weight() that strided
- *                 both operands in its innermost loop
- *   2^23 / 2^23   after that loop order was fixed (CPU 5.6-21.8x faster)
- *   2^25 / 2^26   after the backward kernels gained AVX-512 (CPU ~2-3x faster
- *                 again)
- *
- * The GPU never got worse. Each time, the baseline it is measured against got
- * better, and the range of shapes where a round trip pays shrank. That is the
- * standing caution for these constants and for every speedup ratio in this
- * project: a threshold measures two implementations, not one.
- *
- * Only the weight threshold is measured. backward_weight wins 1.62x and 1.32x
- * at the two largest shapes the benchmark issues (both 2^25 multiply-
- * accumulates) and loses at 2^23, so 2^25 sits on the far side of a crossover
- * that was actually observed. backward_input never won at any measured shape -
- * it reaches 0.95x at 2^25 and is still climbing - so its threshold is an
- * extrapolation of that trend, deliberately set beyond every shape this
- * project benchmarks. In practice that means backward_input runs on the CPU
- * for every model here, which is what the measurements support; the path stays
- * for larger models and faster cards, where it should be re-measured rather
- * than trusted.
- *
- * Below either threshold the CPU path is used, which is always correct and
- * never slower than not having the GPU at all. */
-#define GPU_BACKWARD_WEIGHT_MIN_WORK (1u << 25)
-#define GPU_BACKWARD_INPUT_MIN_WORK  (1u << 26)
+/* The backward matmul dispatch policy and its measured GPU thresholds moved
+ * to core/matmul_dispatch.{c,h} when core/lm_head.c became a second caller;
+ * call sites below use model_dispatch_backward_{input,weight}() directly. */
 
-/* True when this shape is worth the round trip. Guards the multiplication
- * against overflow rather than trusting model dimensions to stay small. */
-static int gpu_backward_worthwhile(size_t m, size_t k, size_t n, size_t min_work) {
-    if (m == 0 || k == 0 || n == 0) return 0;
-    if (k > SIZE_MAX / m) return 1; /* astronomically large: certainly worth it */
-    size_t mk = m * k;
-    if (n > SIZE_MAX / mk) return 1;
-    return mk * n >= min_work;
-}
-
-/* dA (m x k) += dC (m x n) @ B_transposed, on the GPU when that pays.
- * A failed GPU call is not an error: it falls through to the CPU, which is
- * what also happens when no GPU exists at all. */
-static void dispatch_backward_input(neural_model_t *model, float *dC, float *B,
-                                    float *dA, size_t m, size_t k, size_t n) {
-    if (model->use_gpu &&
-        gpu_backward_worthwhile(m, k, n, GPU_BACKWARD_INPUT_MIN_WORK) &&
-        gpu_matmul_available() &&
-        gpu_matmul_backward_input(dC, B, dA, m, k, n) == 0) {
-        return;
-    }
-    matmul_backward_input(dC, B, dA, m, k, n);
-}
-
-/* dB (k x n) += A_transposed @ dC (m x n), same contract. */
-static void dispatch_backward_weight(neural_model_t *model, float *A, float *dC,
-                                     float *dB, size_t m, size_t k, size_t n) {
-    if (model->use_gpu &&
-        gpu_backward_worthwhile(m, k, n, GPU_BACKWARD_WEIGHT_MIN_WORK) &&
-        gpu_matmul_available() &&
-        gpu_matmul_backward_weight(A, dC, dB, m, k, n) == 0) {
-        return;
-    }
-    matmul_backward_weight(A, dC, dB, m, k, n);
-}
-
-model_errors_t model_accumulate_gradients(neural_model_t *model,
-                                          uint32_t *token_ids,
-                                          uint32_t target_id,
-                                          size_t seq_len,
-                                          float *out_loss) {
-
-    if (!model || !token_ids || target_id >= model->vocab_size) {
-        return MODEL_INVALID_INPUT;
-    }
-    if (seq_len == 0 || seq_len > model->max_seq_len) {
-        return MODEL_INVALID_INPUT;
-    }
-
+/* Backprop from dL/d(final hidden), which the caller has already placed in
+ * model->ws_dhidden_in, down through every transformer layer and into the
+ * token embedding gradients.
+ *
+ * This is the whole per-layer backward pass and it is shared verbatim by
+ * both training entry points below. Only the head above it differs between
+ * them: one seeds ws_dhidden_in at the last position, the other at every
+ * position. Nothing in here inspects which - it is the same arithmetic on
+ * whatever gradient arrives, which is exactly why supervising every position
+ * needed no change to the layer stack. */
+static void backward_layer_stack(neural_model_t *model,
+                                 const uint32_t *token_ids,
+                                 size_t seq_len) {
     size_t embedding_dim = model->embedding_dim;
     size_t ffn_dim = embedding_dim * 4;
-
-    /* ---- Forward pass (populates the activation cache, including dropout masks) ---- */
-    model->is_training = 1;
-    float *logits = model->ws_logits;
-    model_forward(model, token_ids, seq_len, logits);
-
-    softmax(logits, model->vocab_size);
-    float loss = -logf(fmaxf(logits[target_id], 1e-7f));
-    model->current_loss = loss;
-
-    DEBUG_PRINT("Training step: loss=%.4f, target_id=%u\n", loss, target_id);
-
-    float *grad_logits = model->ws_grad_logits;
-    memcpy(grad_logits, logits, model->vocab_size * sizeof(float));
-    grad_logits[target_id] -= 1.0f; // Gradient for cross-entropy
-
-    /* ---- Backward pass ----
-     * Gradients are added to the existing flat buffer. The caller decides
-     * where a minibatch/accumulation cycle begins by zeroing once, then
-     * applies the averaged result with model_apply_accumulated_gradients(). */
-
-    float *last_hidden = &model->cache_hidden[model->num_layers][(seq_len - 1) * embedding_dim];
-
-    for (size_t i = 0; i < model->vocab_size; i++) {
-        model->output_bias_grad[i] += grad_logits[i];
-    }
-    dispatch_backward_weight(model, last_hidden, grad_logits, model->output_projection_grad,
-                            1, embedding_dim, model->vocab_size);
-
-    /* Only the LAST sequence position feeds the output head, so dL/dhidden
-     * is zero everywhere else - zero the whole buffer, then fill just the
-     * last row. */
-    memset(model->ws_dhidden_in, 0, seq_len * embedding_dim * sizeof(float));
-    dispatch_backward_input(model, grad_logits, model->output_projection,
-                           &model->ws_dhidden_in[(seq_len - 1) * embedding_dim],
-                           1, embedding_dim, model->vocab_size);
 
     for (size_t li = 0; li < model->num_layers; li++) {
         size_t l = model->num_layers - 1 - li;
@@ -170,11 +62,11 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
             for (size_t i = 0; i < seq_len; i++) sum += model->ws_d_ffn_dropout[i * embedding_dim + d];
             layer->b_ff2_grad[d] += sum;
         }
-        dispatch_backward_weight(model, model->cache_ff_hidden[l], model->ws_d_ffn_dropout, layer->W_ff2_grad,
+        model_dispatch_backward_weight(model, model->cache_ff_hidden[l], model->ws_d_ffn_dropout, layer->W_ff2_grad,
                                 seq_len, ffn_dim, embedding_dim);
 
         memset(model->ws_d_ff_hidden, 0, seq_len * ffn_dim * sizeof(float));
-        dispatch_backward_input(model, model->ws_d_ffn_dropout, layer->W_ff2, model->ws_d_ff_hidden,
+        model_dispatch_backward_input(model, model->ws_d_ffn_dropout, layer->W_ff2, model->ws_d_ff_hidden,
                                seq_len, ffn_dim, embedding_dim);
 
         /* ReLU backward, in place, using the cached post-ReLU activations as the indicator */
@@ -187,11 +79,11 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
             for (size_t i = 0; i < seq_len; i++) sum += model->ws_d_ff_hidden[i * ffn_dim + d];
             layer->b_ff1_grad[d] += sum;
         }
-        dispatch_backward_weight(model, model->cache_attn_ln_out[l], model->ws_d_ff_hidden, layer->W_ff1_grad,
+        model_dispatch_backward_weight(model, model->cache_attn_ln_out[l], model->ws_d_ff_hidden, layer->W_ff1_grad,
                                 seq_len, embedding_dim, ffn_dim);
 
         memset(model->ws_d_x1_total, 0, seq_len * embedding_dim * sizeof(float));
-        dispatch_backward_input(model, model->ws_d_ff_hidden, layer->W_ff1, model->ws_d_x1_total,
+        model_dispatch_backward_input(model, model->ws_d_ff_hidden, layer->W_ff1, model->ws_d_x1_total,
                                seq_len, embedding_dim, ffn_dim);
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {
             model->ws_d_x1_total[i] += model->ws_d_s2[i]; /* + residual branch (bypasses dropout) */
@@ -228,6 +120,103 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
             memcpy(model->ws_dhidden_in, model->ws_dhidden_out, seq_len * embedding_dim * sizeof(float));
         }
     }
+}
+
+model_errors_t model_accumulate_gradients_all(neural_model_t *model,
+                                              uint32_t *token_ids,
+                                              const uint32_t *targets,
+                                              size_t seq_len,
+                                              float *out_loss,
+                                              size_t *out_supervised) {
+    if (!model || !token_ids || !targets) return MODEL_INVALID_INPUT;
+    if (seq_len == 0 || seq_len > model->max_seq_len) return MODEL_INVALID_INPUT;
+
+    /* ---- Forward: layer stack, then the head over every position ---- */
+    model->is_training = 1;
+    model_errors_t rc = model_forward_hidden(model, token_ids, seq_len);
+    if (rc != MODEL_SUCCESS) return rc;
+
+    rc = lm_head_forward_all(model, seq_len);
+    if (rc != MODEL_SUCCESS) return rc;
+
+    float loss = 0.0f;
+    size_t supervised = 0;
+    rc = lm_head_loss_and_grad_all(model, targets, seq_len, &loss, &supervised);
+    if (rc != MODEL_SUCCESS) return rc;
+
+    model->current_loss = loss;
+    if (out_loss) *out_loss = loss;
+    if (out_supervised) *out_supervised = supervised;
+
+    if (supervised == 0) {
+        /* No supervised position: the gradient this window contributes is
+         * exactly zero, so running the backward would add nothing but would
+         * still cost a full pass. */
+        return MODEL_SUCCESS;
+    }
+
+    /* ---- Backward ---- */
+    rc = lm_head_backward_all(model, seq_len);
+    if (rc != MODEL_SUCCESS) return rc;
+
+    backward_layer_stack(model, token_ids, seq_len);
+
+    return MODEL_SUCCESS;
+}
+
+model_errors_t model_accumulate_gradients(neural_model_t *model,
+                                          uint32_t *token_ids,
+                                          uint32_t target_id,
+                                          size_t seq_len,
+                                          float *out_loss) {
+
+    if (!model || !token_ids || target_id >= model->vocab_size) {
+        return MODEL_INVALID_INPUT;
+    }
+    if (seq_len == 0 || seq_len > model->max_seq_len) {
+        return MODEL_INVALID_INPUT;
+    }
+
+    size_t embedding_dim = model->embedding_dim;
+
+    /* ---- Forward pass (populates the activation cache, including dropout masks) ---- */
+    model->is_training = 1;
+    float *logits = model->ws_logits;
+    model_forward(model, token_ids, seq_len, logits);
+
+    softmax(logits, model->vocab_size);
+    float loss = -logf(fmaxf(logits[target_id], 1e-7f));
+    model->current_loss = loss;
+
+    DEBUG_PRINT("Training step: loss=%.4f, target_id=%u\n", loss, target_id);
+
+    float *grad_logits = model->ws_grad_logits;
+    memcpy(grad_logits, logits, model->vocab_size * sizeof(float));
+    grad_logits[target_id] -= 1.0f; // Gradient for cross-entropy
+
+    /* ---- Backward pass ----
+     * Gradients are added to the existing flat buffer. The caller decides
+     * where a minibatch/accumulation cycle begins by zeroing once, then
+     * applies the averaged result with model_apply_accumulated_gradients(). */
+
+    float *last_hidden = &model->cache_hidden[model->num_layers][(seq_len - 1) * embedding_dim];
+
+    for (size_t i = 0; i < model->vocab_size; i++) {
+        model->output_bias_grad[i] += grad_logits[i];
+    }
+    model_dispatch_backward_weight(model, last_hidden, grad_logits, model->output_projection_grad,
+                            1, embedding_dim, model->vocab_size);
+
+    /* Only the LAST sequence position feeds the output head, so dL/dhidden
+     * is zero everywhere else - zero the whole buffer, then fill just the
+     * last row. This is what model_accumulate_gradients_all() above replaces:
+     * there, every row is filled, and the rest of the backward is identical. */
+    memset(model->ws_dhidden_in, 0, seq_len * embedding_dim * sizeof(float));
+    model_dispatch_backward_input(model, grad_logits, model->output_projection,
+                           &model->ws_dhidden_in[(seq_len - 1) * embedding_dim],
+                           1, embedding_dim, model->vocab_size);
+
+    backward_layer_stack(model, token_ids, seq_len);
 
     if (out_loss) *out_loss = loss;
     return MODEL_SUCCESS;
