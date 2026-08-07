@@ -88,7 +88,7 @@ MAIN_SOURCE = cli/main.c
 # core/transformer.c's dispatch_matmul(). Needs -ldl.
 SRC = $(MAIN_SOURCE) \
       cli/tokenizer.c cli/evaluation.c cli/generation.c cli/attention.c cli/config.c cli/manifest.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
-      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
+      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
       backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 OBJ = $(SRC:.c=.o)
 
@@ -98,7 +98,7 @@ TARGET = app.out
 # model modules it actually needs, not cli/*.o. A separate binary on
 # purpose: it has nothing to do with training-run orchestration.
 BENCH_SRC = tools/bench.c tools/bench_matmul.c tools/bench_support.c \
-            core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
+            core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
             backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 BENCH_TARGET = bench.out
@@ -170,7 +170,7 @@ profile:
 BENCH_QUANT_SRC = tools/bench_quant.c tools/bench_support.c \
                   core/model.c core/model_params.c core/model_quantize.c core/quantize.c \
                   core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c \
-                  core/cpu_features.c core/tensor_ops.c core/transformer.c core/matmul_dispatch.c core/lm_head.c \
+                  core/cpu_features.c core/tensor_ops.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c \
                   core/optimizer.c core/training.c core/evaluation.c core/metrics.c \
                   backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_QUANT_OBJ = $(BENCH_QUANT_SRC:.c=.o)
@@ -235,7 +235,7 @@ arm-check:
 	mkdir -p $(ARM_CHECK_STUB); \
 	printf '#ifndef STUB_STRING_H\n#define STUB_STRING_H\n#include <stddef.h>\nvoid *memset(void *s, int c, size_t n);\n#endif\n' > $(ARM_CHECK_STUB)/string.h; \
 	clang --target=aarch64-linux-gnu -nostdlibinc -I $(ARM_CHECK_STUB) -I include/ \
-		$(filter-out -march=native,$(CFLAGS)) -Wall -Wextra \
+		$(filter-out -march=native -MMD -MP,$(CFLAGS)) -Wall -Wextra \
 		-c core/matmul_arm.c -o /dev/null \
 	&& echo "arm-check: core/matmul_arm.c compiles for aarch64"; \
 	status=$$?; \
@@ -258,7 +258,7 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # they compile and link on any Linux machine and simply report
 # "unavailable" if no NVIDIA driver is present - see
 # tests/gpu/test_gpu_matmul.c's self-skip. Needs -ldl.
-TEST_MODEL_OBJ = core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
+TEST_MODEL_OBJ = core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/bf16.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
 # tests/perf/ holds timing tests. They assert ratios between measurements
 # taken in the same process, never absolute times, so a slow or busy machine

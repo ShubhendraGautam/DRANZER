@@ -292,8 +292,160 @@ void matmul_kernel_avx512_mr4(const float *restrict A, const float *restrict B,
  *
  * Both mirror the portable versions in core/matmul.c exactly - same loop
  * order, same blocking - with the innermost loop over j issued as vector
- * FMAs. See core/matmul_simd.h for why these are AVX-512 only.
+ * FMAs. Each has an AVX2 and an AVX-512 form; see core/matmul_simd.h.
  */
+
+/* Horizontal sum of eight lanes. AVX-512 has _mm512_reduce_add_ps for this;
+ * AVX2 does not, so the input kernel's per-lane accumulators are folded by
+ * hand. Halve to 128 bits, then two shuffle-add steps. */
+__attribute__((target("avx2,fma")))
+static inline float hsum256(__m256 v) {
+    __m128 lo = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    __m128 shuf = _mm_movehdup_ps(lo);
+    __m128 sums = _mm_add_ps(lo, shuf);
+    shuf = _mm_movehl_ps(shuf, sums);
+    return _mm_cvtss_f32(_mm_add_ss(sums, shuf));
+}
+
+/* dB rows [l, l+4) += A_transposed @ dC, over all of m. AVX2 form of
+ * bw_weight_block_avx512() below: same four-accumulator shape, eight columns
+ * per vector instead of sixteen, and a scalar tail because AVX2 has no
+ * mask-predicated load/store. */
+__attribute__((target("avx2,fma")))
+static void bw_weight_block_avx2(const float *restrict A, const float *restrict dC,
+                                 float *restrict dB, size_t m, size_t k, size_t n,
+                                 size_t l) {
+    float *out0 = &dB[l * n];
+    float *out1 = out0 + n;
+    float *out2 = out1 + n;
+    float *out3 = out2 + n;
+
+    for (size_t i = 0; i < m; i++) {
+        const float *row_dc = &dC[i * n];
+        const float *a = &A[i * k + l];
+        const __m256 a0 = _mm256_set1_ps(a[0]);
+        const __m256 a1 = _mm256_set1_ps(a[1]);
+        const __m256 a2 = _mm256_set1_ps(a[2]);
+        const __m256 a3 = _mm256_set1_ps(a[3]);
+
+        size_t j = 0;
+        for (; j + 8 <= n; j += 8) {
+            const __m256 d = _mm256_loadu_ps(row_dc + j);
+            _mm256_storeu_ps(out0 + j, _mm256_fmadd_ps(a0, d, _mm256_loadu_ps(out0 + j)));
+            _mm256_storeu_ps(out1 + j, _mm256_fmadd_ps(a1, d, _mm256_loadu_ps(out1 + j)));
+            _mm256_storeu_ps(out2 + j, _mm256_fmadd_ps(a2, d, _mm256_loadu_ps(out2 + j)));
+            _mm256_storeu_ps(out3 + j, _mm256_fmadd_ps(a3, d, _mm256_loadu_ps(out3 + j)));
+        }
+        for (; j < n; j++) {
+            const float d = row_dc[j];
+            out0[j] += a[0] * d;
+            out1[j] += a[1] * d;
+            out2[j] += a[2] * d;
+            out3[j] += a[3] * d;
+        }
+    }
+}
+
+/* One row of dB, for values of k that are not a multiple of four. */
+__attribute__((target("avx2,fma")))
+static void bw_weight_row_avx2(const float *restrict A, const float *restrict dC,
+                               float *restrict dB, size_t m, size_t k, size_t n,
+                               size_t l) {
+    float *row_out = &dB[l * n];
+    for (size_t i = 0; i < m; i++) {
+        const float scalar = A[i * k + l];
+        const __m256 a = _mm256_set1_ps(scalar);
+        const float *row_dc = &dC[i * n];
+        size_t j = 0;
+        for (; j + 8 <= n; j += 8) {
+            _mm256_storeu_ps(row_out + j,
+                _mm256_fmadd_ps(a, _mm256_loadu_ps(row_dc + j),
+                                _mm256_loadu_ps(row_out + j)));
+        }
+        for (; j < n; j++) row_out[j] += scalar * row_dc[j];
+    }
+}
+
+void matmul_backward_weight_avx2(const float *restrict A, const float *restrict dC,
+                                 float *restrict dB, size_t m, size_t k, size_t n) {
+    const size_t blocks = k / 4;
+
+    /* Same disjoint-rows-per-block argument as the AVX-512 form: no
+     * cross-thread reduction, so a forked result is bit-identical to serial. */
+    DRANZER_PARALLEL_FOR(blocks, m * k * n, b,
+        bw_weight_block_avx2(A, dC, dB, m, k, n, b * 4);
+    );
+    for (size_t l = blocks * 4; l < k; l++) {
+        bw_weight_row_avx2(A, dC, dB, m, k, n, l);
+    }
+}
+
+/* dA row i += dC row i @ B_transposed. AVX2 form of bw_input_row_avx512():
+ * four rows of B consumed at once so one load of dC feeds four independent
+ * chains, each folded across its lanes at the end. */
+__attribute__((target("avx2,fma")))
+static void bw_input_row_avx2(const float *restrict dC, const float *restrict B,
+                              float *restrict dA, size_t k, size_t n, size_t i) {
+    const float *row_dc = &dC[i * n];
+    float *out = &dA[i * k];
+    size_t l = 0;
+
+    for (; l + 4 <= k; l += 4) {
+        const float *b0 = &B[l * n];
+        const float *b1 = b0 + n;
+        const float *b2 = b1 + n;
+        const float *b3 = b2 + n;
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        __m256 acc2 = _mm256_setzero_ps();
+        __m256 acc3 = _mm256_setzero_ps();
+
+        size_t j = 0;
+        for (; j + 8 <= n; j += 8) {
+            const __m256 d = _mm256_loadu_ps(row_dc + j);
+            acc0 = _mm256_fmadd_ps(d, _mm256_loadu_ps(b0 + j), acc0);
+            acc1 = _mm256_fmadd_ps(d, _mm256_loadu_ps(b1 + j), acc1);
+            acc2 = _mm256_fmadd_ps(d, _mm256_loadu_ps(b2 + j), acc2);
+            acc3 = _mm256_fmadd_ps(d, _mm256_loadu_ps(b3 + j), acc3);
+        }
+
+        float s0 = hsum256(acc0), s1 = hsum256(acc1);
+        float s2 = hsum256(acc2), s3 = hsum256(acc3);
+        for (; j < n; j++) {
+            const float d = row_dc[j];
+            s0 += d * b0[j];
+            s1 += d * b1[j];
+            s2 += d * b2[j];
+            s3 += d * b3[j];
+        }
+
+        out[l]     += s0;
+        out[l + 1] += s1;
+        out[l + 2] += s2;
+        out[l + 3] += s3;
+    }
+
+    for (; l < k; l++) {
+        const float *b = &B[l * n];
+        __m256 acc = _mm256_setzero_ps();
+        size_t j = 0;
+        for (; j + 8 <= n; j += 8) {
+            acc = _mm256_fmadd_ps(_mm256_loadu_ps(row_dc + j),
+                                  _mm256_loadu_ps(b + j), acc);
+        }
+        float s = hsum256(acc);
+        for (; j < n; j++) s += row_dc[j] * b[j];
+        out[l] += s;
+    }
+}
+
+void matmul_backward_input_avx2(const float *restrict dC, const float *restrict B,
+                                float *restrict dA, size_t m, size_t k, size_t n) {
+    /* Parallel over i: each iteration owns a disjoint row of dA. */
+    DRANZER_PARALLEL_FOR(m, m * k * n, i,
+        bw_input_row_avx2(dC, B, dA, k, n, i);
+    );
+}
 
 /* dB rows [l, l+4) += A_transposed @ dC, over all of m.
  *

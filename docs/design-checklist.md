@@ -467,6 +467,43 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   cross-compiles it with clang, needs no AArch64 machine, and confirms it emits `fmla`.
 
   Documented in `docs/matmul.md`.
+- [x] **Give the backward matmuls an AVX2 rung** (`core/matmul_x86.c`, `core/matmul.c`,
+  `core/matmul_simd.h`) — found by CI, not by a sweep.
+
+  An AVX2-only hosted runner failed `test_perf_invariants.c`'s backward-versus-forward cost
+  invariant at 4.09x against a 3.00x limit. The invariant's message blames cache traversal; the
+  real cause was that `matmul_select()` ships `avx2_mr4` for the *forward* path, so a CPU with AVX2
+  and no AVX-512 ran a vectorized forward against a portable backward. The ratio was measuring a
+  missing kernel. Reproduced exactly on this AVX-512 machine with `DRANZER_CPU_ISA=avx2` (2.78x
+  here, 4.09x there — same structure, different microarchitecture), and confirmed identical on
+  unmodified HEAD, so it predates the all-position work above and is not a regression from it.
+
+  **The justification for AVX-512-only had been falsified and left in place.** It rested on two
+  claims: that `avx2_mr4` measured as a regression under Clang, and that the backward functions
+  have no `--kernel` selection so an AVX2 version would be unreachable code. The first was
+  overturned by the register-resident rewrite three entries above — the same change that promoted
+  `avx2_mr4` in `matmul_select()` wherever AVX-512 is absent. The second confused *unselectable by
+  flag* with *unreachable*: hardware selects these, and an AVX2-only CPU reaches an AVX2 version on
+  every call. The sentence survived unchanged for months, load-bearing and wrong, in
+  `core/matmul_simd.h` and `docs/matmul.md`.
+
+  Portable → AVX2, ABBA-interleaved, best of seven: `backward_input` 1.63–2.37x, `backward_weight`
+  1.15–1.89x. The weight kernel's two weakest rows are both output-head shapes where `k*n` is 64000
+  and 1024000, so the axpy walks a destination far past cache and is bandwidth-bound; the FFN
+  shapes land at the ~1.9x eight-wide FMA predicts. The invariant now reads **1.34x at AVX2**,
+  against 2.78x before and 2.27x at AVX-512 on the same machine.
+
+  `test_matmul_backward.c` checked only the widest rung, which is how these kernels could have
+  shipped unverified — on an AVX2-only machine it printed `PASSED (portable only)` and proved
+  nothing about the code running there. It now sweeps every available rung, capping *at* each level
+  so dispatch must land exactly on it. Writing that surfaced a second-order trap worth recording:
+  `cpu_features_clear_max_isa()` clears the `DRANZER_CPU_ISA` cap as well, so re-reading
+  availability after a clear reports the silicon rather than the simulation — the first version of
+  the fix quietly tested AVX-512 while claiming to test baseline. Availability is now sampled once,
+  before anything touches the cap.
+
+  Full suite passes at `DRANZER_CPU_ISA` of baseline, avx2, and uncapped, under both GCC and Clang,
+  plus both CLI integration checks. Documented in `docs/matmul.md`.
 - [ ] Measure `neon_mr4` on real AArch64 hardware and either promote it in `matmul_select()` or
   remove it. It is correctness-checked, now cross-compiled by `make arm-check`, and carries the same
   register-resident structure as the x86 kernels — but it has never been timed. Note that the reason
@@ -582,11 +619,65 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   a versioned bundle, with the existing checksum/shape/bounds validation extended to them, and
   measure artifact size against the accuracy cost part 1 established. A dequantize-on-load path
   keeps the runtime unchanged, so this goal is about the format alone.
-- [ ] **Weight-only quantization, part 3: whether it is actually faster.** Keep weights quantized in
-  memory and dequantize per tile inside the matmul kernels, so the saving is bandwidth rather than
-  disk. Measure against the fp32 kernels on the same shapes and the same reproducibility contract as
-  every other kernel change, and record the outcome even if the dequantization cost eats the
-  bandwidth win — which is the plausible result at this project's shapes and would be worth knowing.
+- [~] **Weight-only quantization, part 3: whether it is actually faster.** Kernel side answered for
+  **bf16** (`core/bf16.{c,h}`, `tests/core/test_bf16.c`); INT8/INT4 kernels and the storage path
+  are not built, so this stays open.
+
+  bf16 was taken first because it is the sharpest possible test of the question, not because it is
+  the most compressive. Its widening is a 16-bit left shift into the high half of a float — three
+  instructions per vector, no multiply, no per-tile scale, no zero-point — so every other narrow
+  format costs strictly more to unpack. **A loss here would have answered part 3 in the negative for
+  the whole weight-only family; a win only establishes the ceiling.**
+
+  **The stated prediction was wrong.** This item predicted the dequantization cost eating the
+  bandwidth win as "the plausible result at this project's shapes." It does not: bf16 wins on every
+  shape measured, in all three sessions, **geometric mean 1.21–1.24x**, worst single reading 1.06x
+  and best 1.46x. Portable, AVX2, and AVX-512 rungs all implemented and checked.
+
+  **But the mechanism is not the predicted one, and that matters more than the ratio.** The
+  hypothesis was cache capacity — halve the weights, they fit, the win appears as B outgrows L2/L3.
+  The measurements do not show that. The most reproducible wins are on the *smallest* matrices
+  (64 KB of weights, trivially L2-resident, reading 1.13x and 1.18x to three digits in three
+  consecutive sessions), while the largest (16 MB, far past this machine's 8 MB L3) reads only
+  1.11–1.20x. There is no monotonic trend against B's size at all. The win is load bandwidth at
+  every level of the hierarchy — half the bytes moved from L1 into a register — not weights newly
+  fitting in cache. That predicts it transfers to small models rather than only to large ones,
+  which is the opposite of what the cache-capacity story implies.
+
+  Accuracy measured separately, as `core/quantize.h` insists, over 60 seeds on a 3-layer 64-wide
+  model with the same policy the INT work used (projections and embeddings rounded, biases and
+  norms left alone — 98.9% of values):
+
+  | | bf16 | INT4 per-column (recorded above) |
+  |---|---:|---:|
+  | weight-space relative RMS | 0.001645 | 0.0907 |
+  | logit-space relative RMS movement | 0.003903 ± 0.000660 | 0.14–0.21 |
+  | top-1 flipped | 0.208% of windows | ~1% of windows |
+
+  So bf16 is roughly 55x more accurate than INT4 in weight space and 40x in logit space, for 2x
+  compression against 8x. Both are defensible; they are not competing for the same slot.
+
+  **One methodology failure, caught only because the numbers were absurd.** The first kernel tiled
+  (i, j) but ran the full k inside each block, where `run_blocked()` in `core/matmul_x86.c` tiles
+  (i, j, l). Measured against it, bf16 read 0.83x at 128×1024×1024 and **0.34x** at 128×2048×2048,
+  and the shape of that result was seductive — it looked exactly like "the widening cost dominates
+  once B leaves cache," which is the outcome this item predicted. It was "a two-level kernel loses
+  to a three-level one." The same version also dropped m<4 shapes to scalar and read 0.13x on a
+  decode head. Rewritten to mirror `run_blocked` instruction for instruction, those three shapes
+  read 1.36x, 1.23x, and 1.40x. **A benchmark must vary the format and nothing else, or it measures
+  the author** — and a wrong result that confirms the stated hypothesis is the one least likely to
+  be questioned.
+
+  A second, smaller one: the conversion test first checked infinity and NaN handling with
+  `isnan()` and `!= INFINITY`, and reported two failures against a correct conversion. This project
+  builds with `-ffast-math`, which implies `-ffinite-math-only`, so the compiler folds both away.
+  Those cases are now checked on bit patterns, which is immune and tests the contract more directly.
+
+  Still open before any of this reaches the model: weights are converted once by the caller here and
+  the kernel is not wired into `core/transformer.c`, there is no bf16 path in the bundle format
+  (part 2), and the backward pass is untouched — the win above is forward-only. INT8/INT4 kernels
+  remain unwritten, and the bound established here says they must beat 1.21–1.24x while unpacking
+  more expensively.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.
 - [x] Run the full benchmark nightly on hosted runners and gate on same-run performance invariants
   (`.github/workflows/performance.yml`, `src/tools/perf_check.py`): kernel versus scalar reference,

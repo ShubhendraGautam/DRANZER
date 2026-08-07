@@ -369,18 +369,27 @@ void matrix_multiply_scalar(const float *restrict A, const float *restrict B,
     kernel_scalar(A, B, C, m, k, n);
 }
 
-/* Both backward functions take the AVX-512 path where the CPU has it and the
- * portable one everywhere else. There is no kernel enum and no shape
- * threshold here, unlike matmul_select(): these have one vector
- * implementation, it beat the portable code on every measured shape, and a
- * caller has nothing to choose between. cpu_isa_available() is the only gate,
- * and it answers from cached CPUID state, so this costs a predictable branch
- * rather than a probe. */
+/* Both backward functions take the widest vector path the CPU has, and the
+ * portable one where it has none. There is no kernel enum and no shape
+ * threshold here, unlike matmul_select(): a caller has nothing to choose
+ * between, so cpu_isa_available() is the only gate, and it answers from
+ * cached CPUID state - a predictable branch rather than a probe.
+ *
+ * The AVX2 rung was added after an AVX2-only CI runner failed the
+ * backward-versus-forward cost invariant. Because matmul_select() ships
+ * avx2_mr4 for the forward path, a CPU with AVX2 and no AVX-512 previously
+ * ran a vectorized forward against a portable backward, and the ratio blew
+ * out to 4.09x. Widest-available keeps the two sides of that comparison on
+ * the same footing on every machine. See core/matmul_simd.h. */
 void matmul_backward_input(float *restrict dC, float *restrict B, float *restrict dA,
                             size_t m, size_t k, size_t n) {
 #ifdef DRANZER_HAVE_X86_SIMD
     if (cpu_isa_available(CPU_ISA_AVX512)) {
         matmul_backward_input_avx512(dC, B, dA, m, k, n);
+        return;
+    }
+    if (cpu_isa_available(CPU_ISA_AVX2)) {
+        matmul_backward_input_avx2(dC, B, dA, m, k, n);
         return;
     }
 #endif
@@ -424,6 +433,10 @@ void matmul_backward_weight(float *restrict A, float *restrict dC, float *restri
 #ifdef DRANZER_HAVE_X86_SIMD
     if (cpu_isa_available(CPU_ISA_AVX512)) {
         matmul_backward_weight_avx512(A, dC, dB, m, k, n);
+        return;
+    }
+    if (cpu_isa_available(CPU_ISA_AVX2)) {
+        matmul_backward_weight_avx2(A, dC, dB, m, k, n);
         return;
     }
 #endif

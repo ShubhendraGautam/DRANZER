@@ -20,6 +20,8 @@
 #include "core/model.h"
 #include "core/training.h"
 #include "core/lm_head.h"
+#include "core/cpu_features.h"
+#include "core/matmul.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -44,15 +46,24 @@
  * criterion catches it depends entirely on magnitude:
  *
  * At full magnitude the absolute error stays near the float epsilon of the
- * values themselves. Worst seen anywhere in this file is 3.0e-7 on a
- * gradient of 0.91 - a relative 3e-7, four orders inside RTOL.
+ * values themselves. Worst seen anywhere is 3.0e-7 on a gradient of 0.91 -
+ * a relative 3e-7, four orders inside RTOL.
  *
  * Near zero the relative view inflates. The worst relative figures printed
- * below - up to 5.4e-5, on entries around 2e-4 - correspond to absolute
- * differences of about 1e-8, and it is ATOL that admits them, not RTOL. The
- * extreme case is an entry that is mathematically exactly zero: a longer
- * reduction summing an unsupervised position's zeros lands on -4.9e-8 while
- * the shorter one that never sees them returns exact 0.0.
+ * below reach 1.3e-4 - past RTOL - on entries around 1.6e-4, which is an
+ * absolute difference of about 2e-8. ATOL admits those, not RTOL, and with
+ * roughly 50x of margin. The extreme case is an entry that is
+ * mathematically exactly zero: a longer reduction summing an unsupervised
+ * position's zeros lands on -4.9e-8 while the shorter one that never sees
+ * them returns exact 0.0.
+ *
+ * Those figures were swept over both compilers and every dispatched kernel
+ * (DRANZER_CPU_ISA=baseline/avx2/avx512), because the kernel decides how the
+ * reductions associate and the worst case is not on the widest one -
+ * avx2 produces the 1.3e-4 above while avx512 stays at 7.8e-5. A tolerance
+ * calibrated only on this machine's default kernel would be pinned to an
+ * instruction set rather than to the arithmetic, so the test reports the
+ * detected ISA below and any failure should be read against it first.
  *
  * A bare relative test therefore reports a ~5e-5 "failure" that is an
  * artifact of dividing noise by nothing - which is exactly what an earlier
@@ -390,7 +401,11 @@ static int test_no_supervised_positions(void) {
 }
 
 int main(void) {
-    printf("=== All-position supervision ===\n\n");
+    /* Which kernel ran decides how the reductions associate, so a
+     * tolerance failure is meaningless without it - see the note on RTOL. */
+    printf("=== All-position supervision ===\n");
+    printf("cpu: %s | kernel: %s\n\n",
+           cpu_features_summary(), matmul_kernel_name(matmul_select(SEQ_LEN, EMB, VOCAB)));
 
     int failed = 0;
     failed |= test_single_supervised_position_matches_old_path();

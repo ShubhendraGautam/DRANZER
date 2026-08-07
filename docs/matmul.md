@@ -458,10 +458,55 @@ same four-accumulator shape as `block_avx512` — while the input kernel is a re
 rows of `B` at once so one load of `dC` feeds four independent chains that are reduced across lanes
 at the end.
 
-**AVX-512 only, unlike the forward path**, and that asymmetry is the T11 result applied rather than
-ignored. `avx2_mr4` measured as a regression under Clang and `neon_mr4` was never measured; both
-still ship forward because `--kernel` can select them explicitly. The backward functions have no
-selection mechanism, so an AVX2 or NEON version would be code nothing could reach.
+They were **AVX-512 only** at first, and that asymmetry with the forward path was justified as the
+T11 result applied rather than ignored: `avx2_mr4` measured as a regression under Clang and
+`neon_mr4` was never measured; both still ship forward because `--kernel` can select them
+explicitly, while the backward functions have no selection mechanism, so an AVX2 version "would be
+code nothing could reach."
+
+**Both halves of that argument turned out to be wrong, and CI found it.** An AVX2-only hosted
+runner failed the backward-versus-forward cost invariant in `tests/perf/test_perf_invariants.c` at
+4.09x against its 3.00x limit. The invariant's own failure message blames cache traversal, which
+was the wrong diagnosis: `matmul_select()` ships `avx2_mr4` for the *forward* path, so on a CPU
+with AVX2 and no AVX-512 a vectorized forward was being compared against a backward that fell all
+the way back to portable C. The ratio was measuring a missing kernel, not a traversal.
+
+The first half of the argument had already been falsified and nobody noticed: the register-resident
+rewrite took `avx2_mr4` to 1.95x/2.02x and promoted it in `matmul_select()` wherever AVX-512 is
+absent, which is exactly the hardware in question. The second half confused *unselectable by flag*
+with *unreachable* — hardware selects these, and an AVX2-only CPU reaches an AVX2 version on every
+single call.
+
+Both backward functions now have an AVX2 rung, and dispatch takes the widest the CPU offers. The
+kernels are the AVX-512 ones at eight lanes instead of sixteen, with a scalar tail (AVX2 has no
+mask-predicated load/store) and a hand-written horizontal fold (no `_mm512_reduce_add_ps`).
+
+Portable against AVX2, ABBA-interleaved, best of seven rounds, `DRANZER_CPU_ISA` capped either
+side:
+
+| Shape (m×k×n) | `backward_input` | `backward_weight` |
+|---|---:|---:|
+| 1×64×1000 (head, single position) | 0.028 → 0.012 ms (2.37x) | 0.021 → 0.018 ms (1.15x) |
+| 128×256×4000 (head, all positions) | 59.15 → 36.21 ms (1.63x) | 38.84 → 32.82 ms (1.18x) |
+| 32×256×64 (prefill FFN down) | 0.171 → 0.088 ms (1.96x) | 0.122 → 0.070 ms (1.75x) |
+| 64×64×256 (prefill FFN up) | 0.335 → 0.164 ms (2.04x) | 0.277 → 0.149 ms (1.87x) |
+| 128×1024×256 (medium FFN) | 10.91 → 5.51 ms (1.98x) | 9.55 → 5.07 ms (1.89x) |
+
+The two output-head rows are the weakest at 1.15–1.18x on the weight kernel, and that is the
+expected shape: `k*n` is 64000 and 1024000 there, so the axpy is walking a destination far larger
+than cache and is bandwidth-bound rather than issue-bound. The FFN shapes, where the same kernel is
+reused across rows, land at the ~1.9x the eight-wide FMA predicts.
+
+The invariant that caught this now reads 1.34x at AVX2, against 2.78x before the kernels existed
+and 2.27x at AVX-512 on the same machine.
+
+NEON still has no backward kernel. That one remains genuinely unmeasured for want of AArch64
+hardware, which is a different situation from this one.
+
+The lesson worth keeping is not that AVX2 was left out — it is that **a justification can be
+falsified by later work and stay in the codebase as a comment.** The AVX2 regression finding was
+overturned in the very rewrite that promoted `avx2_mr4` forward, and the sentence explaining why
+the backward path did not need it survived unchanged for months, load-bearing and wrong.
 
 Measured with `./gpu_latency.out` in one session, `DRANZER_CPU_ISA=baseline` against uncapped:
 
@@ -482,16 +527,97 @@ Together with the loop-order fix, both measured the same controlled way, medium-
 improved **2.75x × 1.30x = 3.58x** in one sitting, entirely on the CPU.
 
 `test_matmul_backward.c` pins this. It reaches the portable path by capping detection to baseline,
-which is how a CPU without AVX-512 would behave, and then does something the obvious version of
-this test misses: it calls the AVX-512 entry point *directly* and requires the dispatched result to
-match it bit for bit. Comparing capped against uncapped alone would pass just as happily if the
-uncapped run had quietly used the portable code too. The test data is deliberately scaled by 1/7
-rather than a power of two for the same reason — an earlier version used 1/8, making every product
-and partial sum exactly representable, so both paths agreed to the bit and the comparison could not
-have detected a dispatch that never fired.
+which is how a CPU without any vector rung would behave, and then does something the obvious
+version of this test misses: it calls each rung's entry point *directly* and requires the
+dispatched result to match it bit for bit. Comparing capped against uncapped alone would pass just
+as happily if the uncapped run had quietly used the portable code too. The test data is
+deliberately scaled by 1/7 rather than a power of two for the same reason — an earlier version used
+1/8, making every product and partial sum exactly representable, so both paths agreed to the bit
+and the comparison could not have detected a dispatch that never fired.
+
+It checks **every rung the CPU offers, not just the widest**, and that gap is how the AVX2 kernels
+could have shipped unverified: the file knew only about AVX-512, so on an AVX2-only machine it
+printed `PASSED (portable only)` and proved nothing about the code actually running there. Each
+rung is now capped *at* its own level so dispatch must land exactly on it, and the shape sweep runs
+once per available rung. Availability is sampled once before anything touches the cap, because
+`cpu_features_clear_max_isa()` removes the `DRANZER_CPU_ISA` cap too — re-reading it afterwards
+reports what the silicon has rather than what the run is meant to simulate, which silently turned
+an intended AVX2 run back into an AVX-512 one while it was being written.
+
+## bf16 weight storage
+
+`core/bf16.c` adds `matmul_bf16_weight()`: the same matmul with **B stored as bfloat16** and
+widened to binary32 as it is loaded. Accumulation stays in binary32 — every product and partial
+sum is a full float — so the only difference from `matrix_multiply()` on the same data is that B's
+values carry 8 mantissa bits instead of 24. A narrower accumulator is a separate and far more
+dangerous change and is not made here.
+
+This exists to answer the checklist's weight-only-quantization part 3: is keeping weights narrow
+*in memory* and widening them per tile actually faster, or does the unpacking cost eat the
+bandwidth saving? bf16 is the sharpest form of that question. Widening is
+`_mm512_slli_epi32(_mm512_cvtepu16_epi32(load), 16)` — three instructions per vector, no multiply,
+no per-tile scale, no zero-point — so every other narrow format costs strictly more. A loss would
+have settled part 3 in the negative for the whole family; a win only sets the ceiling.
+
+Portable, AVX2, and AVX-512 rungs, dispatched by `cpu_isa_available()` widest-first, each mirroring
+`run_blocked()` and its block functions instruction for instruction.
+
+Against `matrix_multiply()` at the same tile, ABBA-interleaved, best of seven rounds, three
+sessions:
+
+| Shape (m×k×n) | B fp32 | speedup (3 sessions) |
+|---|---:|---:|
+| 1×64×1000 decode head | 250 KB | 1.41x, 1.42x, 1.46x |
+| 32×256×64 prefill FFN down | 64 KB | 1.13x, 1.13x, 1.13x |
+| 64×64×256 prefill FFN up | 64 KB | 1.18x, 1.18x, 1.18x |
+| 128×256×1024 medium FFN up | 1024 KB | 1.29x, 1.28x, 1.24x |
+| 128×1024×256 medium FFN down | 1024 KB | 1.20x, 1.23x, 1.20x |
+| 128×256×4000 all-position head | 4000 KB | 1.16x, 1.06x, 1.13x |
+| 128×1024×1024 large square | 4096 KB | 1.40x, 1.28x, 1.45x |
+| 128×2048×2048 past L3 | 16384 KB | 1.14x, 1.11x, 1.20x |
+
+Geometric mean 1.21–1.24x per session. Every shape wins in every session; worst single reading
+1.06x.
+
+**The mechanism is not the one the hypothesis named.** The prediction was cache capacity: halve the
+weights, they fit, the win appears as B outgrows L2 (1.3 MiB) and L3 (8 MiB). The table does not
+show that. The steadiest wins are the *smallest* matrices — 64 KB of weights, trivially L2-resident,
+reproducing 1.13x and 1.18x to three digits three times running — while the 16 MB shape, far past
+L3, is among the weakest at 1.11–1.20x. There is no monotonic trend against B's size. What is
+actually being saved is load bandwidth at every level of the hierarchy: half the bytes moved from
+L1 into a register. That predicts the win transfers to small models, not only to large ones, which
+is the opposite of what the cache story implies.
+
+Accuracy is measured separately, because `core/quantize.h` is right that a speedup and an accuracy
+loss arriving together cannot be attributed to each other. Over 60 seeds, projections and
+embeddings rounded (98.9% of values), biases and norms left alone: weight-space relative RMS
+**0.001645**, logit-space relative RMS movement **0.003903 ± 0.000660**, top-1 flipped on **0.208%**
+of windows. Against the INT4 per-column figures in `docs/quantization.md` — 0.0907, 0.14–0.21, ~1%
+— bf16 is roughly 55x more accurate in weight space and 40x in logit space, for 2x compression
+rather than 8x.
+
+### The measurement that nearly went the other way
+
+The first version of the kernel tiled `(i, j)` and ran the full `k` inside each block, where
+`run_blocked()` tiles `(i, j, l)`. Measured against it, bf16 read 0.83x at 128×1024×1024 and
+**0.34x** at 128×2048×2048.
+
+That result was seductive precisely because it confirmed the stated hypothesis: it looked exactly
+like "the widening cost dominates once B leaves cache," which is what the checklist predicted would
+happen. It was "a two-level kernel loses to a three-level one." The same version also fell to
+scalar code for `m < 4`, reading 0.13x on a decode head against a vectorized fp32 kernel.
+
+Rewritten to mirror `run_blocked` exactly, those three shapes read 1.36x, 1.23x, and 1.40x. **A
+benchmark must vary the one thing under test and nothing else, or it measures the author** — and a
+wrong number that agrees with the prediction is the one least likely to be re-examined. This is the
+same failure mode recorded for `avx512_mr4`, which shipped for months on 1.83x having never been
+compared against a better version of itself.
 
 ## Limitations
 
+- **bf16 is kernel-only so far.** `matmul_bf16_weight()` is not wired into `core/transformer.c`,
+  there is no bf16 path in the bundle format, and the backward pass is untouched — the numbers
+  above are forward-only, with B converted once by the caller.
 - **The NEON kernel is written but unmeasured.** No AArch64 machine was available. It is checked for
   correctness by the same equivalence test wherever it is built and cross-compiled by
   `make arm-check`, but `matmul_select()` does not return it — an AArch64 machine falls back to

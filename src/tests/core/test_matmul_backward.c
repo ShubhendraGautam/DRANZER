@@ -19,8 +19,14 @@
  *     of k that are not a multiple of four take a separate one-row path that
  *     is easy to leave unwritten.
  *
- * Reports honestly when there is no AVX-512 to compare against, rather than
- * passing silently on a machine where both paths are the same code.
+ * Every rung the dispatch can select is checked, not just the widest one.
+ * That gap is how an AVX2-only CI runner ended up running backward kernels
+ * nothing had verified: this file knew only about AVX-512, so on such a
+ * machine it printed "PASSED (portable only)" and proved nothing about the
+ * code that actually ran there.
+ *
+ * Reports honestly when a rung is absent, rather than passing silently on a
+ * machine where two paths are the same code.
  */
 
 #include "core/cpu_features.h"
@@ -80,7 +86,37 @@ static void accumulate_twice(float *dA, float *dB, const float *A, const float *
     }
 }
 
-static float check_shape(const shape_t *shape) {
+/* Direct entry points for one ISA rung, so dispatch can be checked against
+ * the exact code it should have selected. */
+typedef struct {
+    cpu_isa_t isa;
+    const char *name;
+    void (*bw_input)(const float *restrict, const float *restrict, float *restrict,
+                     size_t, size_t, size_t);
+    void (*bw_weight)(const float *restrict, const float *restrict, float *restrict,
+                      size_t, size_t, size_t);
+} rung_t;
+
+#ifdef DRANZER_HAVE_X86_SIMD
+static const rung_t rungs[] = {
+    { CPU_ISA_AVX512, "AVX-512", matmul_backward_input_avx512, matmul_backward_weight_avx512 },
+    { CPU_ISA_AVX2,   "AVX2",    matmul_backward_input_avx2,   matmul_backward_weight_avx2 },
+};
+#else
+static const rung_t rungs[1];
+#endif
+#define RUNG_COUNT (sizeof(rungs) / sizeof(rungs[0]))
+
+/* Sampled once, before anything touches the cap.
+ *
+ * cpu_features_clear_max_isa() removes *any* cap, including the one
+ * DRANZER_CPU_ISA set, so re-querying availability after a clear reports what
+ * the silicon has rather than what this run is meant to simulate. Reading it
+ * once up front is what makes DRANZER_CPU_ISA=avx2 on an AVX-512 machine
+ * actually test the AVX2 rung instead of quietly testing the wider one. */
+static int rung_usable[RUNG_COUNT];
+
+static float check_shape(const shape_t *shape, cpu_isa_t isa) {
     size_t m = shape->m, k = shape->k, n = shape->n;
     float *A = malloc(m * k * sizeof(float));
     float *B = malloc(k * n * sizeof(float));
@@ -107,8 +143,9 @@ static float check_shape(const shape_t *shape) {
     cpu_features_set_max_isa(CPU_ISA_BASELINE);
     accumulate_twice(ref_dA, ref_dB, A, B, dC, m, k, n);
 
-    cpu_features_clear_max_isa();
+    cpu_features_set_max_isa(isa);
     accumulate_twice(simd_dA, simd_dB, A, B, dC, m, k, n);
+    cpu_features_clear_max_isa();
 
     float magnitude = 0.0f;
     float d_input = max_abs_diff(ref_dA, simd_dA, m * k, &magnitude);
@@ -130,77 +167,100 @@ static float check_shape(const shape_t *shape) {
 
     float worst = d_input > d_weight ? d_input : d_weight;
     printf("  %-44s %zux%zux%zu  worst %.3g\n", shape->what, m, k, n, (double)worst);
+    (void)isa;
 
     free(A); free(B); free(dC);
     free(ref_dA); free(simd_dA); free(ref_dB); free(simd_dB);
     return worst;
 }
 
-/* Proves the vector code actually ran.
+/* Proves the vector code actually ran, for every rung the CPU offers.
  *
- * Everything above compares "capped to baseline" against "uncapped" and
- * requires them to agree. That comparison passes just as happily if the
- * uncapped path quietly ran the portable code too - a broken cpu_isa_available
- * gate, a missing DRANZER_HAVE_X86_SIMD, a dispatch branch that was never
- * taken. So call the AVX-512 entry point directly and require the dispatched
- * result to match it *bit for bit*, which it can only do by being the same
- * code. With the inexact inputs above, the portable path differs from both.
+ * The shape sweep above compares "capped to baseline" against "capped to
+ * this rung" and requires them to agree. That comparison passes just as
+ * happily if the second path quietly ran the portable code too - a broken
+ * cpu_isa_available gate, a missing DRANZER_HAVE_X86_SIMD, a dispatch branch
+ * that was never taken. So call each rung's entry point directly and require
+ * the dispatched result to match it *bit for bit*, which it can only do by
+ * being the same code. With the inexact inputs above, the portable path
+ * differs from all of them.
  *
- * Skipped where there is no AVX-512, since calling the entry point there
- * would execute instructions the CPU does not have. */
+ * A rung the CPU lacks is skipped, since calling its entry point would
+ * execute instructions that are not there.
+ */
 static void check_dispatch_reaches_simd(void) {
 #ifdef DRANZER_HAVE_X86_SIMD
-    if (!cpu_isa_available(CPU_ISA_AVX512)) return;
-
     const size_t m = 9, k = 21, n = 53;
     float A[9 * 21], B[21 * 53], dC[9 * 53];
-    float dispatched_dA[9 * 21], direct_dA[9 * 21], portable_dA[9 * 21];
-    float dispatched_dB[21 * 53], direct_dB[21 * 53];
+    float portable_dA[9 * 21];
     fill(A, m * k, 1); fill(B, k * n, 2); fill(dC, m * n, 3);
-    fill(dispatched_dA, m * k, 4); fill(direct_dA, m * k, 4); fill(portable_dA, m * k, 4);
-    fill(dispatched_dB, k * n, 5); fill(direct_dB, k * n, 5);
 
-    cpu_features_clear_max_isa();
-    matmul_backward_input(dC, B, dispatched_dA, m, k, n);
-    matmul_backward_weight(A, dC, dispatched_dB, m, k, n);
-
-    matmul_backward_input_avx512(dC, B, direct_dA, m, k, n);
-    matmul_backward_weight_avx512(A, dC, direct_dB, m, k, n);
-
+    fill(portable_dA, m * k, 4);
     cpu_features_set_max_isa(CPU_ISA_BASELINE);
     matmul_backward_input(dC, B, portable_dA, m, k, n);
     cpu_features_clear_max_isa();
 
-    for (size_t i = 0; i < m * k; i++) {
-        if (dispatched_dA[i] != direct_dA[i]) {
-            fprintf(stderr, "FAIL: dispatch did not reach the AVX-512 backward_input "
-                            "(element %zu: %.9g vs %.9g)\n",
-                    i, (double)dispatched_dA[i], (double)direct_dA[i]);
-            failures++;
-            break;
+    for (size_t r = 0; r < RUNG_COUNT; r++) {
+        const rung_t *rung = &rungs[r];
+        if (!rung_usable[r]) {
+            printf("  %-8s absent on this CPU - dispatch check skipped\n", rung->name);
+            continue;
         }
-    }
-    for (size_t i = 0; i < k * n; i++) {
-        if (dispatched_dB[i] != direct_dB[i]) {
-            fprintf(stderr, "FAIL: dispatch did not reach the AVX-512 backward_weight "
-                            "(element %zu: %.9g vs %.9g)\n",
-                    i, (double)dispatched_dB[i], (double)direct_dB[i]);
-            failures++;
-            break;
-        }
-    }
 
-    /* And the two implementations really are distinguishable on this data,
-     * so the bit-identity above is evidence rather than a coincidence. */
-    int differs = 0;
-    for (size_t i = 0; i < m * k; i++) {
-        if (portable_dA[i] != direct_dA[i]) { differs = 1; break; }
-    }
-    if (!differs) {
-        fprintf(stderr, "FAIL: portable and AVX-512 results are bit-identical on "
-                        "this data, so the dispatch check above proves nothing - "
-                        "choose inputs whose sums are not exactly representable\n");
-        failures++;
+        float dispatched_dA[9 * 21], direct_dA[9 * 21];
+        float dispatched_dB[21 * 53], direct_dB[21 * 53];
+        fill(dispatched_dA, m * k, 4); fill(direct_dA, m * k, 4);
+        fill(dispatched_dB, k * n, 5); fill(direct_dB, k * n, 5);
+
+        /* Cap AT this rung, so dispatch must land exactly here rather than on
+         * something wider. Without the cap this would only ever test the
+         * widest rung, which is the hole that let the AVX2 kernels ship
+         * unverified. */
+        cpu_features_set_max_isa(rung->isa);
+        matmul_backward_input(dC, B, dispatched_dA, m, k, n);
+        matmul_backward_weight(A, dC, dispatched_dB, m, k, n);
+        cpu_features_clear_max_isa();
+
+        rung->bw_input(dC, B, direct_dA, m, k, n);
+        rung->bw_weight(A, dC, direct_dB, m, k, n);
+
+        int mismatched = 0;
+        for (size_t i = 0; i < m * k; i++) {
+            if (dispatched_dA[i] != direct_dA[i]) {
+                fprintf(stderr, "FAIL: dispatch did not reach the %s backward_input "
+                                "(element %zu: %.9g vs %.9g)\n",
+                        rung->name, i, (double)dispatched_dA[i], (double)direct_dA[i]);
+                failures++; mismatched = 1;
+                break;
+            }
+        }
+        for (size_t i = 0; i < k * n; i++) {
+            if (dispatched_dB[i] != direct_dB[i]) {
+                fprintf(stderr, "FAIL: dispatch did not reach the %s backward_weight "
+                                "(element %zu: %.9g vs %.9g)\n",
+                        rung->name, i, (double)dispatched_dB[i], (double)direct_dB[i]);
+                failures++; mismatched = 1;
+                break;
+            }
+        }
+
+        /* And this rung really is distinguishable from portable on this data,
+         * so the bit-identity above is evidence rather than a coincidence. */
+        int differs = 0;
+        for (size_t i = 0; i < m * k; i++) {
+            if (portable_dA[i] != direct_dA[i]) { differs = 1; break; }
+        }
+        if (!differs) {
+            fprintf(stderr, "FAIL: portable and %s results are bit-identical on this "
+                            "data, so the dispatch check proves nothing - choose "
+                            "inputs whose sums are not exactly representable\n",
+                    rung->name);
+            failures++;
+        }
+        if (!mismatched && differs) {
+            printf("  %-8s dispatch reaches it, and it differs from portable\n",
+                   rung->name);
+        }
     }
 #endif
 }
@@ -228,19 +288,41 @@ static void check_single_pass_from_zero(void) {
 
 int main(void) {
     printf("cpu: %s\n", cpu_features_summary());
-    const int has_avx512 = cpu_isa_available(CPU_ISA_AVX512);
-    if (!has_avx512) {
-        printf("NOTE: no AVX-512 on this CPU, so both paths below are the same\n"
+
+    /* Which rungs this CPU can actually run. The sweep below runs the shape
+     * set once per available rung plus once for baseline-vs-baseline, so an
+     * AVX2-only machine gets its own kernels checked rather than a note
+     * saying there was nothing to check. */
+    size_t available = 0;
+    for (size_t r = 0; r < RUNG_COUNT; r++) {
+        rung_usable[r] = cpu_isa_available(rungs[r].isa);
+        if (rung_usable[r]) available++;
+    }
+    if (available == 0) {
+        printf("NOTE: no vector rung on this CPU, so both paths below are the same\n"
                "      portable code and this run proves only that it is stable.\n");
     }
-    printf("\nvector backward kernels against the portable reference, "
-           "accumulating twice into a non-zero destination:\n");
 
     float worst = 0.0f;
-    for (size_t i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++) {
-        float d = check_shape(&shapes[i]);
-        if (d > worst) worst = d;
+    for (size_t r = 0; r < RUNG_COUNT; r++) {
+        if (!rung_usable[r]) continue;
+        printf("\n%s backward kernels against the portable reference, "
+               "accumulating twice into a non-zero destination:\n", rungs[r].name);
+        for (size_t i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++) {
+            float d = check_shape(&shapes[i], rungs[r].isa);
+            if (d > worst) worst = d;
+        }
     }
+    if (available == 0) {
+        printf("\nportable backward kernels, accumulating twice into a "
+               "non-zero destination:\n");
+        for (size_t i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++) {
+            float d = check_shape(&shapes[i], CPU_ISA_BASELINE);
+            if (d > worst) worst = d;
+        }
+    }
+
+    printf("\ndispatch:\n");
     check_single_pass_from_zero();
     check_dispatch_reaches_simd();
     cpu_features_clear_max_isa();
@@ -252,6 +334,6 @@ int main(void) {
         return 1;
     }
     printf("\nMATMUL BACKWARD CHECK %s\n",
-           has_avx512 ? "PASSED" : "PASSED (portable only)");
+           available ? "PASSED" : "PASSED (portable only)");
     return 0;
 }

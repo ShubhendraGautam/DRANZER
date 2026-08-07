@@ -58,24 +58,45 @@ void matmul_kernel_neon_mr4(const float *restrict A, const float *restrict B,
 
 /* ------------------------------------------------------- backward pass ---
  *
- * AVX-512 counterparts of core/matmul.c's matmul_backward_input() and
- * matmul_backward_weight(), with identical shapes and the same
+ * AVX2 and AVX-512 counterparts of core/matmul.c's matmul_backward_input()
+ * and matmul_backward_weight(), with identical shapes and the same
  * accumulate-into-destination contract.
  *
- * AVX-512 only, and that asymmetry with the forward kernels above is
- * deliberate. T11 measured avx2_mr4 as a regression under Clang, this
- * project's default compiler, and neon_mr4 was never measured at all; both
- * ship for the forward path because `--kernel` can still select them
- * explicitly. The backward functions have no such selection mechanism - one
- * implementation, chosen by hardware - so an AVX2 or NEON version here would
- * be code nothing could ever reach. See docs/matmul.md.
+ * These were AVX-512 only until an AVX2-only CI runner failed the backward-
+ * versus-forward cost invariant in tests/perf/test_perf_invariants.c at
+ * 4.09x against a 3.00x limit. The reason was not cache traversal, which is
+ * what that test's message assumes: matmul_select() ships avx2_mr4 for the
+ * forward path, so on a CPU with AVX2 and no AVX-512 the forward matmul was
+ * vectorized and the backward one fell all the way back to portable C. The
+ * invariant measured that gap and was right to complain.
  *
- * Both reassociate their sums relative to the portable versions: the weight
- * kernel because the vector lanes accumulate independently, the input kernel
- * because its dot product is reduced across lanes at the end. That is the same
- * class of difference the loop-order fix already introduced, and it is covered
- * by the gradient checks' tolerances rather than by bit-identity. */
+ * The original argument for the asymmetry was that T11 measured avx2_mr4 as
+ * a regression under Clang, and that the backward functions have no
+ * `--kernel` selection so an AVX2 version would be unreachable code. Both
+ * halves are now false. The first was falsified by the register-resident
+ * rewrite, which took avx2_mr4 to 1.95x/2.02x and promoted it in
+ * matmul_select() wherever AVX-512 is absent. The second confused
+ * "unselectable by flag" with "unreachable": hardware selects these, and an
+ * AVX2-only CPU reaches an AVX2 version on every call - the CI runner above
+ * is exactly that machine. See docs/matmul.md.
+ *
+ * NEON still has no backward kernel. That one remains genuinely unmeasured
+ * for want of AArch64 hardware, which is a different situation from this one
+ * and is tracked separately in docs/design-checklist.md.
+ *
+ * All of these reassociate their sums relative to the portable versions: the
+ * weight kernels because the vector lanes accumulate independently, the input
+ * kernels because the dot product is reduced across lanes at the end. The
+ * AVX2 and AVX-512 forms also differ from EACH OTHER for the same reason -
+ * eight lanes folded versus sixteen - so a result is reproducible for one
+ * binary on one CPU, not across instruction sets. That is the same contract
+ * T11 already narrowed for the forward kernels, and it is covered by the
+ * gradient checks' tolerances rather than by bit-identity. */
 #ifdef DRANZER_HAVE_X86_SIMD
+void matmul_backward_input_avx2(const float *restrict dC, const float *restrict B,
+                                float *restrict dA, size_t m, size_t k, size_t n);
+void matmul_backward_weight_avx2(const float *restrict A, const float *restrict dC,
+                                 float *restrict dB, size_t m, size_t k, size_t n);
 void matmul_backward_input_avx512(const float *restrict dC, const float *restrict B,
                                   float *restrict dA, size_t m, size_t k, size_t n);
 void matmul_backward_weight_avx512(const float *restrict A, const float *restrict dC,
