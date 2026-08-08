@@ -93,8 +93,7 @@ int main(void) {
     const char *training_text = "banana bandana banana cabana";
     const char *probe_text = "banana cabana";
 
-    srand(73);
-    if (model_new(&model, VOCAB, EMBEDDING, HEADS, LAYERS, MAX_SEQUENCE) != MODEL_SUCCESS ||
+    if (model_new_seeded(&model, VOCAB, EMBEDDING, HEADS, LAYERS, MAX_SEQUENCE, 73) != MODEL_SUCCESS ||
         bpe_encoder_new_with_special_tokens(&encoder, VOCAB) != BPE_SUCCESS ||
         bpe_train(&encoder, training_text, strlen(training_text)) != BPE_SUCCESS ||
         bpe_encoder_freeze(&encoder) != BPE_SUCCESS) {

@@ -10,6 +10,8 @@ src/gpu_probe.out
 src/gpu_latency.out
 src/bench_parallel.out
 src/bench_quant.out
+src/bench_attention.out
+src/fingerprint_model.out
 src/app.out
 libs/src/*.o
 libs/src/*.d

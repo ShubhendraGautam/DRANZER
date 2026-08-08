@@ -22,8 +22,7 @@
 #define STEPS 15
 
 static void init_identical(neural_model_t *model) {
-    srand(11);
-    if (model_new(model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ) != MODEL_SUCCESS) {
+    if (model_new_seeded(model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ, 11) != MODEL_SUCCESS) {
         fprintf(stderr, "model_new failed\n");
         exit(1);
     }

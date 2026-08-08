@@ -33,11 +33,10 @@ static void normalize_cache(model_kv_cache_t *destination,
 }
 
 int main(void) {
-    srand(17);
 
     neural_model_t model = {0};
-    if (model_new(&model, VOCAB_SIZE, EMBEDDING_DIM, NUM_HEADS,
-                  NUM_LAYERS, MAX_SEQ_LEN) != MODEL_SUCCESS) {
+    if (model_new_seeded(&model, VOCAB_SIZE, EMBEDDING_DIM, NUM_HEADS,
+                  NUM_LAYERS, MAX_SEQ_LEN, 17) != MODEL_SUCCESS) {
         fprintf(stderr, "model_new failed\n");
         return 1;
     }

@@ -1,0 +1,55 @@
+# The 178 MB corpus this project has been training on: tests/AllCombined.txt.
+#
+# READ THIS BEFORE REPORTING A NUMBER MEASURED ON IT.
+#
+# provenance = unverified. Nobody recorded where these bytes came from, so no
+# reader can obtain them, and under the rule in this directory's README no
+# quality result may be reported against this manifest as it stands. The
+# identity fields below are exact and checkable; the availability fields are
+# not, and that is the whole problem.
+#
+# What is known, from the bytes themselves:
+#
+#   - The content is English encyclopedia prose. The file opens with an article
+#     on "April" and closes mid-way through one on a games magazine, with
+#     article titles on their own lines and blank-line paragraph separation.
+#   - The vocabulary and sentence structure are consistent with Simple English
+#     Wikipedia rather than English Wikipedia. This is an INFERENCE from reading
+#     the text, not a record, which is exactly why it is written here as an
+#     inference. Do not promote it to source_url without checking.
+#   - The 18 files tests/chunk_a{a..r} concatenate, in shell glob order, to
+#     exactly these bytes (verified: `cat tests/chunk_* | sha256sum` matches
+#     sha256 below). So the chunks are a split of this file, not a separate
+#     dataset, and they carry no additional provenance.
+#
+# To make this corpus usable for a reported result, someone has to identify the
+# dump it came from, record its URL, date, and license, confirm that
+# reconstructing from that source reproduces sha256 below, and then set
+# provenance = verified. If it cannot be identified, the honest resolution is to
+# replace it with a corpus that can be - which is also what R3's "report a
+# standard metric on a standard corpus" needs anyway.
+
+name = simple-wikipedia-178mb
+description = English encyclopedia prose, 2.05M lines; origin unrecorded (see comment)
+provenance = unverified
+source_url = UNKNOWN
+license = UNKNOWN
+retrieved = UNKNOWN
+encoding = utf-8
+bytes = 178723194
+lines = 2052699
+sha256 = be17913eb060032dacc0155670c999d97e8ba57fd45135fe11b1a56c1b6d7bbf
+
+# The last ~5% held out, cut at the first newline at or after 0.95 * bytes so
+# neither side starts mid-line. Fixed as an offset rather than a fraction: if
+# the corpus is ever regenerated one byte longer, a fraction would silently
+# hold out different text and every earlier held-out number would stop being
+# comparable, with nothing in the artifacts to show it.
+split_train_bytes = 169787047
+split_train_sha256 = 1aa8a29ed604ab3197cb2d156d418099d7354ce84ec0689b60d20bff8c6db336
+split_validation_sha256 = 5ff444d05adb5b16dc9b6e692f842498aac5040e58ddcaebbeff4d962f7cdb48
+
+# No command reproduces these bytes from a public source, because no public
+# source is known. `cat tests/chunk_*` reproduces them from the local copy,
+# which is a consistency check and not availability.
+reconstruct = UNAVAILABLE

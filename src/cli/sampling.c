@@ -4,6 +4,7 @@
  */
 
 #include "cli/sampling.h"
+#include "core/rng.h"
 #include "common/debug.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,11 +23,15 @@ static int compare_prob_desc(const void *a, const void *b) {
     return (prob_a < prob_b) ? 1 : (prob_a > prob_b) ? -1 : 0;
 }
 
-static float random_unit(void) {
-    /* RAND_MAX itself is a possible result, so divide in double by one
-     * more than RAND_MAX to produce [0, 1) without float-rounding the
-     * integer constant up to 2^31. */
-    return (float)((double)rand() / ((double)RAND_MAX + 1.0));
+/* Draws from the caller's stream (core/rng.h), which is what makes
+ * `generate --seed N` name the same text on any platform. This used to be
+ * rand() / (RAND_MAX + 1.0): correct as a [0, 1) mapping, but rand() itself
+ * differs between C libraries, so the seed only reproduced on the libc that
+ * produced it. A NULL stream means the caller did not ask for reproducible
+ * sampling and gets the mode of the distribution instead of a draw from it -
+ * see sample_next_token(). */
+static float random_unit(uint64_t *rng_state) {
+    return (float)dranzer_rng_unit(rng_state);
 }
 
 /* Greedy sampling: select highest probability token */
@@ -48,7 +53,8 @@ uint32_t sample_greedy(float *logits, size_t vocab_size) {
 }
 
 /* Top-k sampling - OPTIMIZED: use partial selection instead of full sort */
-uint32_t sample_topk(float *logits, size_t vocab_size, size_t k) {
+uint32_t sample_topk(float *logits, size_t vocab_size, size_t k,
+                     uint64_t *rng_state) {
     if (!logits || vocab_size == 0 || k == 0) return 0;
     
     if (k > vocab_size) k = vocab_size;
@@ -77,7 +83,7 @@ uint32_t sample_topk(float *logits, size_t vocab_size, size_t k) {
     }
     
     /* Sample from top-k with fast reciprocal division */
-    float r = random_unit() * sum;
+    float r = random_unit(rng_state) * sum;
     float acc = 0.0f;
     uint32_t selected = pairs[0].idx;
     
@@ -96,7 +102,8 @@ uint32_t sample_topk(float *logits, size_t vocab_size, size_t k) {
 }
 
 /* Top-p (nucleus) sampling - OPTIMIZED: avoid redundant exp calculations */
-uint32_t sample_topp(float *logits, size_t vocab_size, float p) {
+uint32_t sample_topp(float *logits, size_t vocab_size, float p,
+                     uint64_t *rng_state) {
     if (!logits || vocab_size == 0 || p <= 0.0f || p > 1.0f) return 0;
     
     /* Create probability-index pairs */
@@ -149,7 +156,7 @@ uint32_t sample_topp(float *logits, size_t vocab_size, float p) {
     }
     
     /* Sample from nucleus using normalized probabilities */
-    float r = random_unit() * nucleus_sum;
+    float r = random_unit(rng_state) * nucleus_sum;
     float acc = 0.0f;
     uint32_t selected = pairs[0].idx;
     
@@ -171,10 +178,13 @@ uint32_t sample_topp(float *logits, size_t vocab_size, float p) {
 
 uint32_t sample_next_token(float *logits, size_t vocab_size,
                            sampling_strategy_t strategy, float temperature,
-                           size_t top_k, float top_p) {
+                           size_t top_k, float top_p, uint64_t *rng_state) {
     if (!logits || vocab_size == 0) return 0;
 
-    if (strategy == SAMPLING_GREEDY || temperature <= 0.0f) {
+    /* No stream, no draw. Sampling without a reproducible source of randomness
+     * is how an unreproducible result gets made, so the degenerate case is the
+     * deterministic one rather than a silent fallback to a global generator. */
+    if (strategy == SAMPLING_GREEDY || temperature <= 0.0f || !rng_state) {
         return sample_greedy(logits, vocab_size);
     }
 
@@ -185,13 +195,13 @@ uint32_t sample_next_token(float *logits, size_t vocab_size,
 
     if (strategy == SAMPLING_TOPK) {
         if (top_k == 0) return sample_greedy(logits, vocab_size);
-        return sample_topk(logits, vocab_size, top_k);
+        return sample_topk(logits, vocab_size, top_k, rng_state);
     }
     if (strategy == SAMPLING_TOPP) {
         if (top_p <= 0.0f || top_p > 1.0f) {
             return sample_greedy(logits, vocab_size);
         }
-        return sample_topp(logits, vocab_size, top_p);
+        return sample_topp(logits, vocab_size, top_p, rng_state);
     }
     return sample_greedy(logits, vocab_size);
 }

@@ -11,6 +11,8 @@
 #include "tools/bench_matmul.h"
 #include "core/cpu_features.h"
 #include "core/matmul.h"
+#include "common/fp_bits.h"
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -155,9 +157,16 @@ static void check_candidate(const candidate_t *candidate,
     matmul_run(candidate->kernel, a, b, output, test_case->m, test_case->k,
                test_case->n);
     for (size_t i = 0; i < count; i++) {
-        if (!isfinite(output[i])) {
-            result->max_abs_error = INFINITY;
-            result->max_relative_error = INFINITY;
+        /* Bit-pattern check and a finite poison value, both for the same
+         * reason: -ffast-math folds isfinite() to true, so a kernel that
+         * produced NaN used to walk straight past this guard, and an
+         * INFINITY written into max_abs_error was then compared against a
+         * finite tolerance under a flag that says infinities do not exist.
+         * FLT_MAX fails every tolerance and orders correctly against real
+         * errors. See include/common/fp_bits.h. */
+        if (!dranzer_float_is_finite(output[i])) {
+            result->max_abs_error = FLT_MAX;
+            result->max_relative_error = FLT_MAX;
             break;
         }
         float abs_error = fabsf(reference[i] - output[i]);

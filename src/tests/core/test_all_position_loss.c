@@ -74,8 +74,7 @@
 #define ATOL 1e-6f
 
 static void init_model(neural_model_t *model) {
-    srand(1234);
-    if (model_new(model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ) != MODEL_SUCCESS) {
+    if (model_new_seeded(model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ, 1234) != MODEL_SUCCESS) {
         fprintf(stderr, "model_new failed\n");
         exit(1);
     }

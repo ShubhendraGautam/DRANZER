@@ -43,8 +43,7 @@ static float forward_loss(neural_model_t *model, uint32_t *tokens, size_t seq_le
 
 static void reset_model(neural_model_t *model) {
     model_free(model);
-    srand(42);
-    if (model_new(model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ) != MODEL_SUCCESS) {
+    if (model_new_seeded(model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ, 42) != MODEL_SUCCESS) {
         fprintf(stderr, "model_new failed\n");
         exit(1);
     }

@@ -16,8 +16,16 @@
  * modules built on top of them. */
 
 /* Xavier/Glorot uniform initialization for a weight matrix of `size`
- * elements with the given fan-in/fan-out. */
-void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out);
+ * elements with the given fan-in/fan-out.
+ *
+ * Draws from the caller's stream (core/rng.h), advancing `*rng_state` once per
+ * element. It used to draw from rand(), which made "same seed" mean "same seed
+ * on the same C library" and left initial weights unreproducible off the
+ * machine that produced them. The stream is a parameter rather than a global
+ * so that initializing a tensor cannot be perturbed by an unrelated caller's
+ * draws. */
+void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out,
+                 uint64_t *rng_state);
 
 /* Softmax over `size` elements, in place. Numerically stable (max-subtracted). */
 void softmax(float *values, size_t size);
@@ -82,13 +90,16 @@ int compute_positional_encoding_at(float *pos_embed, size_t position,
  * active, each element is independently kept with probability (1-rate)
  * and scaled by 1/(1-rate) so the expected activation magnitude is
  * unchanged - this is what lets inference skip dropout entirely without
- * rescaling. `mask_out` caches the 1.0/0.0 keep-mask for backward. */
-void dropout_forward(float *x, float *mask_out, size_t total_size, float rate, int is_training);
-
-/* Dropout using an explicit xorshift64* RNG state. Training uses this
- * variant so checkpoints can resume the exact future mask sequence. */
-void dropout_forward_rng(float *x, float *mask_out, size_t total_size, float rate,
-                         int is_training, uint64_t *rng_state);
+ * rescaling. `mask_out` caches the 1.0/0.0 keep-mask for backward.
+ *
+ * `rng_state` is required and must not be NULL. It is an explicit stream
+ * (core/rng.h) so that a checkpoint storing eight bytes resumes the exact
+ * future mask sequence. There used to be a second, rand()-based overload that
+ * this one fell back to when handed NULL; it was unreproducible across C
+ * libraries, and a fallback that silently degrades a reproducibility guarantee
+ * is worse than a missing argument. */
+void dropout_forward(float *x, float *mask_out, size_t total_size, float rate,
+                     int is_training, uint64_t *rng_state);
 
 /* Backprop through dropout_forward: dL_dx *= mask / (1 - rate), in place.
  * Must be called with the same `rate` used in the matching forward call. */

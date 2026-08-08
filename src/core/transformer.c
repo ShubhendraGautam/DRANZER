@@ -29,11 +29,34 @@ static void attention_head_forward(size_t head, size_t seq_len,
                                    float *probs, float *concat) {
     float *head_probs = probs + head * seq_len * seq_len;
 
+    /* Causal mask: position i may only attend to j <= i.
+     *
+     * The mask is structural, not a value. Future positions are written as
+     * exact 0.0f - the probability they must end up with - and the softmax
+     * normalizes only the j <= i prefix of the row, which is the only part
+     * that ever holds a score. Nothing downstream can tell the difference:
+     * a row's masked tail was already exactly zero after the old softmax,
+     * and the prefix is normalized over the same set of scores by the same
+     * arithmetic in the same order, so probs is bit-identical to what the
+     * -INFINITY form produced.
+     *
+     * It used to write -INFINITY and let softmax underflow it away. That was
+     * a correctness bet against this project's own build flags: src/Makefile
+     * compiles with -ffast-math, which implies -ffinite-math-only, which
+     * promises the compiler that no infinity will ever appear. The masking
+     * worked only because no optimization had yet acted on the permission it
+     * was given, and the same flag had already produced two wrong results
+     * elsewhere in the tree (see include/common/fp_bits.h). The flag is worth
+     * keeping - it is measured, not inherited (src/Makefile) - so the
+     * dependence on it goes instead.
+     *
+     * Row i always has at least the j == i entry, so no prefix is ever empty
+     * and no row is ever entirely masked.
+     *
+     * Both loops now stop at i rather than seq_len, which halves the scalar
+     * work in the two O(seq_len^2 * head_dim) passes as a side effect: the
+     * skipped terms were multiplications by a probability of exactly zero. */
     for (size_t i = 0; i < seq_len; i++) {
-        /* Causal mask: position i may only attend to j <= i. Future
-         * positions get -INFINITY so softmax zeroes them out; row i
-         * always has at least the j==i entry, so no row is ever
-         * all -INFINITY. */
         for (size_t j = 0; j <= i; j++) {
             float score = 0.0f;
             for (size_t d = 0; d < head_dim; d++) {
@@ -44,18 +67,18 @@ static void attention_head_forward(size_t head, size_t seq_len,
             head_probs[i * seq_len + j] = score / sqrtf((float)head_dim);
         }
         for (size_t j = i + 1; j < seq_len; j++) {
-            head_probs[i * seq_len + j] = -INFINITY;
+            head_probs[i * seq_len + j] = 0.0f;
         }
     }
 
     for (size_t i = 0; i < seq_len; i++) {
-        softmax(&head_probs[i * seq_len], seq_len);
+        softmax(&head_probs[i * seq_len], i + 1);
     }
 
     for (size_t i = 0; i < seq_len; i++) {
         for (size_t d = 0; d < head_dim; d++) {
             float sum = 0.0f;
-            for (size_t j = 0; j < seq_len; j++) {
+            for (size_t j = 0; j <= i; j++) {
                 sum += head_probs[i * seq_len + j] * V[j * embedding_dim + head * head_dim + d];
             }
             concat[i * embedding_dim + head * head_dim + d] = sum;
@@ -255,7 +278,7 @@ model_errors_t model_forward_hidden(neural_model_t *model,
 
         /* Attention sub-block: attn -> dropout -> residual -> LN */
         multihead_attention_forward(model, l, seq_len);
-        dropout_forward_rng(model->ws_fwd_attn_raw, model->cache_attn_dropout_mask[l],
+        dropout_forward(model->ws_fwd_attn_raw, model->cache_attn_dropout_mask[l],
                              seq_len * embedding_dim, model->dropout_rate,
                              model->is_training, &model->rng_state);
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {
@@ -281,7 +304,7 @@ model_errors_t model_forward_hidden(neural_model_t *model,
                 model->ws_fwd_ff_raw[i * embedding_dim + d] += layer->b_ff2[d];
             }
         }
-        dropout_forward_rng(model->ws_fwd_ff_raw, model->cache_ffn_dropout_mask[l],
+        dropout_forward(model->ws_fwd_ff_raw, model->cache_ffn_dropout_mask[l],
                              seq_len * embedding_dim, model->dropout_rate,
                              model->is_training, &model->rng_state);
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {

@@ -30,6 +30,33 @@ jobs:
       - name: Build and test with AddressSanitizer
         run: make -C src clean all test CC=clang ASAN=1
 
+  undefined-behavior-sanitizer:
+    name: UndefinedBehaviorSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      # A finding aborts rather than printing and continuing, so this job cannot
+      # be green with diagnostics buried in its log.
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record the toolchain version
+        run: clang --version
+
+      # Separate from the ASan job on purpose: the two find different classes of
+      # defect, and UBSan's - signed overflow, misaligned loads, invalid
+      # float-to-int conversions, shifts past a type's width - are the ones most
+      # likely to differ between the compilers and instruction sets this project
+      # targets, which makes them the ones most likely to be mistaken for a
+      # numerical result rather than recognized as undefined behaviour.
+      - name: Build and test with UndefinedBehaviorSanitizer
+        run: make -C src clean all test CC=clang UBSAN=1
+
   openmp:
     name: GCC with OpenMP
     runs-on: ubuntu-24.04

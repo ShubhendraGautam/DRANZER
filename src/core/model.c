@@ -14,6 +14,7 @@
  */
 
 #include "core/model.h"
+#include "core/rng.h"
 #include "backends/gpu/gpu_matmul.h"
 #include "common/debug.h"
 #include <stdlib.h>
@@ -66,6 +67,17 @@ model_errors_t model_new(neural_model_t *model,
                          size_t num_heads,
                          size_t num_layers,
                          size_t max_seq_len) {
+    return model_new_seeded(model, vocab_size, embedding_dim, num_heads,
+                            num_layers, max_seq_len, MODEL_DEFAULT_SEED);
+}
+
+model_errors_t model_new_seeded(neural_model_t *model,
+                                size_t vocab_size,
+                                size_t embedding_dim,
+                                size_t num_heads,
+                                size_t num_layers,
+                                size_t max_seq_len,
+                                uint64_t seed) {
     if (model == NULL || vocab_size == 0 || embedding_dim == 0 ||
         num_heads == 0 || embedding_dim % num_heads != 0 ||
         num_layers == 0 || max_seq_len == 0) {
@@ -130,7 +142,9 @@ model_errors_t model_new(neural_model_t *model,
     model->min_lr = 0.0f;
     model->dropout_rate = 0.0f;
     model->is_training = 0;
-    model->rng_state = UINT64_C(0x9e3779b97f4a7c15);
+    /* Dropout draws from its own stream off the same seed, so how often
+     * initialization drew cannot shift the mask sequence and vice versa. */
+    model->rng_state = dranzer_rng_stream(seed, DRANZER_RNG_STREAM_DROPOUT);
     model->use_gpu = 0;
     model->use_scalar_matmul = 0;
 
@@ -177,14 +191,19 @@ model_errors_t model_new(neural_model_t *model,
         layout_layer(&model->layers[l], &pc, &gc, embedding_dim);
     }
 
+    /* One initialization stream, walked in layout order, so the weights a seed
+     * produces depend on the architecture but not on the order this function
+     * happens to visit tensors in - and never on any other consumer's draws. */
+    uint64_t init_rng = dranzer_rng_stream(seed, DRANZER_RNG_STREAM_INIT);
+
     for (size_t l = 0; l < num_layers; l++) {
         transformer_layer_t *layer = &model->layers[l];
-        xavier_init(layer->W_q, embedding_dim * embedding_dim, embedding_dim, embedding_dim);
-        xavier_init(layer->W_k, embedding_dim * embedding_dim, embedding_dim, embedding_dim);
-        xavier_init(layer->W_v, embedding_dim * embedding_dim, embedding_dim, embedding_dim);
-        xavier_init(layer->W_o, embedding_dim * embedding_dim, embedding_dim, embedding_dim);
-        xavier_init(layer->W_ff1, embedding_dim * ffn_dim, embedding_dim, ffn_dim);
-        xavier_init(layer->W_ff2, ffn_dim * embedding_dim, ffn_dim, embedding_dim);
+        xavier_init(layer->W_q, embedding_dim * embedding_dim, embedding_dim, embedding_dim, &init_rng);
+        xavier_init(layer->W_k, embedding_dim * embedding_dim, embedding_dim, embedding_dim, &init_rng);
+        xavier_init(layer->W_v, embedding_dim * embedding_dim, embedding_dim, embedding_dim, &init_rng);
+        xavier_init(layer->W_o, embedding_dim * embedding_dim, embedding_dim, embedding_dim, &init_rng);
+        xavier_init(layer->W_ff1, embedding_dim * ffn_dim, embedding_dim, ffn_dim, &init_rng);
+        xavier_init(layer->W_ff2, ffn_dim * embedding_dim, ffn_dim, embedding_dim, &init_rng);
 
         memset(layer->b_ff1, 0, ffn_dim * sizeof(float));
         memset(layer->b_ff2, 0, embedding_dim * sizeof(float));
@@ -196,8 +215,8 @@ model_errors_t model_new(neural_model_t *model,
         }
     }
 
-    xavier_init(model->token_embeddings, vocab_size * embedding_dim, 1, embedding_dim);
-    xavier_init(model->output_projection, embedding_dim * vocab_size, embedding_dim, vocab_size);
+    xavier_init(model->token_embeddings, vocab_size * embedding_dim, 1, embedding_dim, &init_rng);
+    xavier_init(model->output_projection, embedding_dim * vocab_size, embedding_dim, vocab_size, &init_rng);
     memset(model->output_bias, 0, vocab_size * sizeof(float));
 
     if (compute_positional_encoding(model->position_embeddings, max_seq_len, embedding_dim) != 0) {
@@ -349,7 +368,7 @@ model_errors_t model_new(neural_model_t *model,
 
 void model_seed_rng(neural_model_t *model, uint64_t seed) {
     if (!model) return;
-    model->rng_state = seed ? seed : UINT64_C(0x9e3779b97f4a7c15);
+    model->rng_state = dranzer_rng_stream(seed, DRANZER_RNG_STREAM_DROPOUT);
 }
 
 /* Free all model resources */

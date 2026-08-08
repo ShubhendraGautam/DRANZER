@@ -4,6 +4,7 @@
  * activation roughly unchanged. Also checks that is_training=0 is a true
  * no-op (inference must never apply dropout). */
 #include "core/tensor_ops.h"
+#include "core/rng.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -11,13 +12,16 @@
 #define N 200000
 
 int main(void) {
-    srand(1);
+    /* An explicit stream, replacing srand(1): dropout draws from the project
+     * generator so a checkpoint can resume the exact mask sequence, and so the
+     * fraction measured below is the same on every C library (core/rng.h). */
+    uint64_t rng = dranzer_rng_stream(1, DRANZER_RNG_STREAM_DROPOUT);
     float *x = malloc(N * sizeof(float));
     float *mask = malloc(N * sizeof(float));
     for (size_t i = 0; i < N; i++) x[i] = 2.0f; /* constant, so post-dropout mean should stay ~2.0 */
 
     float rate = 0.4f;
-    dropout_forward(x, mask, N, rate, 1);
+    dropout_forward(x, mask, N, rate, 1, &rng);
 
     size_t zeros = 0;
     double sum = 0.0;
@@ -32,7 +36,7 @@ int main(void) {
 
     /* is_training=0: must be a no-op identity regardless of rate */
     for (size_t i = 0; i < N; i++) x[i] = 3.0f;
-    dropout_forward(x, mask, N, rate, 0);
+    dropout_forward(x, mask, N, rate, 0, &rng);
     int all_unchanged = 1, all_mask_one = 1;
     for (size_t i = 0; i < N; i++) {
         if (x[i] != 3.0f) all_unchanged = 0;

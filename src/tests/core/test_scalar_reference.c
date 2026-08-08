@@ -38,9 +38,8 @@ int main(void) {
     }
     free(a); free(b); free(tiled); free(scalar);
 
-    srand(29);
     neural_model_t model = {0};
-    if (model_new(&model, 80, 72, 8, 2, 8) != MODEL_SUCCESS) {
+    if (model_new_seeded(&model, 80, 72, 8, 2, 8, 29) != MODEL_SUCCESS) {
         fprintf(stderr, "reference model allocation failed\n");
         return 1;
     }

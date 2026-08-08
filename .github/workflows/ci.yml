@@ -34,5 +34,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # The toolchain is part of the experiment, so its version belongs in the
+      # log of every run. Both CI failures this project has had were compiler- or
+      # hardware-dependent, and one of them was ubuntu-24.04 moving clang from 14
+      # to 18 under a tree nobody touched - which changed a numerical result, not
+      # just a warning. Recording the version means a run can be compared with an
+      # earlier one; the pinned runner image (never `ubuntu-latest`) means the
+      # version only moves in a commit that can be bisected to.
+      - name: Record the toolchain version
+        run: |
+          "$CC" --version
+          echo "runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          uname -a
+
+      - name: Check that nothing built with -ffast-math depends on inf/NaN
+        run: make -C src finite-math-check CC="$CC"
+
       - name: Build the CLI and run the complete test suite
         run: make -C src clean all test CC="$CC"

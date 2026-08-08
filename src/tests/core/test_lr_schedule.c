@@ -13,9 +13,8 @@
 #define MAX_SEQ 4
 
 int main(void) {
-    srand(1);
     neural_model_t model = {0};
-    if (model_new(&model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ) != MODEL_SUCCESS) {
+    if (model_new_seeded(&model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ, 1) != MODEL_SUCCESS) {
         fprintf(stderr, "model_new failed\n");
         return 1;
     }

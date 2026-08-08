@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "tools/timing_spread.h"
 
 #define ROUNDS 5
 
@@ -47,6 +48,12 @@ static case_t make_case(size_t m, size_t k, size_t n) {
 }
 
 static void free_case(case_t *t) { free(t->a); free(t->b); free(t->c); }
+
+/* Cases the comparisons below run on. File-static because
+ * timing_measure_speedup() takes argument-less functions - it has to, so that
+ * the two arms it interleaves are indistinguishable to it. */
+static case_t cache_case;
+static case_t kernel_case;
 
 /* Seconds per call, fastest of ROUNDS. The warm-up call also populates the
  * weight cache, so what is timed is steady state rather than a first upload. */
@@ -117,66 +124,106 @@ static void check_overhead_is_amortized(void) {
  * invalidate it every time. This is the only assertion here that would catch
  * the cache being disabled - a correctness test cannot, because an
  * always-uploading cache returns identical results. */
-static void check_weight_cache_removes_a_transfer(void) {
-    case_t t = make_case(128, 256, 1024);
-
-    double cached = best_call_sec(&t, 20);
-
-    gpu_matmul(t.a, t.b, t.c, t.m, t.k, t.n);
-    double best = -1.0;
-    for (int r = 0; r < ROUNDS; r++) {
-        double t0 = now_sec();
-        for (int i = 0; i < 20; i++) {
-            gpu_matmul_invalidate_weights();      /* force a re-upload of B */
-            gpu_matmul(t.a, t.b, t.c, t.m, t.k, t.n);
-        }
-        double dt = (now_sec() - t0) / 20;
-        if (best < 0.0 || dt < best) best = dt;
+static void op_cached(void) {
+    for (int i = 0; i < 20; i++) {
+        gpu_matmul(cache_case.a, cache_case.b, cache_case.c,
+                   cache_case.m, cache_case.k, cache_case.n);
     }
+}
+
+static void op_invalidated(void) {
+    for (int i = 0; i < 20; i++) {
+        gpu_matmul_invalidate_weights();      /* force a re-upload of B */
+        gpu_matmul(cache_case.a, cache_case.b, cache_case.c,
+                   cache_case.m, cache_case.k, cache_case.n);
+    }
+}
+
+static void check_weight_cache_removes_a_transfer(void) {
+    cache_case = make_case(128, 256, 1024);
+
+    /* Interleaved and asserted at the median, for the same reason as the kernel
+     * comparison below: this one has the narrowest margin of the four checks
+     * here (a 1.05x floor against a ratio that has read anywhere from 1.54x to
+     * 2.76x on this machine), so it is the next one that would have started
+     * flaking. */
+    timing_spread_t spread = timing_measure_speedup(op_cached, op_invalidated);
 
     printf("\nweight cache removes a per-call upload:\n");
-    printf("    cached %8.1f us     invalidated every call %8.1f us\n",
-           cached * 1e6, best * 1e6);
-    expect_speedup("cached vs re-uploading B every call", best / cached, 1.05,
-                   "B is 1 MB at this shape. If invalidating the cache costs "
-                   "nothing, the cache is not being consulted.");
+    if (!timing_expect_median_speedup("cached vs re-uploading B every call",
+                                      spread, 1.05)) {
+        fprintf(stderr, "FAIL: cached vs re-uploading has a median of %.2fx over "
+                        "%zu replicates (spread %.2fx-%.2fx), below the 1.05x "
+                        "minimum.\n       B is 1 MB at this shape. If "
+                        "invalidating the cache costs nothing, the cache is not "
+                        "being consulted.\n",
+                spread.median, spread.replicates, spread.minimum, spread.maximum);
+        failures++;
+    }
 
-    free_case(&t);
+    free_case(&cache_case);
+}
+
+static void op_tiled(void) {
+    gpu_matmul_set_forward_kernel("tiled");
+    for (int i = 0; i < 20; i++) {
+        gpu_matmul(kernel_case.a, kernel_case.b, kernel_case.c,
+                   kernel_case.m, kernel_case.k, kernel_case.n);
+    }
+}
+
+static void op_naive(void) {
+    gpu_matmul_set_forward_kernel("naive");
+    for (int i = 0; i < 20; i++) {
+        gpu_matmul(kernel_case.a, kernel_case.b, kernel_case.c,
+                   kernel_case.m, kernel_case.k, kernel_case.n);
+    }
 }
 
 /* The shipped tiled kernel must not be slower than the naive one it replaced.
- * Measured at 1.19-1.24x on the largest shapes; asserted only as "not a
- * regression" because the margin narrows on smaller work and this must not
- * flake. */
+ *
+ * This is the assertion that made the flakiness of the old form obvious. It
+ * measured each kernel once, in its own phase, took the fastest of five rounds
+ * for each, and divided - and on an unmodified tree that quotient read 0.83x
+ * once and 1.01x, 1.05x, 1.11x, 1.14x, 1.20x, 1.21x, 1.31x, and 1.42x on the
+ * eight runs after it. A 1.00x floor sits inside that spread, so the check
+ * failed a correct tree at some rate, for reasons having nothing to do with the
+ * change under review.
+ *
+ * Now: the two kernels are timed alternately within each replicate and the
+ * median of the replicates is asserted on, with the spread printed. The kernel
+ * selection is inside each timed function so it applies to the calls it is meant
+ * to - one selection per 20 matmuls is not measurable against them. */
 static void check_tiled_kernel_is_not_a_regression(void) {
-    case_t t = make_case(128, 256, 1024);
+    kernel_case = make_case(128, 256, 1024);
 
-    if (gpu_matmul_set_forward_kernel("naive") != 0) {
-        fprintf(stderr, "FAIL: could not select the naive kernel\n");
+    if (gpu_matmul_set_forward_kernel("naive") != 0 ||
+        gpu_matmul_set_forward_kernel("tiled") != 0) {
+        fprintf(stderr, "FAIL: could not select both forward kernels\n");
         failures++;
-        free_case(&t);
+        free_case(&kernel_case);
         return;
     }
-    double naive = best_call_sec(&t, 20);
 
-    if (gpu_matmul_set_forward_kernel("tiled") != 0) {
-        fprintf(stderr, "FAIL: could not select the tiled kernel\n");
-        failures++;
-        free_case(&t);
-        return;
-    }
-    double tiled = best_call_sec(&t, 20);
+    timing_spread_t spread = timing_measure_speedup(op_tiled, op_naive);
 
     printf("\nshipped kernel against the baseline it replaced:\n");
-    printf("    naive %8.1f us     tiled %8.1f us\n", naive * 1e6, tiled * 1e6);
-    expect_speedup("tiled vs naive at 128x256x1024", naive / tiled, 1.0,
-                   "The tiled kernel stages operands through shared memory and "
-                   "measured 1.19-1.24x here. Slower means the shared-memory "
-                   "path regressed or stopped being selected.");
+    if (!timing_expect_median_speedup("tiled vs naive at 128x256x1024", spread,
+                                      1.0)) {
+        fprintf(stderr, "FAIL: tiled vs naive has a median of %.2fx over %zu "
+                        "replicates (spread %.2fx-%.2fx), below the 1.00x "
+                        "minimum.\n       The tiled kernel stages operands "
+                        "through shared memory and measures a median of "
+                        "1.19x-1.29x here across five runs. A "
+                        "median below 1.0 means the shared-memory path "
+                        "regressed or stopped being selected.\n",
+                spread.median, spread.replicates, spread.minimum, spread.maximum);
+        failures++;
+    }
 
     /* Leave the process on the shipped default. */
     gpu_matmul_set_forward_kernel("tiled");
-    free_case(&t);
+    free_case(&kernel_case);
 }
 
 int main(void) {

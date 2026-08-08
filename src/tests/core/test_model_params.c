@@ -35,9 +35,8 @@ static const config_t configs[] = {
 
 static void check_model(const config_t *config) {
     neural_model_t model = {0};
-    srand(7);
-    if (model_new(&model, config->vocab, config->embedding_dim, config->heads,
-                  config->layers, config->seq) != MODEL_SUCCESS) {
+    if (model_new_seeded(&model, config->vocab, config->embedding_dim, config->heads,
+                  config->layers, config->seq, 7) != MODEL_SUCCESS) {
         fail("model_new failed");
         return;
     }

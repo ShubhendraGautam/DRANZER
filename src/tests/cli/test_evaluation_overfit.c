@@ -38,8 +38,7 @@ int main(void) {
         goto cleanup;
     }
 
-    srand(23);
-    if (model_new(&model, 256, 8, 2, 1, 8) != MODEL_SUCCESS ||
+    if (model_new_seeded(&model, 256, 8, 2, 1, 8, 23) != MODEL_SUCCESS ||
         evaluate_corpus_file(&model, encoder, held_out_path, 4, &before) !=
             EVALUATION_SUCCESS) {
         fprintf(stderr, "failed to evaluate untrained model\n");

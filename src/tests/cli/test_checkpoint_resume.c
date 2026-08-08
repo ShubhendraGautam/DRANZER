@@ -42,10 +42,9 @@ int main(void) {
     uint32_t tokens[] = {1, 2, 3, 4, 5, 6};
     int failed = 0;
 
-    srand(101);
     if (!encoder || bpe_train(encoder, "banana banana", 13) != BPE_SUCCESS ||
         bpe_encoder_freeze(encoder) != BPE_SUCCESS ||
-        model_new(&original, 264, 8, 2, 1, 8) != MODEL_SUCCESS) {
+        model_new_seeded(&original, 264, 8, 2, 1, 8, 101) != MODEL_SUCCESS) {
         fprintf(stderr, "checkpoint fixture initialization failed\n");
         failed = 1;
         goto cleanup;

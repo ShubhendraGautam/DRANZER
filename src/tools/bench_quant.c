@@ -111,8 +111,9 @@ typedef struct {
     float learning_rate;
 } bench_quant_config_t;
 
-/* Deterministic given the seed: model_new() draws its initialization from
- * rand(), so seeding once here fixes the whole trained model.
+/* Deterministic given the seed, on any platform: model_new_seeded() draws its
+ * initialization from the project's own generator (core/rng.h), so the seed
+ * fixes the whole trained model rather than fixing it per C library.
  *
  * All four learning-rate fields are set, not just model->learning_rate. With no
  * schedule configured, model_lr_schedule_step() falls back to plateau decay and
@@ -123,12 +124,11 @@ typedef struct {
  * sets all four for the same reason. */
 static int train_model(neural_model_t *model, const bench_quant_config_t *config,
                        unsigned int seed) {
-    srand(seed);
-    if (model_new(model, CORPUS_VOCAB, config->embedding_dim, config->num_heads,
-                  config->num_layers, config->seq_len) != MODEL_SUCCESS) {
+    if (model_new_seeded(model, CORPUS_VOCAB, config->embedding_dim,
+                         config->num_heads, config->num_layers, config->seq_len,
+                         seed) != MODEL_SUCCESS) {
         return -1;
     }
-    model_seed_rng(model, seed);
     model->learning_rate = config->learning_rate;
     model->metrics.learning_rate = config->learning_rate;
     model->metrics.initial_learning_rate = config->learning_rate;

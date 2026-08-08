@@ -73,6 +73,12 @@ typedef struct {
     size_t stop_sequence_count;
     generation_token_callback_t on_token;
     void *callback_data;
+    /* Sampling stream (core/rng.h), advanced once per sampled token and
+     * carried across the whole generation so a resumed or continued call does
+     * not repeat draws. NULL decodes greedily - see sample_next_token(). The
+     * CLI derives it from --seed; a caller wanting reproducible text must set
+     * it, because there is deliberately no global fallback. */
+    uint64_t *rng_state;
 } generation_options_t;
 
 /* Populate conservative defaults: greedy decoding, no penalty/minimum/stops,

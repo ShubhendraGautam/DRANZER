@@ -1,5 +1,6 @@
 #include "core/bundle.h"
 #include "core/model.h"
+#include "core/fingerprint.h"
 #include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,8 +14,6 @@
 #define BUNDLE_VERSION UINT32_C(1)
 #define BUNDLE_NUMERIC_FLOAT32 UINT32_C(1)
 #define BUNDLE_HEADER_SIZE UINT32_C(152)
-#define FNV_OFFSET UINT64_C(14695981039346656037)
-#define FNV_PRIME UINT64_C(1099511628211)
 
 static int float32_supported(void) {
     return sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 &&
@@ -41,17 +40,12 @@ static uint64_t decode_u64(const uint8_t bytes[8]) {
     return value;
 }
 
-static uint64_t checksum_update(uint64_t checksum, const void *data, size_t size) {
-    const uint8_t *bytes = data;
-    for (size_t i = 0; i < size; i++) {
-        checksum ^= bytes[i];
-        checksum *= FNV_PRIME;
-    }
-    return checksum;
-}
-
+/* The bundle's checksums are the shared FNV-1a from core/fingerprint.h. They
+ * used to be a private copy here; three other callers needed the identical
+ * number, and two copies of a hash is one copy too many. Same constants, same
+ * byte order, so bundles written by earlier versions still validate. */
 static uint64_t checksum_buffer(const void *data, size_t size) {
-    return checksum_update(FNV_OFFSET, data, size);
+    return dranzer_fnv1a(DRANZER_FNV_OFFSET, data, size);
 }
 
 static int write_bytes(FILE *file, const void *data, size_t size) {
@@ -68,17 +62,6 @@ static int write_u32(FILE *file, uint32_t value) {
     return write_bytes(file, bytes, sizeof(bytes));
 }
 
-static uint64_t weights_checksum(const neural_model_t *model) {
-    uint64_t checksum = FNV_OFFSET;
-    for (size_t i = 0; i < model->total_param_count; i++) {
-        uint32_t bits = 0;
-        uint8_t bytes[4];
-        memcpy(&bits, &model->params[i], sizeof(bits));
-        encode_u32(bytes, bits);
-        checksum = checksum_update(checksum, bytes, sizeof(bytes));
-    }
-    return checksum;
-}
 
 static int checked_file_size(uint64_t weights_bytes, uint64_t tokenizer_bytes,
                              uint64_t *out_size) {
@@ -158,7 +141,7 @@ bundle_errors_t model_bundle_save(const neural_model_t *model,
     if (tokenizer_rc != BPE_SUCCESS) return BUNDLE_FORMAT_ERROR;
 
     uint64_t weight_bytes = (uint64_t)model->total_param_count * 4;
-    uint64_t weight_checksum = weights_checksum(model);
+    uint64_t weight_checksum = dranzer_weights_fingerprint(model);
     uint64_t tokenizer_checksum = checksum_buffer(tokenizer_data, tokenizer_size);
     uint32_t loss_bits = 0;
     memcpy(&loss_bits, &model->current_loss, sizeof(loss_bits));
@@ -302,7 +285,7 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
         return model_rc == MODEL_ALLOCATION_FAILURE
                    ? BUNDLE_ALLOCATION_FAILURE : BUNDLE_FORMAT_ERROR;
     }
-    uint64_t actual_weight_checksum = FNV_OFFSET;
+    uint64_t actual_weight_checksum = DRANZER_FNV_OFFSET;
     for (size_t i = 0; i < loaded.total_param_count; i++) {
         uint8_t bytes[4];
         if (!read_bytes(file, bytes, sizeof(bytes))) {
@@ -310,7 +293,7 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
             fclose(file);
             return BUNDLE_FORMAT_ERROR;
         }
-        actual_weight_checksum = checksum_update(actual_weight_checksum, bytes, sizeof(bytes));
+        actual_weight_checksum = dranzer_fnv1a(actual_weight_checksum, bytes, sizeof(bytes));
         uint32_t bits = decode_u32(bytes);
         memcpy(&loaded.params[i], &bits, sizeof(bits));
     }

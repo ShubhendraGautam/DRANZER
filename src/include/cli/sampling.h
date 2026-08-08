@@ -9,6 +9,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The stochastic samplers take an explicit RNG stream (core/rng.h) rather than
+ * drawing from a process-global generator. `generate --seed N` has to name the
+ * same text on glibc, musl, and macOS for a generated sample to be evidence of
+ * anything, and rand() does not. */
+
 typedef enum {
     SAMPLING_GREEDY,      // Argmax selection
     SAMPLING_TOPK,        // Restrict to top-k highest probabilities
@@ -41,27 +46,35 @@ uint32_t sample_greedy(float *logits, size_t vocab_size);
  * @param logits: Output logits from model
  * @param vocab_size: Size of vocabulary
  * @param k: Number of top tokens to consider
+ * @param rng_state: sampling stream, advanced once per call
  * @return Selected token ID
  */
-uint32_t sample_topk(float *logits, size_t vocab_size, size_t k);
+uint32_t sample_topk(float *logits, size_t vocab_size, size_t k,
+                     uint64_t *rng_state);
 
 /**
  * Top-p (nucleus) sampling: restrict to minimum set of tokens with cumulative prob >= p
  * @param logits: Output logits from model
  * @param vocab_size: Size of vocabulary
  * @param p: Cumulative probability threshold (typically 0.9)
+ * @param rng_state: sampling stream, advanced once per call
  * @return Selected token ID
  */
-uint32_t sample_topp(float *logits, size_t vocab_size, float p);
+uint32_t sample_topp(float *logits, size_t vocab_size, float p,
+                     uint64_t *rng_state);
 
 /**
  * Apply temperature and the selected decoding strategy to one logits row.
  * `logits` may be modified as scratch. A non-positive temperature selects
  * greedily; positive temperatures are used by top-k/top-p sampling.
+ *
+ * A NULL `rng_state` also selects greedily: a caller with no stream cannot
+ * produce a reproducible sample, so it gets the deterministic answer rather
+ * than an unreproducible one.
  */
 uint32_t sample_next_token(float *logits, size_t vocab_size,
                            sampling_strategy_t strategy, float temperature,
-                           size_t top_k, float top_p);
+                           size_t top_k, float top_p, uint64_t *rng_state);
 
 /**
  * Initialize beam search

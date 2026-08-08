@@ -1,0 +1,27 @@
+# The 135-byte corpus tracked in the repository root as test.txt.
+#
+# This is not a training corpus and no quality number should ever be reported
+# against it. It exists so the CLI integration checks and the test suite have
+# real bytes to tokenize without depending on anything outside the repository.
+# It is listed here because "every corpus has a manifest" is easier to enforce
+# than "every corpus except the ones we decided not to count".
+
+name = tiny-smoke
+description = Three English sentences, tracked in-repo, for smoke tests only
+provenance = verified
+source_url = https://github.com/shubhgau/attention_in_c/blob/main/test.txt
+license = same as this repository
+retrieved = 2025-04-10
+encoding = utf-8
+bytes = 135
+lines = 3
+sha256 = 6ac7a7157937377a16a4694d8a875f377e1e240c60843f114c1f90abe536188e
+
+# Two lines train, one line held out. Absurd as a split, and deliberately so:
+# a split of a three-line corpus cannot support a quality claim, and the shape
+# of the manifest should not pretend otherwise.
+split_train_bytes = 83
+split_train_sha256 = ab0e13371d4dc0f4fdcb38939c83fee480e88e40ad9f4c72a90c88c2ed492477
+split_validation_sha256 = 94ad2c930c69e75d2922344639ea1cee4a16496164cde9089f7832768c8fdd0e
+
+reconstruct = git show HEAD:test.txt

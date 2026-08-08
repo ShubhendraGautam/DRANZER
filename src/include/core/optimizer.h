@@ -14,11 +14,15 @@ void model_zero_gradients(neural_model_t *model);
  * params/grads buffer in one call. */
 void sgd_update(float *param, float *grad, size_t size, float lr);
 
-/* AdamW-style update: standard Adam moment estimates plus optional
- * decoupled weight decay (weight_decay == 0 recovers plain Adam). `t` is
- * the 1-indexed step count, used for bias correction. */
+/* Adam's adaptive step: moment estimates, bias correction, and the update. `t`
+ * is the 1-indexed step count, used for the bias correction.
+ *
+ * No weight decay here. AdamW's decay is decoupled from the adaptive step, and
+ * in this project it is also selective - biases and normalization parameters are
+ * excluded, which cannot be expressed over a flat range of floats. It is a
+ * separate pass in model_optimizer_step(); the policy is core/weight_decay.h. */
 void adam_update(float *param, float *grad, float *m, float *v, size_t size,
-                  float lr, float beta1, float beta2, float eps, float weight_decay, uint32_t t);
+                  float lr, float beta1, float beta2, float eps, uint32_t t);
 
 /* Global L2-norm gradient clipping across every parameter in
  * model->grads: if the norm exceeds max_norm, scales all gradients down

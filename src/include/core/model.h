@@ -39,7 +39,30 @@
  * grad-norm clipping at 1.0, no LR schedule, no dropout) - override any of
  * those fields directly on the model before training starts, the same way
  * the caller already overrides learning_rate.
+ *
+ * `seed` fixes the initial weights and the dropout stream, both drawn from
+ * core/rng.h. It is an argument rather than process-global state (this used to
+ * read whatever srand() had last been given) for two reasons: the same seed now
+ * means the same weights on every platform and C library, and two models built
+ * in one process are independent instead of consecutive draws from one stream.
+ *
+ * Any uint64_t is a valid seed, including 0.
  */
+model_errors_t model_new_seeded(neural_model_t *model,
+                                size_t vocab_size,
+                                size_t embedding_dim,
+                                size_t num_heads,
+                                size_t num_layers,
+                                size_t max_seq_len,
+                                uint64_t seed);
+
+/* The seed model_new() uses. Named so that a test comparing against a fresh
+ * model does not have to repeat the literal. */
+#define MODEL_DEFAULT_SEED UINT64_C(0)
+
+/* model_new_seeded() with MODEL_DEFAULT_SEED. Every caller that does not care
+ * which weights it gets, only that they are the same every time - which is
+ * most of the test suite - wants this one. */
 model_errors_t model_new(neural_model_t *model,
                          size_t vocab_size,
                          size_t embedding_dim,
@@ -47,7 +70,12 @@ model_errors_t model_new(neural_model_t *model,
                          size_t num_layers,
                          size_t max_seq_len);
 
-/** Seed the model-owned training RNG used for dropout masks. */
+/* Reseed the model-owned dropout stream, without touching the weights.
+ *
+ * model_new_seeded() already does this from the same seed, so this is only for
+ * a caller that wants the dropout sequence moved independently of the
+ * initialization it already has - and for deserialization, which restores a
+ * stream position rather than a seed. */
 void model_seed_rng(neural_model_t *model, uint64_t seed);
 
 /**

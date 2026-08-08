@@ -6,6 +6,7 @@
  */
 
 #include "core/optimizer.h"
+#include "core/weight_decay.h"
 #include "common/debug.h"
 #include <math.h>
 #include <string.h>
@@ -23,16 +24,16 @@ void sgd_update(float *param, float *grad, size_t size, float lr) {
     }
 }
 
+/* The adaptive step alone. Weight decay is NOT applied here: it is decoupled, so
+ * it does not belong inside the moment update, and it is selective, so it cannot
+ * be expressed over a flat range of floats at all - see core/weight_decay.h.
+ * model_optimizer_step() applies it in its own pass immediately before this. */
 void adam_update(float *param, float *grad, float *m, float *v, size_t size,
-                  float lr, float beta1, float beta2, float eps, float weight_decay, uint32_t t) {
+                  float lr, float beta1, float beta2, float eps, uint32_t t) {
     float bias_correction1 = 1.0f - powf(beta1, (float)t);
     float bias_correction2 = 1.0f - powf(beta2, (float)t);
 
     for (size_t i = 0; i < size; i++) {
-        if (weight_decay > 0.0f) {
-            param[i] -= lr * weight_decay * param[i]; /* decoupled weight decay (AdamW) */
-        }
-
         m[i] = beta1 * m[i] + (1.0f - beta1) * grad[i];
         v[i] = beta2 * v[i] + (1.0f - beta2) * grad[i] * grad[i];
 
@@ -82,10 +83,17 @@ model_errors_t model_optimizer_step(neural_model_t *model) {
         }
 
         model->adam_t++;
+        /* Decay first, then the adaptive step, matching the order the fused
+         * version used and keeping this step's update identical to AdamW's for
+         * the tensors that are decayed. */
+        model_errors_t decay_rc = model_apply_weight_decay(model, model->learning_rate,
+                                                           model->weight_decay);
+        if (decay_rc != MODEL_SUCCESS) return decay_rc;
+
         adam_update(model->params, model->grads, model->adam_m, model->adam_v,
                     model->total_param_count, model->learning_rate,
                     model->adam_beta1, model->adam_beta2, model->adam_eps,
-                    model->weight_decay, model->adam_t);
+                    model->adam_t);
     } else {
         sgd_update(model->params, model->grads, model->total_param_count, model->learning_rate);
     }

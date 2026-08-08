@@ -1,4 +1,5 @@
 #include "core/model.h"
+#include "common/fp_bits.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,10 +12,9 @@ static void *copy_bytes(const void *source, size_t size) {
 }
 
 int main(void) {
-    srand(31);
     neural_model_t model = {0};
     uint32_t context[] = {1, 2, 3};
-    if (model_new(&model, 12, 8, 2, 1, 8) != MODEL_SUCCESS ||
+    if (model_new_seeded(&model, 12, 8, 2, 1, 8, 31) != MODEL_SUCCESS ||
         model_train_step(&model, context, 4, 3) != MODEL_SUCCESS) {
         fprintf(stderr, "failed to initialize evaluation fixture\n");
         model_free(&model);
@@ -45,7 +45,11 @@ int main(void) {
 
     int failed = model_evaluate_step(&model, context, 4, 3, &first_loss) != MODEL_SUCCESS ||
                  model_evaluate_step(&model, context, 4, 3, &second_loss) != MODEL_SUCCESS ||
-                 !isfinite(first_loss) || first_loss <= 0.0 || first_loss != second_loss ||
+                 /* Bit-pattern check, not isfinite(): -ffast-math folds
+                  * isfinite() to true, so this line asserted nothing.
+                  * See include/common/fp_bits.h. */
+                 !dranzer_double_is_finite(first_loss) || first_loss <= 0.0 ||
+                 first_loss != second_loss ||
                  model.training_steps != training_steps || model.adam_t != adam_t ||
                  model.current_loss != current_loss || model.is_training != was_training ||
                  memcmp(model.params, params, param_bytes) != 0 ||

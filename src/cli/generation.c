@@ -1,5 +1,6 @@
 #include "cli/generation.h"
 #include "core/model.h"
+#include "common/fp_bits.h"
 #include <float.h>
 #include <string.h>
 
@@ -70,12 +71,6 @@ void generation_apply_repetition_penalty(float *logits,
     }
 }
 
-static int generation_float_is_finite(float value) {
-    uint32_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    return (bits & UINT32_C(0x7f800000)) != UINT32_C(0x7f800000);
-}
-
 void generation_options_init(generation_options_t *options) {
     if (!options) return;
     memset(options, 0, sizeof(*options));
@@ -91,10 +86,10 @@ static int options_are_valid(const neural_model_t *model,
                              const generation_options_t *options) {
     if (!options || options->strategy < SAMPLING_GREEDY ||
         options->strategy > SAMPLING_TOPP ||
-        !generation_float_is_finite(options->temperature) ||
+        !dranzer_float_is_finite(options->temperature) ||
         options->temperature < 0.0f ||
-        !generation_float_is_finite(options->top_p) ||
-        !generation_float_is_finite(options->repetition_penalty) ||
+        !dranzer_float_is_finite(options->top_p) ||
+        !dranzer_float_is_finite(options->repetition_penalty) ||
         options->repetition_penalty < 1.0f ||
         (options->strategy == SAMPLING_TOPK && options->top_k == 0) ||
         (options->strategy == SAMPLING_TOPP &&
@@ -260,7 +255,8 @@ generation_errors_t generation_decode_with_options(
 
         uint32_t next = sample_next_token(
             model->ws_logits, model->vocab_size, options->strategy,
-            options->temperature, options->top_k, options->top_p);
+            options->temperature, options->top_k, options->top_p,
+            options->rng_state);
         sequence[out_result->total_count++] = next;
         out_result->new_count++;
 

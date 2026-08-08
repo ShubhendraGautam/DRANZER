@@ -2,7 +2,17 @@
 
 [← Back to README](../README.md)
 
-This is DRANZER's ordered roadmap and the source of truth for maturity work. The project aims to be
+This is DRANZER's ordered roadmap and the source of truth for maturity work. `docs/research-checklist.md`
+is the companion along the other axis: not what the software should do next, but what would stop an
+outside reader from believing or reproducing a result it produced. Several of its P0 items were
+defects in code this file already marked COMPLETE; those are now fixed, with the evidence recorded
+against each item there.
+
+Two documents were split out of this file and should be read instead of it for their subjects:
+[`docs/results.md`](results.md) holds every measured finding, and
+[`docs/reproducibility.md`](reproducibility.md) holds the per-axis reproducibility contract. This
+file links to them rather than restating them — the findings below remain as completion evidence for
+the goals they closed, but the citable version of each lives in `results.md`. The project aims to be
 a small, inspectable, reproducible decoder-only transformer training and inference runtime written
 entirely in C. It does not aim to compete with production-scale LLM frameworks.
 
@@ -697,6 +707,15 @@ speed/memory improvement is reproducible on identified hardware.
   list below can be claimed as an improvement until its delta is compared against that number, and
   at this project's model sizes the floor may well be larger than the effects being chased. Finding
   that out first is cheap; finding it out after publishing a ranking is not.
+
+  **Now blocked on the corpus, not on compute.** The 178 MB corpus this project trains on has
+  unverified provenance (`data/corpora/simple-wikipedia-178mb.manifest`), so a floor measured on it
+  would be a number no reader could reproduce, and `scripts/corpus.sh verify --require-verified`
+  refuses it by design. Establishing where that corpus came from — or replacing it with one that can
+  be cited — is the prerequisite. The harness the floor feeds into is built and tested:
+  `src/include/tools/statistics.h` returns "unresolvable at this N" as a verdict and treats an
+  interval that clears zero but sits inside the noise floor as unresolved
+  (`tests/core/test_statistics.c`).
 - [ ] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
 - [ ] Add padding and general attention masks before variable-length batching.

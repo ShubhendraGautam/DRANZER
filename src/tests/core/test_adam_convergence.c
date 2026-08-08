@@ -16,9 +16,8 @@
 #define STEPS 200
 
 int main(void) {
-    srand(7);
     neural_model_t model = {0};
-    if (model_new(&model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ) != MODEL_SUCCESS) {
+    if (model_new_seeded(&model, VOCAB, EMB, HEADS, LAYERS, MAX_SEQ, 7) != MODEL_SUCCESS) {
         fprintf(stderr, "model_new failed\n");
         return 1;
     }

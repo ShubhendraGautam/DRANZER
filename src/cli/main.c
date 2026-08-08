@@ -9,6 +9,8 @@
 #include "cli/tokenizer.h"
 #include "core/model.h"
 #include "common/debug.h"
+#include "common/fp_bits.h"
+#include "core/rng.h"
 #include "cli/config.h"
 #include "cli/evaluation.h"
 #include "cli/generation.h"
@@ -40,16 +42,6 @@ int mode_train(const cli_args_t *args);
 int mode_eval(const cli_args_t *args);
 int mode_infer(const cli_args_t *args);
 int mode_generate(const cli_args_t *args);
-
-/* The release build uses -ffast-math, under which isfinite() and even
- * value != value may be optimized on the assumption that NaNs cannot
- * occur. Inspecting the IEEE-754 exponent bits keeps CLI validation
- * reliable for values returned by strtof/atof. */
-static int float_is_finite(float value) {
-    uint32_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    return (bits & UINT32_C(0x7f800000)) != UINT32_C(0x7f800000);
-}
 
 static int stream_token_to_stdout(uint32_t token_id, const char *text,
                                   size_t text_length, void *user_data) {
@@ -516,12 +508,12 @@ int main(int argc, char *argv[]) {
     }
     if ((args.mode == MODE_INFER || args.mode == MODE_GENERATE) &&
         args.sampling_strategy == SAMPLING_TOPP &&
-        (!float_is_finite(args.top_p) || args.top_p <= 0.0f || args.top_p > 1.0f)) {
+        (!dranzer_float_is_finite(args.top_p) || args.top_p <= 0.0f || args.top_p > 1.0f)) {
         fprintf(stderr, "Error: --top-p must be greater than zero and at most one\n");
         return 2;
     }
     if ((args.mode == MODE_INFER || args.mode == MODE_GENERATE) &&
-        (!float_is_finite(args.temperature) ||
+        (!dranzer_float_is_finite(args.temperature) ||
          args.temperature < 0.0f || args.temperature > 2.0f)) {
         fprintf(stderr, "Error: --temperature must be between zero and two\n");
         return 2;
@@ -549,7 +541,6 @@ int main(int argc, char *argv[]) {
         return 2;
     }
 
-    srand(args.seed);
     
     /* Enable debug if requested */
     if (args.debug) {
@@ -756,8 +747,9 @@ int mode_train(const cli_args_t *args) {
     /* ===== STEP 2: Initialize Model ===== */
     printf("[2] Initializing neural model...\n");
     model_errors_t init_rc = resumed ? MODEL_SUCCESS :
-        model_new(&model, args->vocab_size, args->embedding_dim,
-                  args->num_heads, args->num_layers, args->max_seq_len);
+        model_new_seeded(&model, args->vocab_size, args->embedding_dim,
+                         args->num_heads, args->num_layers, args->max_seq_len,
+                         args->seed);
 
     if (init_rc != MODEL_SUCCESS) {
         fprintf(stderr, "Error: Model initialization failed (code: %d)\n", init_rc);
@@ -814,7 +806,6 @@ int mode_train(const cli_args_t *args) {
         model.warmup_steps = args->warmup_steps;
         model.total_steps = args->total_steps;
         model.base_lr = args->learning_rate;
-        model_seed_rng(&model, args->seed);
     }
     model.use_gpu = args->use_gpu;
 
@@ -1140,17 +1131,22 @@ int mode_train(const cli_args_t *args) {
     printf("[4.2] Sampling strategies demonstration:\n");
     float *demo_logits = malloc(model.vocab_size * sizeof(float));
     if (demo_logits) {
+        /* Its own stream off the run's seed, so the demonstration prints the
+         * same tokens on every platform and does not disturb the sampling
+         * stream a real generate run uses. */
+        uint64_t demo_rng = dranzer_rng_stream(args->seed,
+                                               DRANZER_RNG_STREAM_TESTING);
         for (size_t i = 0; i < model.vocab_size; i++) {
-            demo_logits[i] = (float)(rand() % 100) / 100.0f;
+            demo_logits[i] = dranzer_rng_uniform(&demo_rng, 0.0f, 1.0f);
         }
         
         uint32_t greedy = sample_greedy(demo_logits, model.vocab_size);
         printf("   - Greedy:   selected token %u\n", greedy);
         
-        uint32_t topk = sample_topk(demo_logits, model.vocab_size, 5);
+        uint32_t topk = sample_topk(demo_logits, model.vocab_size, 5, &demo_rng);
         printf("   - Top-5:    selected token %u\n", topk);
         
-        uint32_t topp = sample_topp(demo_logits, model.vocab_size, 0.9f);
+        uint32_t topp = sample_topp(demo_logits, model.vocab_size, 0.9f, &demo_rng);
         printf("   - Top-p:    selected token %u\n", topp);
         
         printf("   ✓ Sampling strategies demonstrated\n");
@@ -1353,9 +1349,12 @@ int mode_infer(const cli_args_t *args) {
             return 1;
         }
         generation_mask_control_logits(encoder, model.ws_logits, model.vocab_size);
+        uint64_t infer_rng = dranzer_rng_stream(args->seed,
+                                                DRANZER_RNG_STREAM_SAMPLING);
         uint32_t predicted = sample_next_token(model.ws_logits, model.vocab_size,
                                                args->sampling_strategy, args->temperature,
-                                               (size_t)args->top_k, args->top_p);
+                                               (size_t)args->top_k, args->top_p,
+                                               &infer_rng);
         if (generation_token_is_eos(encoder, predicted))
             printf("   Predicted next token: EOS (%u)\n", predicted);
         else
@@ -1493,6 +1492,11 @@ int mode_generate(const cli_args_t *args) {
         return 1;
     }
 
+    /* One stream for the whole generation, so the text --seed names is the same
+     * on any C library (see core/rng.h) and does not depend on how many tokens
+     * an earlier call happened to sample. */
+    uint64_t generate_rng = dranzer_rng_stream(args->seed,
+                                               DRANZER_RNG_STREAM_SAMPLING);
     generation_options_t options = {
         .strategy = args->sampling_strategy,
         .temperature = args->temperature,
@@ -1504,6 +1508,7 @@ int mode_generate(const cli_args_t *args) {
         .stop_sequences = stops,
         .stop_sequence_count = args->stop_sequence_count,
         .on_token = stream_token_to_stdout,
+        .rng_state = &generate_rng,
     };
     generation_result_t generation = {0};
     printf("\n=== Generated Sequence ===\n");

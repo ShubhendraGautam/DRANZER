@@ -5,8 +5,7 @@
 #include <string.h>
 
 static int initialize_sgd(neural_model_t *model, unsigned int seed) {
-    srand(seed);
-    if (model_new(model, 20, 8, 2, 1, 8) != MODEL_SUCCESS) return -1;
+    if (model_new_seeded(model, 20, 8, 2, 1, 8, seed) != MODEL_SUCCESS) return -1;
     model->optimizer_type = OPTIMIZER_SGD;
     model->learning_rate = 0.002f;
     model->metrics.learning_rate = model->learning_rate;

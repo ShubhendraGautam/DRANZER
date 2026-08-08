@@ -48,8 +48,7 @@ int main(void) {
         goto cleanup;
     }
 
-    srand(17);
-    if (model_new(&model, encoder->max_vocab_size, 8, 2, 1, 8) != MODEL_SUCCESS) {
+    if (model_new_seeded(&model, encoder->max_vocab_size, 8, 2, 1, 8, 17) != MODEL_SUCCESS) {
         fprintf(stderr, "failed to create model fixture\n");
         failed = 1;
         goto cleanup;

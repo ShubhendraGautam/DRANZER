@@ -6,6 +6,7 @@
  */
 
 #include "core/tensor_ops.h"
+#include "core/rng.h"
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
@@ -13,10 +14,11 @@
 #include <omp.h>
 #endif
 
-void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out) {
+void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out,
+                 uint64_t *rng_state) {
     float limit = sqrtf(6.0f / (fan_in + fan_out));
     for (size_t i = 0; i < size; i++) {
-        weights[i] = (rand() / (float)RAND_MAX) * 2.0f * limit - limit;
+        weights[i] = dranzer_rng_uniform(rng_state, -limit, limit);
     }
 }
 
@@ -173,46 +175,18 @@ int compute_positional_encoding_at(float *pos_embed, size_t position,
     return 0;
 }
 
-void dropout_forward(float *x, float *mask_out, size_t total_size, float rate, int is_training) {
+void dropout_forward(float *x, float *mask_out, size_t total_size, float rate,
+                     int is_training, uint64_t *rng_state) {
     if (!is_training || rate <= 0.0f) {
         for (size_t i = 0; i < total_size; i++) mask_out[i] = 1.0f;
         return;
     }
+    if (!rng_state) return; /* documented as required; nothing sane to do */
 
     float keep_prob = 1.0f - rate;
     float inv_keep = 1.0f / keep_prob;
     for (size_t i = 0; i < total_size; i++) {
-        float keep = ((float)rand() / (float)RAND_MAX) < keep_prob ? 1.0f : 0.0f;
-        mask_out[i] = keep;
-        x[i] = x[i] * keep * inv_keep;
-    }
-}
-
-static uint64_t rng_next(uint64_t *state) {
-    uint64_t x = *state ? *state : UINT64_C(0x9e3779b97f4a7c15);
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    *state = x;
-    return x * UINT64_C(2685821657736338717);
-}
-
-void dropout_forward_rng(float *x, float *mask_out, size_t total_size, float rate,
-                         int is_training, uint64_t *rng_state) {
-    if (!rng_state) {
-        dropout_forward(x, mask_out, total_size, rate, is_training);
-        return;
-    }
-    if (!is_training || rate <= 0.0f) {
-        for (size_t i = 0; i < total_size; i++) mask_out[i] = 1.0f;
-        return;
-    }
-
-    float keep_prob = 1.0f - rate;
-    float inv_keep = 1.0f / keep_prob;
-    for (size_t i = 0; i < total_size; i++) {
-        double unit = (double)(rng_next(rng_state) >> 11) * (1.0 / 9007199254740992.0);
-        float keep = unit < (double)keep_prob ? 1.0f : 0.0f;
+        float keep = dranzer_rng_unit(rng_state) < (double)keep_prob ? 1.0f : 0.0f;
         mask_out[i] = keep;
         x[i] = x[i] * keep * inv_keep;
     }
