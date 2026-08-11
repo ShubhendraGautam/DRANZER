@@ -1,0 +1,32 @@
+# Project Gutenberg ebook 100, The Complete Works of William Shakespeare.
+#
+# The catalog identifies this edition as public domain in the USA and the
+# downloaded text embeds the complete Project Gutenberg license. The license
+# notes that readers outside the USA must check their local law. This manifest
+# describes the unmodified UTF-8 plain-text download, including its Gutenberg
+# header and license, so the redistribution terms travel with every local copy.
+#
+# The upstream catalog reported "Most recently updated: August 24, 2025" when
+# these bytes were retrieved. Project Gutenberg may replace an edition; the
+# fixed hash below deliberately makes such a replacement fail verification
+# instead of silently changing a reported metric.
+
+name = gutenberg-shakespeare-100-2025-08-24
+description = Project Gutenberg ebook 100, complete Shakespeare, UTF-8 plain text
+provenance = verified
+source_url = https://www.gutenberg.org/cache/epub/100/pg100.txt
+license = https://www.gutenberg.org/policy/license.html
+retrieved = 2026-08-12
+encoding = utf-8
+bytes = 5638480
+lines = 196398
+sha256 = 3cf4b3d44ee14cff4e14e78e2ad3318eff76f3f7f2afc3cee6bb925879110a37
+
+# 90% train / 10% validation, advanced to the first newline so the validation
+# text does not begin in the middle of a line. These are byte splits, not plays
+# or document splits; the evaluation protocol must not claim otherwise.
+split_train_bytes = 5074653
+split_train_sha256 = 631627e4a976e20d088a45c9489ab67a8a3ff846eefe44ef28a8c8fb47073219
+split_validation_sha256 = 517c82216a7ad70206ab971e0a4965f9de9f133658d206204ff133a02366f6f8
+
+reconstruct = curl -fL https://www.gutenberg.org/cache/epub/100/pg100.txt -o pg100.txt

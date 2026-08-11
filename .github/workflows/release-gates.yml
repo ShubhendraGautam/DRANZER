@@ -102,3 +102,34 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 90
+
+  reference-model:
+    name: Reproduce small reference model
+    needs: [packages]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Train, evaluate, and package the pinned recipe
+        run: >-
+          scripts/reference/publish_shakespeare_small.sh publish
+          --output dist/reference/shakespeare-small-v1
+
+      - name: Reject corrupted reference packages
+        run: >-
+          src/tests/integration/test_reference_package.sh
+          dist/reference/shakespeare-small-v1
+          scripts/reference/publish_shakespeare_small.sh
+
+      - name: Upload the model, provenance, and expected metrics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shakespeare-small-v1-${{ github.run_number }}
+          path: dist/reference/shakespeare-small-v1/
+          if-no-files-found: error
+          retention-days: 90

@@ -70,3 +70,7 @@ scripts/corpus.sh verify data/corpora/tiny-smoke.manifest path/to/corpus
 scripts/corpus.sh split  data/corpora/tiny-smoke.manifest path/to/corpus outdir/
 scripts/corpus.sh create --name my-corpus --path file.txt   # a manifest skeleton
 ```
+
+The verified `gutenberg-shakespeare-100.manifest` backs the small release
+reference model. `tiny-smoke.manifest` remains test-only, and the unverified
+178 MB corpus remains barred from reported quality results.

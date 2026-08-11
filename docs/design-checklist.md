@@ -775,7 +775,16 @@ the CLI is a client of the same supported API available to external programs.
 
 ## v1.0 — Mature reference implementation
 
-- [ ] Publish small reference models, their corpus provenance, and expected evaluation metrics.
+- [~] Publish small reference models, their corpus provenance, and expected evaluation metrics.
+  `references/shakespeare-small/` now pins a complete training/evaluation recipe to the verified
+  Project Gutenberg ebook 100 manifest rather than laundering the explicitly test-only smoke
+  corpus into a quality result. One command downloads and verifies the exact bytes, applies the
+  recorded newline-aligned split, performs a clean GCC build (or accepts a reviewed binary), trains,
+  re-evaluates the saved bundle, and stages the bundle, tokenizer, resolved configuration, raw logs,
+  provenance, hashes, and expected cross-entropy/perplexity. Static and replay verification reject
+  payload corruption, path traversal, forged corpus identity, token-count drift, and metric drift;
+  the release gate uploads the resulting directory. Execution and the resulting measured metric are
+  deliberately deferred to the final bundled validation pass, so this remains partial until then.
 - [~] Guarantee and test the documented model-format and public-API compatibility window.
   Bundle versions 1–2 and public API version 1 are now promised through the 1.x release line.
   Loaders report the actual wire version; fixed v1/v2 header fields are pinned in the bundle test.

@@ -81,6 +81,7 @@ make -C src bench-bundle-load            # copied vs mmap bundle startup/RSS
 make -C src public-api-check             # static/shared embedding artifacts
 make -C src release-repro-check          # clean GCC/Clang reproducibility gate
 make -C src release-package-check        # reproducible source/SDK archives
+make -C src reference-model              # pinned corpus, model, and expected metrics
 make -C src profile CC=gcc               # frame-pointer build for perf
 make -C src gpu-probe && ./src/gpu_probe.out
 make -C src gpu-latency && ./src/gpu_latency.out  # GPU per-call cost
@@ -108,6 +109,7 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 | [Results](docs/results.md) | Every measured finding, with its method, its uncertainty, and what reproduces it |
 | [Reproducibility](docs/reproducibility.md) | What a seed guarantees, per axis, and how each cell was established |
 | [Corpus manifests](data/corpora/README.md) | The rule that a reported result may not name a corpus a reader cannot obtain |
+| [Small reference model](references/shakespeare-small/README.md) | Pinned public corpus, training recipe, package checks, and metric replay |
 | [Design checklist](docs/design-checklist.md) | Prioritized maturity roadmap and acceptance gates |
 | [Research checklist](docs/research-checklist.md) | What would stop a reader believing or reproducing a result from this codebase, and the defects that already threaten one |
 
