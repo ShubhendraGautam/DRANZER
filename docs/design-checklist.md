@@ -749,7 +749,13 @@ speed/memory improvement is reproducible on identified hardware.
   rejection, finite empty rows, all-padding rejection, and padded gradient equivalence. Execution
   remains deferred to the final bundled validation pass before this changes to `[x]`.
 - [ ] Consider grouped-query attention only after quality and decode benchmarks exist.
-- [ ] Expose opaque model, tokenizer, cache, and generation handles through a stable public C API.
+- [~] Expose opaque model, tokenizer, cache, and generation handles through a stable public C API.
+  `src/include/dranzer.h` now defines API version 1 with opaque, reference-counted handles, one
+  structured status space, copy/mmap bundle loading, binary-safe tokenizer buffers, full/cached
+  inference, and a deterministic greedy generation session. Cache and generation handles retain
+  their model/tokenizer dependencies. `test_public_api.c` covers the public ownership and data-path
+  contract, including release-order safety. Source review is complete; execution is deferred to the
+  final bundled validation before this changes to `[x]`.
 - [ ] Remove terminal output from library code and return structured errors to callers.
 - [ ] Produce static/shared library targets and small embedding examples.
 

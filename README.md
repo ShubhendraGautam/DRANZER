@@ -97,6 +97,7 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 | [CPU threading](docs/threading.md) | When an OpenMP region is worth entering, the measured cutoff, and why a persistent worker pool was rejected |
 | [GPU backend](docs/gpu.md) | PTX execution, capability probing, caching, limitations, and measurements |
 | [Development](docs/development.md) | Tests, CI/nightly jobs, sanitizers, benchmarks, and contribution workflow |
+| [Public C API](docs/public-api.md) | Opaque model/tokenizer/cache/generation handles and ownership rules |
 | [Results](docs/results.md) | Every measured finding, with its method, its uncertainty, and what reproduces it |
 | [Reproducibility](docs/reproducibility.md) | What a seed guarantees, per axis, and how each cell was established |
 | [Corpus manifests](data/corpora/README.md) | The rule that a reported result may not name a corpus a reader cannot obtain |

@@ -1,0 +1,68 @@
+# Public C embedding API
+
+[← Back to README](../README.md)
+
+`src/include/dranzer.h` is the supported embedding boundary. It includes only standard size/integer
+headers and exposes opaque `dranzer_model_t`, `dranzer_tokenizer_t`, `dranzer_cache_t`, and
+`dranzer_generation_t` handles. Applications do not depend on the layout of `neural_model_t`, the
+BPE hash maps, activation caches, or CLI configuration structures.
+
+The first contract version is `DRANZER_API_VERSION == 1`. Every fallible call returns one
+`dranzer_status_t`; `dranzer_status_string()` supplies a stable diagnostic phrase without printing
+from the wrapper. Handles are stateful and are not safe for concurrent calls. Separate handles may
+be used by separate threads when the underlying model is not being mutated.
+
+## Loading and ownership
+
+```c
+#include "dranzer.h"
+
+dranzer_model_t *model = NULL;
+dranzer_tokenizer_t *tokenizer = NULL;
+dranzer_bundle_info_t info;
+
+dranzer_status_t rc = dranzer_bundle_load(
+    "model.bin", DRANZER_LOAD_MMAP, &model, &tokenizer, &info);
+if (rc != DRANZER_OK) {
+    /* dranzer_status_string(rc) */
+}
+
+/* use handles */
+
+dranzer_tokenizer_free(tokenizer);
+dranzer_model_free(model);
+```
+
+`DRANZER_LOAD_COPY` accepts version-1 and version-2 bundles and produces ordinary writable internal
+parameters. `DRANZER_LOAD_MMAP` accepts version 1 and uses the checked read-only mapping described in
+[Model bundle format](model-bundle.md). The public API currently exposes inference, so both modes
+have the same public operations.
+
+Model and tokenizer handles returned by `dranzer_bundle_load()` are independently owned. Cache and
+generation handles retain their dependencies internally: it is safe to release the caller's
+original model/tokenizer handles first, and the underlying objects live until the last dependent
+handle is freed.
+
+## Token and logits buffers
+
+Tokenizer strings are byte spans, not C strings. They may contain NUL. `dranzer_tokenize()` and
+`dranzer_detokenize()` use a two-call buffer convention: pass a null output with a zero capacity to
+receive the required count/size and `DRANZER_BUFFER_TOO_SMALL`, allocate, then call again. No partial
+result is written when capacity is short.
+
+`dranzer_model_forward()` accepts a token span and a logits buffer of at least
+`dranzer_model_vocab_size()` floats. `dranzer_cache_create()` plus `dranzer_cache_forward()` is the
+incremental equivalent; reset begins a new sequence without reallocating.
+
+## Generation sessions
+
+`dranzer_generation_create()` owns an incremental cache and logits workspace. Reset tokenizes a
+prompt, prepends BOS for a special-aware tokenizer, truncates from the left when necessary, and
+prefills the cache. `dranzer_generation_next_greedy()` returns one token and its exact decoded byte
+piece. PAD, UNK, BOS, and unassigned vocabulary slots are excluded; EOS returns
+`DRANZER_FINISHED` with an empty piece. A short piece buffer returns `DRANZER_BUFFER_TOO_SMALL`
+without consuming the token, so the caller can resize and retry.
+
+The initial stable surface deliberately exposes deterministic greedy stepping first. Sampling,
+callbacks, and stop-sequence orchestration remain available to the repository CLI but are not yet
+promised as public ABI.

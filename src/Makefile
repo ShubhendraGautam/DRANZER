@@ -130,6 +130,7 @@ MAIN_SOURCE = cli/main.c
 # with zero fuss if no NVIDIA GPU is present - see
 # core/transformer.c's dispatch_matmul(). Needs -ldl.
 SRC = $(MAIN_SOURCE) \
+      api/dranzer.c \
       cli/tokenizer.c cli/evaluation.c cli/generation.c cli/attention.c cli/config.c cli/manifest.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
       core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/quantized_matmul.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/weight_decay.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
       backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
@@ -374,7 +375,7 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # tests/core/test_statistics.c needs it and the test target links one fixed set
 # of objects into every test binary. It is measurement infrastructure rather than
 # model code, hence tools/ - see include/tools/statistics.h.
-TEST_MODEL_OBJ = tools/statistics.o core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/quantized_matmul.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/rng.o core/fingerprint.o core/bf16.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/weight_decay.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
+TEST_MODEL_OBJ = tools/statistics.o api/dranzer.o core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/quantized_matmul.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/rng.o core/fingerprint.o core/bf16.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/weight_decay.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
 
 # Compare version-1 bundle allocation/copy loading with the read-only mmap
