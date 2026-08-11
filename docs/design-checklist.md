@@ -637,8 +637,13 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   fixture covers reconstruction against part 1, size accounting, compression, checksum rejection,
   and a forged-but-checksummed tensor shape; completion awaits review and that single test gate.
 - [~] **Weight-only quantization, part 3: whether it is actually faster.** Kernel side answered for
-  **bf16** (`core/bf16.{c,h}`, `tests/core/test_bf16.c`); the INT storage path is implemented above,
-  but INT8/INT4 runtime kernels are not built, so this stays open.
+  **bf16** (`core/bf16.{c,h}`, `tests/core/test_bf16.c`). INT8 and packed INT4 portable, AVX2, and
+  AVX-512 kernels are now implemented in `core/quantized_matmul.{c,h}`, with every scale granularity
+  accepted and float32 products/accumulation retained. `test_quantized_matmul.c` compares each
+  available dispatch rung against matmul over the fully dequantized values; the standalone
+  `bench_quantized_matmul.out` validates before timing fp32/bf16/INT8/INT4 in ABBA order. Per the
+  bundled-test policy, neither has run yet, so this item stays partial until the final correctness
+  gate and benchmark supply evidence rather than a predicted speedup.
 
   bf16 was taken first because it is the sharpest possible test of the question, not because it is
   the most compressive. Its widening is a 16-bit left shift into the high half of a float — three
@@ -690,11 +695,10 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   builds with `-ffast-math`, which implies `-ffinite-math-only`, so the compiler folds both away.
   Those cases are now checked on bit patterns, which is immune and tests the contract more directly.
 
-  Still open before any of this reaches the model: weights are converted once by the caller here and
-  the kernel is not wired into `core/transformer.c`, there is no bf16 path in the bundle format
-  (part 2), and the backward pass is untouched — the win above is forward-only. INT8/INT4 kernels
-  remain unwritten, and the bound established here says they must beat 1.21–1.24x while unpacking
-  more expensively.
+  Still open before any of this reaches the model: weights are converted once by the caller and the
+  narrow kernels are not wired into `core/transformer.c`; bundle v2 deliberately dequantizes on
+  load, and the backward pass is untouched. The existing bf16 bound says INT8/INT4 must beat
+  1.21–1.24x while unpacking more expensively; that comparison is now executable but not yet run.
 - [ ] Support memory-mapped weights and measure startup time and resident memory.
 - [x] Run the full benchmark nightly on hosted runners and gate on same-run performance invariants
   (`.github/workflows/performance.yml`, `src/tools/perf_check.py`): kernel versus scalar reference,

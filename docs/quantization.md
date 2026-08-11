@@ -271,9 +271,9 @@ gap between that and a claim about real models is the most important thing on th
 - **The grid is symmetric and per-group only.** No affine zero-point, no group-of-N-within-a-row
   blocking, no error-compensating schemes (GPTQ/AWQ-style). Those are the interesting comparisons
   and none of them were run.
-- **Nothing is faster.** By construction: the weights are float32 again the instant they are
-  quantized. Every number here is an accuracy cost with no benefit attached, and the benefit is a
-  later goal.
+- **Nothing in the accuracy table is faster.** By construction: those weights are float32 again the
+  instant they are quantized. Runtime INT8/INT4 kernels now exist separately, but their benchmark is
+  deliberately outside this accuracy experiment and has not yet supplied a result.
 - **Even 60 seeds is a coarse spread estimate**, and the reported figure is a sample standard
   deviation rather than a confidence interval. "Resolvable" is a stated rule of thumb
   (|mean| > 2x spread), not a hypothesis test, with no correction for the ten schemes and four

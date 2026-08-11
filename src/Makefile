@@ -131,7 +131,7 @@ MAIN_SOURCE = cli/main.c
 # core/transformer.c's dispatch_matmul(). Needs -ldl.
 SRC = $(MAIN_SOURCE) \
       cli/tokenizer.c cli/evaluation.c cli/generation.c cli/attention.c cli/config.c cli/manifest.c cli/sampling.c cli/batch.c cli/checkpoint.c cli/cli.c cli/stream.c \
-      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/weight_decay.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
+      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/quantized_matmul.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/weight_decay.c core/optimizer.c core/training.c core/evaluation.c core/bundle.c core/serialization.c core/metrics.c \
       backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 OBJ = $(SRC:.c=.o)
 
@@ -141,7 +141,7 @@ TARGET = app.out
 # model modules it actually needs, not cli/*.o. A separate binary on
 # purpose: it has nothing to do with training-run orchestration.
 BENCH_SRC = tools/bench.c tools/bench_matmul.c tools/bench_support.c \
-            core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/weight_decay.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
+            core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/quantized_matmul.c core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c core/weight_decay.c core/optimizer.c core/training.c core/evaluation.c core/serialization.c core/metrics.c \
             backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 BENCH_TARGET = bench.out
@@ -236,6 +236,21 @@ bench-quant: $(BENCH_QUANT_TARGET)
 $(BENCH_QUANT_TARGET): $(BENCH_QUANT_OBJ)
 	$(CC) $(BENCH_QUANT_OBJ) $(CFLAGS) $(LDFLAGS) -ldl -o $(BENCH_QUANT_TARGET)
 
+# Weight bandwidth in isolation: identical float32 accumulation with B kept as
+# fp32, bf16, INT8, or packed INT4. Every narrow kernel is validated against a
+# dequantized reference before timing.
+BENCH_QUANT_MATMUL_SRC = tools/bench_quantized_matmul.c tools/bench_support.c \
+                         core/quantize.c core/quantized_matmul.c core/bf16.c \
+                         core/parallel.c core/matmul.c core/matmul_x86.c \
+                         core/matmul_arm.c core/cpu_features.c
+BENCH_QUANT_MATMUL_OBJ = $(BENCH_QUANT_MATMUL_SRC:.c=.o)
+BENCH_QUANT_MATMUL_TARGET = bench_quantized_matmul.out
+
+bench-quantized-matmul: $(BENCH_QUANT_MATMUL_TARGET)
+
+$(BENCH_QUANT_MATMUL_TARGET): $(BENCH_QUANT_MATMUL_OBJ)
+	$(CC) $(BENCH_QUANT_MATMUL_OBJ) $(CFLAGS) $(LDFLAGS) -o $(BENCH_QUANT_MATMUL_TARGET)
+
 # What entering an OpenMP parallel region costs, and where it starts paying
 # for itself - the tool docs/threading.md is written from, and where
 # core/parallel.c's threshold comes from. Needs OMP=1 to measure anything;
@@ -301,7 +316,7 @@ arm-check:
 # it is the scalar attention core that has no SIMD kernel. Run this before any
 # attention kernel work: it measures the ceiling on that work.
 BENCH_ATTENTION_SRC = tools/bench_attention.c \
-                      core/model.c core/model_params.c core/model_quantize.c core/quantize.c \
+                      core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/quantized_matmul.c \
                       core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c \
                       core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c \
                       core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c \
@@ -325,7 +340,7 @@ finite-math-check:
 # reproducibility contract (docs/reproducibility.md) is checked with. Links the
 # model modules and nothing else - no CLI, no GPU, no timing.
 FINGERPRINT_SRC = tools/fingerprint_model.c \
-                  core/model.c core/model_params.c core/model_quantize.c core/quantize.c \
+                  core/model.c core/model_params.c core/model_quantize.c core/quantize.c core/quantized_matmul.c \
                   core/parallel.c core/matmul.c core/matmul_x86.c core/matmul_arm.c \
                   core/cpu_features.c core/tensor_ops.c core/rng.c core/fingerprint.c \
                   core/bf16.c core/transformer.c core/matmul_dispatch.c core/lm_head.c \
@@ -359,7 +374,7 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # tests/core/test_statistics.c needs it and the test target links one fixed set
 # of objects into every test binary. It is measurement infrastructure rather than
 # model code, hence tools/ - see include/tools/statistics.h.
-TEST_MODEL_OBJ = tools/statistics.o core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/rng.o core/fingerprint.o core/bf16.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/weight_decay.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
+TEST_MODEL_OBJ = tools/statistics.o core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/quantized_matmul.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/rng.o core/fingerprint.o core/bf16.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/weight_decay.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
 # tests/perf/ holds timing tests. They assert ratios between measurements
 # taken in the same process, never absolute times, so a slow or busy machine
@@ -397,12 +412,13 @@ test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
 
 # Every .d generated by -MMD, matching the .o list it was derived from.
 DEPS = $(OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(BENCH_PARALLEL_OBJ:.o=.d) \
-       $(BENCH_QUANT_OBJ:.o=.d) $(GPU_PROBE_OBJ:.o=.d) $(GPU_LATENCY_OBJ:.o=.d) \
+       $(BENCH_QUANT_OBJ:.o=.d) $(BENCH_QUANT_MATMUL_OBJ:.o=.d) \
+       $(GPU_PROBE_OBJ:.o=.d) $(GPU_LATENCY_OBJ:.o=.d) \
        $(FINGERPRINT_OBJ:.o=.d) $(BENCH_ATTENTION_OBJ:.o=.d) \
        $(TEST_MODEL_OBJ:.o=.d)
 
 clean:
-	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS)
+	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS)
 	rm -f $(DEPS)
 	$(MAKE) -C $(LIB_DIR) clean
 
@@ -410,4 +426,4 @@ clean:
 # .d (first build, or straight after clean) from being an error.
 -include $(DEPS)
 
-.PHONY: all clean bench bench-parallel bench-quant profile test gpu-probe gpu-latency arm-check finite-math-check fingerprint bench-attention
+.PHONY: all clean bench bench-parallel bench-quant bench-quantized-matmul profile test gpu-probe gpu-latency arm-check finite-math-check fingerprint bench-attention

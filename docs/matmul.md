@@ -626,11 +626,38 @@ wrong number that agrees with the prediction is the one least likely to be re-ex
 same failure mode recorded for `avx512_mr4`, which shipped for months on 1.83x having never been
 compared against a better version of itself.
 
+## INT8 and packed INT4 weight storage
+
+`core/quantized_matmul.c` consumes the same symmetric grid and bit order as bundle version 2.
+`quantized_weight_matrix_encode()` retains scales plus either one byte per INT8 value or two INT4
+codes per byte; it never modifies the source weights. `matmul_quantized_weight()` widens one B tile
+at a time, applies the tensor/row/column scale, and keeps every product and partial sum in float32.
+
+Portable, AVX2, and AVX-512 rungs mirror the bf16 kernel's three-level `(i,j,l)` tiling and four-row
+register block. INT8 widens contiguous bytes directly. Packed INT4 extracts nibbles before vector
+conversion; that extra work is precisely what must be measured rather than assumed away.
+
+`tests/core/test_quantized_matmul.c` compares every available rung, both widths, all three scale
+granularities, and aligned/unaligned shapes against float32 matmul over the fully decoded weights.
+The isolated benchmark refuses to time a narrow format unless it passes the same reference check,
+then records ABBA-interleaved fp32, bf16, INT8, and INT4 medians with full host/build provenance:
+
+```bash
+cd src
+make bench-quantized-matmul
+./bench_quantized_matmul.out --quick
+./bench_quantized_matmul.out
+```
+
+The benchmark has deliberately not been executed before the final bundled validation, so no speed
+claim is attached to the implementation yet.
+
 ## Limitations
 
-- **bf16 is kernel-only so far.** `matmul_bf16_weight()` is not wired into `core/transformer.c`,
-  there is no bf16 path in the bundle format, and the backward pass is untouched — the numbers
-  above are forward-only, with B converted once by the caller.
+- **Narrow weights are kernel-only so far.** Neither `matmul_bf16_weight()` nor
+  `matmul_quantized_weight()` is wired into `core/transformer.c`; bundle v2 dequantizes on load, and
+  the backward pass is untouched. The measurements are forward-only, with B converted once by the
+  caller.
 - **The NEON kernel is written but unmeasured.** No AArch64 machine was available. It is checked for
   correctness by the same equivalence test wherever it is built and cross-compiled by
   `make arm-check`, but `matmul_select()` does not return it — an AArch64 machine falls back to
