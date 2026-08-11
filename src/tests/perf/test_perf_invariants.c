@@ -49,7 +49,7 @@
  *   matrix_multiply vs matrix_multiply_scalar  35.39 - 37.97  (min   1.50)
  *   AVX-512 forward matmul                      3.76 - 3.82   (min   1.20)
  *   AVX-512 matmul_backward_input              16.51 - 17.63  (min   1.20)
- *   AVX-512 matmul_backward_weight              2.05 - 2.15   (min   1.20)
+ *   AVX-512 matmul_backward_weight              2.05 - 2.15   (min   1.10)
  *
  * every median within 10% of its neighbours, while the worst single replicate
  * inside those runs went as low as 0.96x for a comparison whose median never
@@ -58,8 +58,13 @@
  *
  * The thresholds stay loose anyway, and deliberately: the spreads above are for
  * one CPU, and the ratios themselves legitimately differ between machines - a
- * different cache hierarchy changes how much the vector paths win. The printed
- * spread is what makes drift visible; the threshold only catches collapse.
+ * different cache hierarchy changes how much the vector paths win. A hosted
+ * AMD EPYC 9V74 later measured the AVX-512 backward-weight path at a stable
+ * 1.18x (1.17x-1.19x) and falsified the original 1.20x floor without showing a
+ * dispatch collapse. The printed spread is what makes drift visible; the 1.10x
+ * backward-weight floor below still rejects a no-op dispatch near 1.0 while
+ * admitting that measured hardware variation. The other two paths retain the
+ * original 1.20x floor because no runner has falsified it.
  */
 
 #include "core/cpu_features.h"
@@ -238,7 +243,7 @@ static void check_simd_dispatch_is_worth_something(void) {
                    op_backward_input_baseline, 1.2,
                    "core/matmul.c dispatches this to matmul_backward_input_avx512.");
     expect_speedup("matmul_backward_weight", op_backward_weight_simd,
-                   op_backward_weight_baseline, 1.2,
+                   op_backward_weight_baseline, 1.1,
                    "core/matmul.c dispatches this to matmul_backward_weight_avx512.");
     cpu_features_clear_max_isa();
 }

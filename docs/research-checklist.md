@@ -273,6 +273,13 @@ that looks fine and is not.
   the worst single replicate inside those runs fell to 0.96x for a comparison whose median never left
   1.56–1.79. Every threshold now sits far outside the spread of the statistic it gates.
 
+  A later hosted runner added a different kind of evidence: AMD EPYC 9V74 measured the AVX-512
+  backward-weight median at a stable **1.18x [1.17x, 1.19x]**. The distribution was tight, so this
+  was not the old timing defect; the original 1.20x floor simply did not transfer to that hardware.
+  That one floor is now 1.10x, still separated from a collapsed dispatch near 1.0, while the forward
+  and backward-input floors remain 1.20x. A ratio test can remove scheduler noise and still need its
+  threshold falsified by a new microarchitecture — both layers matter.
+
   The same defect was found and fixed in `tests/gpu/test_gpu_latency_invariants.c`, which had a 1.00x
   floor against readings of 0.83x once and 1.01–1.42x on the eight runs after — it failed during this
   work, which is how it was noticed. Its median now reads 1.19–1.29x across five runs. The
@@ -377,6 +384,20 @@ that looks fine and is not.
   *Acceptance gate:* every table in `docs/` that carries numbers names the script that regenerates
   it, and running that script on a clean checkout reproduces the numbers within their stated
   uncertainty.
+
+  **In progress.** `scripts/repro/benchmark_all.sh` now creates one Markdown artifact containing
+  the current whole-model throughput matrix: clean Clang and GCC builds, OpenMP compiled out, one
+  thread and all visible cores, CPU and GPU modes, and every model tier. CPU and GPU sections are
+  separate rows — the first parser mixed CPU inference with later GPU values and thereby described
+  no real run — and every cell is a median with the observed training spread beside it. The script
+  records the machine and toolchains, retains every raw report outside the checkout, validates its
+  arguments, restores the default build, and has been exercised end to end with
+  `--quick --repeats 1` from this checkout.
+
+  This does not close the item: historical result tables for attention, quantization, threading,
+  and the `-ffast-math` comparison still name tool commands or prose workflows rather than one
+  `scripts/repro/<result>.sh` artifact generator. Leaving the box open makes that remaining scope
+  visible instead of treating one successful benchmark wrapper as the acceptance gate.
 
 - [ ] **P1. Record the full environment with every result, not just with benchmarks.**
   The benchmark CSVs already carry build command, compiler, OS, CPU, core count, OpenMP version,

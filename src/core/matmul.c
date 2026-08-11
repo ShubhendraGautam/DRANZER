@@ -153,8 +153,8 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
     );
 }
 
-/* One kernel for every shape, and that is a measured result rather than a
- * missing feature.
+/* One exception to the widest-SIMD rule, and it is a measured shape rather
+ * than a general claim about single-row matmuls.
  *
  * The sweep in docs/matmul.md compared all four kernels at five tile sizes
  * over the six shapes the model issues, on three model tiers, under GCC and
@@ -162,11 +162,10 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
  * both compilers - never worse than 1.4x off the best candidate for a shape,
  * and faster than the scalar reference on all 36 measured combinations.
  *
- * Two shape splits looked attractive and were rejected because they did not
- * hold up across compilers or across sessions:
- *   - "single-row decode takes the unblocked kernel" is worth up to 1.26x
- *     under Clang and costs up to 1.5x under GCC, which prefers the blocked
- *     kernels even at m == 1.
+ * Two broad shape splits looked attractive and were rejected because they did
+ * not hold up across compilers or across sessions:
+ *   - "every single-row decode takes the unblocked kernel" still loses on the
+ *     tiny tier and on output-head shapes;
  *   - "wide outputs (n >= 1024) take the plain tiled kernel" improved the
  *     average by about 1%, which is smaller than the run-to-run spread of
  *     the session that produced it.
@@ -177,8 +176,15 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
  * contract that selection depends on nothing else, and because a future sweep
  * may yet find a split the current measurements do not support.
  *
- * Runtime SIMD dispatch adds one step in front of all of it: the widest
- * vector kernel this CPU can execute.
+ * The nightly sweep later found one narrower rule that does hold under both
+ * compilers: the model's single-token FFN expansion (m == 1, n == 4*k) takes
+ * rowwise once k reaches 64. On hosted AMD runners rowwise beat the shipped
+ * SIMD kernel 1.15x/1.85x at 1x64x256 (GCC/Clang) and 5.89x/7.28x at
+ * 1x256x1024. At 1x16x64 it lost 1.57x/1.18x, which is why the lower bound is
+ * part of the policy instead of treating every FFN expansion alike.
+ *
+ * Every other shape uses runtime SIMD dispatch: the widest vector kernel this
+ * CPU can execute.
  *
  * That ordering was measured, rejected, and then measured again, and the
  * history matters more than the conclusion. The SIMD kernels originally held
@@ -208,9 +214,11 @@ static void kernel_tiled_mr4(const float *restrict A, const float *restrict B,
  * falsified, so it no longer carries weight. It remains selectable and
  * correctness-checked; see docs/matmul.md. */
 matmul_kernel_t matmul_select(size_t m, size_t k, size_t n) {
-    (void)m;
-    (void)k;
-    (void)n;
+    /* Avoid k*4 here: matmul_select() is public and must not let an overflowing
+     * shape accidentally satisfy the policy. */
+    if (m == 1 && k >= 64 && n % 4 == 0 && n / 4 == k) {
+        return MATMUL_KERNEL_ROWWISE;
+    }
 
     if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
         return MATMUL_KERNEL_AVX512_MR4;

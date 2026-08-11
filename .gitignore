@@ -28,6 +28,13 @@ src/gpu_capability_cache/
 # Benchmark results log - accumulates across runs on THIS machine; numbers
 # aren't comparable across different hardware, so not tracked by default.
 # Remove this line if you want to commit a specific machine's history.
+# Generated measurement output. Machine-specific and regenerable, same reasoning
+# as the results CSVs below: a number measured on one laptop is evidence about
+# that laptop, and committing it invites a reader to compare it with theirs.
+# scripts/repro/*.sh writes here; docs/reproducibility.md and docs/results.md
+# name the command rather than carrying the output.
+docs/generated/
+
 bench_results*.csv
 matmul_results*.csv
 parallel_results*.csv

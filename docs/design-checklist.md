@@ -693,7 +693,11 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   (`.github/workflows/performance.yml`, `src/tools/perf_check.py`): kernel versus scalar reference,
   shipped kernel versus the fastest candidate beside it, KV-cache benefit, and numerical tolerance.
   Absolute timings are recorded as artifacts but never asserted on, because hosted-runner speed is
-  not reproducible across runs.
+  not reproducible across runs. The gate has now paid for itself: run 31459822100 found the shipped
+  SIMD default 5.89x/7.28x behind `rowwise` on the medium single-token FFN expansion under
+  GCC/Clang. `matmul_select()` now applies that shape rule from width 64 upward while preserving the
+  measured tiny-tier exception; the boundary and ordinary SIMD preference are pinned in
+  `test_matmul_kernels.c`.
 - [ ] Add cross-run regression thresholds on stable benchmark tiers, once enough nightly artifacts
   exist to establish what a normal run-to-run spread looks like on that runner class.
 

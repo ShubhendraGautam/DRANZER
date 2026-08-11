@@ -226,12 +226,17 @@ machine:
 | `matrix_multiply` vs scalar reference | 35.39–37.97 | ≥ 1.50 |
 | AVX-512 forward matmul | 3.76–3.82 | ≥ 1.20 |
 | AVX-512 `matmul_backward_input` | 16.51–17.63 | ≥ 1.20 |
-| AVX-512 `matmul_backward_weight` | 2.05–2.15 | ≥ 1.20 |
+| AVX-512 `matmul_backward_weight` | 2.05–2.15 | ≥ 1.10 |
 
 Every median within 10% of its neighbours, while the worst single replicate inside
 those runs fell to 0.96x for a comparison whose median never left 1.56–1.79. The
 GPU kernel invariant behaved the same way: a 1.00x floor against readings of 0.83x
 once and 1.01–1.42x on the eight runs after, now a median of 1.19–1.29x.
+
+The backward-weight threshold was later falsified, rather than the measurement:
+an AMD EPYC 9V74 runner produced a tight 1.18x [1.17x, 1.19x] distribution. Its
+floor is therefore 1.10x; the other AVX-512 paths retain 1.20x. The revised guard
+still separates a working dispatch from the near-1.0 collapse it exists to catch.
 
 **This is a research-integrity item, not an annoyance.** A suite that cries wolf
 teaches its maintainer to re-run until green, which is the same habit that turns a

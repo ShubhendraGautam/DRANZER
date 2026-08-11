@@ -49,7 +49,8 @@ logits against.
 
 ## How the default is chosen
 
-`matmul_select()` resolves `MATMUL_KERNEL_AUTO` to the widest vector kernel the CPU can execute:
+`matmul_select()` normally resolves `MATMUL_KERNEL_AUTO` to the widest vector kernel the CPU can
+execute:
 
 ```text
 avx512_mr4  →  avx2_mr4  →  tiled_mr4
@@ -66,9 +67,10 @@ agree the width ordering holds.
 it on. The earlier second reason — that a hand-written kernel cannot beat what a compiler emits for
 a baseline instruction set — is precisely the claim the rewrite falsified, so it no longer counts.
 
-It does **not** split by shape. Every shape gets the same kernel — see
-[What the measurements changed](#what-the-measurements-changed) for the two shape splits that were
-tried and rejected.
+There is one measured shape exception: a single-token FFN expansion (`m == 1`, `n == 4*k`) uses
+`rowwise` once `k >= 64`. The broad rule "all single-row calls use rowwise" is still false — tiny
+FFN and output-head shapes lose — but the nightly sweep found this narrower rule on both compilers.
+See [What the measurements changed](#what-the-measurements-changed).
 
 Overrides are available for measurement and debugging:
 
@@ -216,16 +218,27 @@ in geometric mean across the sweep.
 The one shape where it is meaningfully behind is GCC on `prefill_ffn_up` at 128x256x1024, where the
 plain tiled kernel is 1.40x faster. That is what `--kernel tiled` and `matmul_set_kernel()` are for.
 
-**Two shape splits were rejected.** Both were worth measuring and neither survived:
+**Two broad shape splits were rejected.** Both were worth measuring and neither survived:
 
 | Candidate rule | Result |
 |---|---|
 | single-row (`m < 4`) decode uses `rowwise` | Up to 1.26x faster under Clang, up to 1.5x *slower* under GCC. Geometric mean across both: worse (1.14 vs 1.09 relative to per-shape best) |
 | wide outputs (`n >= 1024`) use plain `tiled` | ~1% better on average — smaller than the run-to-run spread of the session that produced it |
 
-So `matmul_select()` returns one kernel for every shape. That is a measured outcome, not an
-unimplemented feature, and `test_matmul_kernels.c` pins it so a future split has to update this
-document deliberately.
+The nightly hosted-runner sweep later found a narrower split that does survive both compilers:
+
+| Shape | GCC: rowwise / old auto | Clang: rowwise / old auto | Decision |
+|---|---:|---:|---|
+| tiny FFN expansion, 1×16×64 | 1.57x slower | 1.18x slower | keep SIMD |
+| small FFN expansion, 1×64×256 | 1.15x faster | 1.85x faster | rowwise |
+| medium FFN expansion, 1×256×1024 | 5.89x faster | 7.28x faster | rowwise |
+
+These are same-process measurements from Performance run 31459822100 on AMD EPYC 9V74 (GCC
+13.3, AVX-512) and EPYC 7763 (Clang 18.1, AVX2), five interleaved rounds per candidate. The shape
+is the model's FFN expansion exactly (`n == 4*k`), and the lower bound preserves the observed tiny
+tier loss. Output-head and attention projections keep the normal SIMD preference. The performance
+job found this because its 2.5x same-run gate failed by 5.89x and 7.28x; it was a bad default, not
+hosted-runner drift. `test_matmul_kernels.c` pins both sides of the boundary.
 
 ### Whole-model effect
 

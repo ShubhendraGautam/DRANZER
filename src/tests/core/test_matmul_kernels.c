@@ -206,7 +206,7 @@ static void check_configuration_contract(void) {
  * Rewriting it to keep accumulators in registers fixed that (see matmul.c), so
  * the exclusion was lifted on new measurements. neon_mr4 stays excluded for
  * want of AArch64 hardware to measure it on, and the check below pins that. */
-static matmul_kernel_t expected_selection(void) {
+static matmul_kernel_t expected_simd_selection(void) {
     if (matmul_kernel_available(MATMUL_KERNEL_AVX512_MR4)) {
         return MATMUL_KERNEL_AVX512_MR4;
     }
@@ -253,18 +253,28 @@ static void check_selection_is_deterministic(void) {
         }
     }
 
-    /* The measured policy is still one kernel for every shape (see matmul.c).
-     * Pinning that here is deliberate: if a future sweep adds a shape split,
-     * this assertion is what forces the documented policy in docs/matmul.md
-     * to be updated with it rather than drifting silently. */
-    matmul_kernel_t single_row = matmul_select(1, 256, 4000);
-    if (single_row != expected_selection()) {
+    /* Pin the one measured shape split and its boundaries. The small and
+     * medium single-token FFN expansions use rowwise; tiny and non-FFN decode
+     * shapes keep the ordinary SIMD preference. */
+    matmul_kernel_t ordinary = expected_simd_selection();
+    if (matmul_select(1, 64, 256) != MATMUL_KERNEL_ROWWISE ||
+        matmul_select(1, 256, 1024) != MATMUL_KERNEL_ROWWISE) {
+        fail("single-token FFN expansion did not select rowwise");
+    }
+    if (matmul_select(1, 16, 64) != ordinary) {
+        fail("tiny FFN expansion crossed the measured rowwise boundary");
+    }
+    if (matmul_select(1, 63, 252) != ordinary ||
+        matmul_select(1, 64, 255) != ordinary) {
+        fail("rowwise selection escaped its measured width or shape boundary");
+    }
+    if (matmul_select(1, 256, 4000) != ordinary) {
         fail("the documented preference order changed without updating the test");
     }
-    if (matmul_select(128, 1024, 256) != single_row ||
-        matmul_select(1, 16, 16) != single_row ||
-        matmul_select(64, 64, 256) != single_row) {
-        fail("selection now splits by shape but docs/matmul.md still documents one kernel");
+    if (matmul_select(128, 1024, 256) != ordinary ||
+        matmul_select(1, 16, 16) != ordinary ||
+        matmul_select(64, 64, 256) != ordinary) {
+        fail("an unmeasured shape entered the rowwise dispatch case");
     }
 }
 
@@ -314,6 +324,9 @@ static void check_fallback_without_simd(void) {
     if (matmul_select(m, k, n) != MATMUL_KERNEL_TILED_MR4) {
         fail("selection did not fall back to the portable kernel");
     }
+    if (matmul_select(1, 64, 256) != MATMUL_KERNEL_ROWWISE) {
+        fail("the measured rowwise case changed under a baseline ISA cap");
+    }
 
     /* Every kernel, including the SIMD ones nothing can execute now, must
      * still produce the right answer through the fallback rather than
@@ -334,7 +347,7 @@ static void check_fallback_without_simd(void) {
     }
 
     cpu_features_clear_max_isa();
-    if (matmul_select(m, k, n) != expected_selection()) {
+    if (matmul_select(m, k, n) != expected_simd_selection()) {
         fail("clearing the cap did not restore the selected kernel");
     }
     free(a); free(b); free(reference); free(output);

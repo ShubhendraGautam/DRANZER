@@ -114,7 +114,8 @@ Thresholds are deliberately loose, because the defects worth catching are order-
 |---|---|---|
 | backward matmul vs forward of equal FLOP count | ≤ 3.0x | A traversal fighting the cache. The pre-fix `matmul_backward_weight` reports **24.7x** here. |
 | tuned forward kernel vs scalar reference | ≥ 1.5x | Kernel selection silently stopping |
-| each AVX-512 path vs its portable path | ≥ 1.2x | A dispatch that stopped firing — invisible to correctness tests, which still pass |
+| AVX-512 forward/input paths vs portable | ≥ 1.2x | A dispatch that stopped firing — invisible to correctness tests, which still pass |
+| AVX-512 backward-weight path vs portable | ≥ 1.1x | The same collapse, with room for the 1.18x [1.17x, 1.19x] measured on EPYC 9V74 |
 | large GPU call vs 1-element call, in GFLOP/s | ≥ 1000x | Per-call overhead exploding |
 | GPU weight cache vs invalidating every call | ≥ 1.05x | The cache not being consulted |
 | tiled GPU kernel vs the naive baseline | ≥ 1.0x | The shared-memory path regressing |
@@ -257,6 +258,18 @@ decode results (last eight context positions, prompt prefill excluded):
 Treat these as a reproducible historical example, not a cross-machine promise. `bench.out` reports
 the same pre-eviction comparison plus independent prompt-prefill and steady-state ring metrics;
 all three are stored separately in the version-2 CSV.
+
+To regenerate one consolidated current-machine report across compilers, OpenMP modes, CPU/GPU, and
+all model tiers:
+
+```bash
+scripts/repro/benchmark_all.sh docs/generated/benchmark-all.md
+scripts/repro/benchmark_all.sh /tmp/benchmark-smoke.md --quick --repeats 1
+```
+
+Each configuration is a clean rebuild. CPU and GPU sections are emitted as separate rows, every
+cell is a median over repeated runs, the training spread stays beside it, and the raw reports are
+retained outside the checkout so a failed parser cannot destroy the underlying measurement.
 
 For an OpenMP comparison:
 

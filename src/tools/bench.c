@@ -420,11 +420,34 @@ int main(int argc, char **argv) {
     /* --cpu-only skips the GPU pass entirely. A CPU scaling study pays for
      * every GPU run it does not need, and at the medium tier that doubles
      * the wall time of the measurement. */
+    /* Three distinct states, reported distinctly. Collapsing the first two into
+     * one message is not a cosmetic problem: this printed "No CUDA GPU detected"
+     * on a machine with a working GPU whenever --cpu-only was passed, and that
+     * line then appears at the top of a results file as a claim about the
+     * hardware. A benchmark that misreports its own configuration invalidates
+     * every row under it - a reader cannot tell a CPU-only run from a machine
+     * with no GPU, and those support different conclusions. */
+    /* The probe is deliberately NOT run under --cpu-only, and the message says
+     * so rather than claiming anything about the hardware.
+     *
+     * gpu_matmul_available() dlopen()s libcuda, which maps about 99 MB into the
+     * process. This benchmark reports peak RSS per config, so probing a device
+     * the run will not use inflates every memory figure by ~40x at the tiny tier
+     * - measured: 2.40 MB became 101.50 MB. An earlier version of this message
+     * probed unconditionally to tell "no GPU" apart from "GPU skipped", and paid
+     * exactly that. Saying less is the correct trade: a benchmark may not
+     * disturb the thing it measures to improve its own logging. */
     int gpu_available = !cpu_only && gpu_matmul_available();
-    printf(gpu_available
-           ? "CUDA GPU detected - each config runs on CPU and GPU (GPU dispatch covers model_forward's\n"
-             "matmuls only - see transformer.c's dispatch_matmul() - backward stays CPU-only regardless).\n\n"
-           : "No CUDA GPU detected - CPU-only run (see gpu_probe.out for why).\n\n");
+    if (gpu_available) {
+        printf("CUDA GPU detected - each config runs on CPU and GPU (GPU dispatch covers model_forward's\n"
+               "matmuls only - see transformer.c's dispatch_matmul() - backward stays CPU-only regardless).\n\n");
+    } else if (cpu_only) {
+        printf("CPU-only run (--cpu-only): the GPU was not probed, so this run makes no claim about\n"
+               "whether a device is present. Probing loads libcuda and would add ~99 MB to every\n"
+               "peak-RSS figure below.\n\n");
+    } else {
+        printf("No CUDA GPU detected - CPU-only run (see gpu_probe.out for why).\n\n");
+    }
 
     char timestamp[32];
     time_t now = time(NULL);
