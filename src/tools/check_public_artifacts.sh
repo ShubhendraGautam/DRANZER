@@ -4,6 +4,7 @@ set -euo pipefail
 root="${1:-.}"
 static="$root/libdranzer.a"
 shared="$root/libdranzer.so"
+symbol_baseline="$root/tests/compat/public-api-v1.symbols"
 
 for artifact in "$static" "$shared" \
                 "$root/examples/embed_infer.out" \
@@ -14,24 +15,12 @@ for artifact in "$static" "$shared" \
     fi
 done
 
-required_symbols=(
-    dranzer_bundle_load
-    dranzer_model_free
-    dranzer_tokenizer_free
-    dranzer_model_vocab_size
-    dranzer_model_max_sequence
-    dranzer_tokenize
-    dranzer_detokenize
-    dranzer_model_forward
-    dranzer_cache_create
-    dranzer_cache_reset
-    dranzer_cache_free
-    dranzer_cache_forward
-    dranzer_generation_create
-    dranzer_generation_free
-    dranzer_generation_reset
-    dranzer_generation_next_greedy
-    dranzer_status_string
+if [[ ! -f "$symbol_baseline" ]]; then
+    echo "public ABI symbol baseline missing: $symbol_baseline" >&2
+    exit 1
+fi
+mapfile -t required_symbols < <(
+    sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$symbol_baseline"
 )
 
 static_symbols="$(nm -g --defined-only "$static" | awk 'NF >= 3 { print $3 }')"

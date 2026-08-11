@@ -776,7 +776,12 @@ the CLI is a client of the same supported API available to external programs.
 ## v1.0 — Mature reference implementation
 
 - [ ] Publish small reference models, their corpus provenance, and expected evaluation metrics.
-- [ ] Guarantee and test the documented model-format and public-API compatibility window.
+- [~] Guarantee and test the documented model-format and public-API compatibility window.
+  Bundle versions 1–2 and public API version 1 are now promised through the 1.x release line.
+  Loaders report the actual wire version; fixed v1/v2 header fields are pinned in the bundle test.
+  The C ABI has explicit enum values, a size-negotiated 64-byte info record, runtime version
+  reporting, compile-time layout/signature assertions, and a checked-in shared-symbol baseline.
+  Execution remains deferred to the final bundled validation pass.
 - [ ] Run fuzzing, full leak detection, and deterministic GCC/Clang build checks in release gates.
 - [ ] Maintain semantic versions, a changelog, reproducible release artifacts, and migration notes.
 - [ ] Document supported operating systems, CPU features, and optional GPU behavior precisely.

@@ -56,6 +56,12 @@ static void put_u32(uint8_t bytes[4], uint32_t value) {
     for (size_t i = 0; i < 4; i++) bytes[i] = (uint8_t)(value >> (8 * i));
 }
 
+static uint32_t get_u32(const uint8_t bytes[4]) {
+    uint32_t value = 0;
+    for (size_t i = 0; i < 4; i++) value |= (uint32_t)bytes[i] << (8 * i);
+    return value;
+}
+
 static uint64_t get_u64(const uint8_t bytes[8]) {
     uint64_t value = 0;
     for (size_t i = 0; i < 8; i++) value |= (uint64_t)bytes[i] << (8 * i);
@@ -174,6 +180,7 @@ int main(void) {
         loaded_metadata.seed != metadata.seed ||
         loaded_metadata.input_fingerprint != metadata.input_fingerprint ||
         loaded_metadata.input_bytes != metadata.input_bytes ||
+        loaded_metadata.format_version != MODEL_BUNDLE_FORMAT_V1 ||
         loaded_encoder->max_vocab_size != encoder.max_vocab_size ||
         loaded_encoder->vocab_size != encoder.vocab_size ||
         bpe_encode(loaded_encoder, probe_text, strlen(probe_text), &loaded_tokens) != BPE_SUCCESS ||
@@ -213,6 +220,7 @@ int main(void) {
         mapped_metadata.seed != metadata.seed ||
         mapped_metadata.input_fingerprint != metadata.input_fingerprint ||
         mapped_metadata.input_bytes != metadata.input_bytes ||
+        mapped_metadata.format_version != MODEL_BUNDLE_FORMAT_V1 ||
         mapped_encoder->vocab_size != encoder.vocab_size ||
         model_predict_next_token(&mapped, context, 4) !=
             model_predict_next_token(&model, context, 4)) {
@@ -246,6 +254,15 @@ int main(void) {
     size_t weights_size = model.total_param_count * sizeof(float);
     if (!baseline || baseline_size <= BUNDLE_HEADER_SIZE + weights_size + 8) {
         fprintf(stderr, "could not inspect saved bundle\n");
+        failed = 1;
+        goto cleanup;
+    }
+    if (memcmp(baseline, "DRNZBNDL", 8) != 0 ||
+        get_u32(baseline + 8) != MODEL_BUNDLE_FORMAT_V1 ||
+        get_u32(baseline + 16) != 1 ||
+        get_u32(baseline + 20) != BUNDLE_HEADER_SIZE ||
+        memcmp(baseline + baseline_size - 8, "DRNZDONE", 8) != 0) {
+        fprintf(stderr, "version-1 fixed wire header changed\n");
         failed = 1;
         goto cleanup;
     }
@@ -285,6 +302,11 @@ int main(void) {
         storage_report.artifact_bytes != quantized_size ||
         storage_report.weight_payload_bytes >= weights_size ||
         quantized_size >= baseline_size ||
+        memcmp(quantized_blob, "DRNZBNDL", 8) != 0 ||
+        get_u32(quantized_blob + 8) != MODEL_BUNDLE_FORMAT_V2 ||
+        get_u32(quantized_blob + 16) != 2 ||
+        get_u32(quantized_blob + 20) != QUANTIZED_HEADER_SIZE ||
+        memcmp(quantized_blob + quantized_size - 8, "DRNZDONE", 8) != 0 ||
         storage_report.values_quantized != accuracy_report.values_quantized ||
         storage_report.tensors_quantized != accuracy_report.tensors_quantized ||
         model_bundle_load(&quantized_loaded, &quantized_encoder,
@@ -293,6 +315,7 @@ int main(void) {
                model.total_param_count * sizeof(float)) != 0 ||
         quantized_loaded.training_steps != model.training_steps ||
         quantized_metadata.seed != metadata.seed ||
+        quantized_metadata.format_version != MODEL_BUNDLE_FORMAT_V2 ||
         !quantized_encoder || !bpe_encoder_is_frozen(quantized_encoder)) {
         fprintf(stderr, "quantized bundle roundtrip or size accounting failed\n");
         failed = 1;

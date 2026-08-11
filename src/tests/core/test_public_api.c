@@ -55,10 +55,14 @@ int main(void) {
 
     dranzer_model_t *model = NULL;
     dranzer_tokenizer_t *tokenizer = NULL;
-    dranzer_bundle_info_t info = {0};
+    dranzer_bundle_info_t info = DRANZER_BUNDLE_INFO_INIT;
     if (dranzer_bundle_load(path, DRANZER_LOAD_COPY, &model, &tokenizer,
                             &info) != DRANZER_OK ||
-        !model || !tokenizer || dranzer_model_vocab_size(model) != VOCAB ||
+        !model || !tokenizer || info.struct_size != sizeof(info) ||
+        info.format_version != DRANZER_BUNDLE_FORMAT_OLDEST_SUPPORTED ||
+        info.reserved[0] != 0 || info.reserved[1] != 0 ||
+        info.reserved[2] != 0 ||
+        dranzer_model_vocab_size(model) != VOCAB ||
         dranzer_model_max_sequence(model) != MAX_SEQUENCE ||
         info.seed != metadata.seed ||
         strcmp(dranzer_status_string(DRANZER_CHECKSUM_ERROR),

@@ -7,7 +7,8 @@ headers and exposes opaque `dranzer_model_t`, `dranzer_tokenizer_t`, `dranzer_ca
 `dranzer_generation_t` handles. Applications do not depend on the layout of `neural_model_t`, the
 BPE hash maps, activation caches, or CLI configuration structures.
 
-The first contract version is `DRANZER_API_VERSION == 1`. Every fallible call returns one
+The first contract version is `DRANZER_API_VERSION == 1`; `dranzer_api_version()` lets an
+application compare its header with the loaded library. Every fallible call returns one
 `dranzer_status_t`; `dranzer_status_string()` supplies a stable diagnostic phrase without printing
 from the wrapper. Handles are stateful and are not safe for concurrent calls. Separate handles may
 be used by separate threads when the underlying model is not being mutated.
@@ -25,7 +26,7 @@ silent unless the embedding application supplies `DRANZER_DEBUG_SINK` at compile
 
 dranzer_model_t *model = NULL;
 dranzer_tokenizer_t *tokenizer = NULL;
-dranzer_bundle_info_t info;
+dranzer_bundle_info_t info = DRANZER_BUNDLE_INFO_INIT;
 
 dranzer_status_t rc = dranzer_bundle_load(
     "model.bin", DRANZER_LOAD_MMAP, &model, &tokenizer, &info);
@@ -48,6 +49,11 @@ Model and tokenizer handles returned by `dranzer_bundle_load()` are independentl
 generation handles retain their dependencies internally: it is safe to release the caller's
 original model/tokenizer handles first, and the underlying objects live until the last dependent
 handle is freed.
+
+`dranzer_bundle_info_t` is a fixed 64-byte API-v1 record. Callers initialize `struct_size` through
+`DRANZER_BUNDLE_INFO_INIT`; the library reports how many bytes it understands, the loaded wire
+format version, provenance fields, and zeroed reserved space. This permits a newer caller to detect
+an older library without letting either side write past the other's record.
 
 ## Token and logits buffers
 
@@ -95,3 +101,16 @@ version. Internal model, tokenizer, and backend symbols remain local. An applica
 shared form must install `libdranzer.so` on its loader path or provide an application-relative
 rpath. See [`src/examples`](../src/examples/README.md) for a static full-forward example and a
 shared incremental-generation example.
+
+## Compatibility window
+
+API version 1 is source- and ABI-compatible for the full 1.x release line. Existing function
+signatures, enum values, status phrases, structure offsets, and exported symbols are not removed or
+reinterpreted; compatible additions use new symbols and reserved structure space. An incompatible
+change requires `DRANZER_API_VERSION == 2`, a new shared-object symbol namespace, and migration
+notes. Opaque handle layouts are never part of the contract.
+
+The checked-in `tests/compat/public-api-v1.symbols` baseline, compile-time layout/signature checks
+in `test_public_compatibility.c`, and `public-api-check` shared-export inspection enforce that
+window. Compatibility is promised within one operating-system/architecture ABI; a shared object is
+not portable between, for example, x86-64 and AArch64.

@@ -114,8 +114,12 @@ numbers are intentionally deferred to the project's bundled validation run.
 
 ## Compatibility policy
 
-- Version 1 and version 2 bundles are read exactly as specified above. Unknown bundle versions fail explicitly;
-  the loader does not guess.
+- Bundle versions 1 through 2 are the current compatibility window and remain readable throughout
+  the 1.x release line. Version 1 remains the default lossless writer; version 2 is the opt-in
+  quantized writer. Version identifiers are never reused. Removing either reader or changing a
+  field's meaning requires a project major-version change and migration notes.
+- Unknown bundle versions fail explicitly; the loader does not guess. Public callers receive the
+  actual loaded version in `dranzer_bundle_info_t.format_version`.
 - Files without bundle magic are offered to the read-only legacy host-native weight loader. The CLI
   then loads `<model>.tokenizer`, an explicit `--tokenizer`, or the historical byte-vocabulary
   fallback when no sidecar exists.
@@ -128,7 +132,8 @@ numbers are intentionally deferred to the project's bundled validation run.
 - Checkpoint compatibility is independent of bundle compatibility. A checkpoint is tied to exact
   resume state; a bundle is the smaller inference/evaluation artifact.
 
-`test_model_bundle.c` protects exact copied and memory-mapped version-1 round trips, mapped-model
+`test_model_bundle.c` pins the magic, numeric type, header size, footer, and reported version for
+both fixed wire formats. It also protects exact copied and memory-mapped version-1 round trips, mapped-model
 ownership and training rejection, version-2 reconstruction against the
 simulated quantizer, artifact-size accounting, both payload checksums, tensor-shape validation,
 truncation, unsupported versions, unsafe shapes, malformed tokenizer bounds, a deterministic

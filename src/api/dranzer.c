@@ -31,6 +31,10 @@ struct dranzer_generation {
     int finished;
 };
 
+uint32_t dranzer_api_version(void) {
+    return DRANZER_API_VERSION;
+}
+
 static void model_retain(dranzer_model_t *model) {
     model->references++;
 }
@@ -81,7 +85,16 @@ dranzer_status_t dranzer_bundle_load(const char *path,
     if (!out_model || !out_tokenizer) return DRANZER_INVALID_ARGUMENT;
     *out_model = NULL;
     *out_tokenizer = NULL;
-    if (out_info) memset(out_info, 0, sizeof(*out_info));
+    if (out_info) {
+        uint32_t caller_size = out_info->struct_size;
+        if (caller_size < DRANZER_BUNDLE_INFO_V1_SIZE) {
+            return DRANZER_INVALID_ARGUMENT;
+        }
+        size_t clear_size = caller_size < sizeof(*out_info)
+                                ? caller_size : sizeof(*out_info);
+        memset(out_info, 0, clear_size);
+        out_info->struct_size = (uint32_t)sizeof(*out_info);
+    }
     if (!path || !path[0] ||
         (mode != DRANZER_LOAD_COPY && mode != DRANZER_LOAD_MMAP)) {
         return DRANZER_INVALID_ARGUMENT;
@@ -112,6 +125,7 @@ dranzer_status_t dranzer_bundle_load(const char *path,
     free(encoder);
 
     if (out_info) {
+        out_info->format_version = metadata.format_version;
         out_info->train_window = metadata.train_window;
         out_info->seed = metadata.seed;
         out_info->input_fingerprint = metadata.input_fingerprint;

@@ -7,6 +7,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Bundle versions in the supported compatibility window. These values are
+ * wire-format identifiers, not release numbers, and may never be reused. */
+#define MODEL_BUNDLE_FORMAT_V1 UINT32_C(1)
+#define MODEL_BUNDLE_FORMAT_V2 UINT32_C(2)
+#define MODEL_BUNDLE_FORMAT_OLDEST_SUPPORTED MODEL_BUNDLE_FORMAT_V1
+#define MODEL_BUNDLE_FORMAT_CURRENT MODEL_BUNDLE_FORMAT_V2
+
 typedef enum {
     BUNDLE_SUCCESS = 0,
     BUNDLE_NOT_BUNDLE,
@@ -22,6 +29,8 @@ typedef struct {
     uint64_t seed;
     uint64_t input_fingerprint;
     uint64_t input_bytes;
+    /* Set by loaders. Writers ignore this output-only field. */
+    uint32_t format_version;
 } model_bundle_metadata_t;
 
 typedef struct {

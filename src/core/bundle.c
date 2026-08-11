@@ -14,8 +14,6 @@
 #define BUNDLE_MAGIC "DRNZBNDL"
 #define BUNDLE_FOOTER "DRNZDONE"
 #define BUNDLE_MARKER UINT32_C(0x01020304)
-#define BUNDLE_VERSION_FLOAT32 UINT32_C(1)
-#define BUNDLE_VERSION_QUANTIZED UINT32_C(2)
 #define BUNDLE_NUMERIC_FLOAT32 UINT32_C(1)
 #define BUNDLE_NUMERIC_QUANTIZED UINT32_C(2)
 #define BUNDLE_HEADER_V1_SIZE UINT32_C(152)
@@ -191,7 +189,7 @@ bundle_errors_t model_bundle_save(const neural_model_t *model,
 
     uint8_t header[BUNDLE_HEADER_V1_SIZE] = {0};
     memcpy(header, BUNDLE_MAGIC, 8);
-    encode_u32(header + 8, BUNDLE_VERSION_FLOAT32);
+    encode_u32(header + 8, MODEL_BUNDLE_FORMAT_V1);
     encode_u32(header + 12, BUNDLE_MARKER);
     encode_u32(header + 16, BUNDLE_NUMERIC_FLOAT32);
     encode_u32(header + 20, BUNDLE_HEADER_V1_SIZE);
@@ -421,7 +419,7 @@ bundle_errors_t model_bundle_save_quantized(
     uint32_t loss_bits = 0;
     memcpy(&loss_bits, &model->current_loss, sizeof(loss_bits));
     memcpy(header, BUNDLE_MAGIC, 8);
-    encode_u32(header + 8, BUNDLE_VERSION_QUANTIZED);
+    encode_u32(header + 8, MODEL_BUNDLE_FORMAT_V2);
     encode_u32(header + 12, BUNDLE_MARKER);
     encode_u32(header + 16, BUNDLE_NUMERIC_QUANTIZED);
     encode_u32(header + 20, BUNDLE_HEADER_V2_SIZE);
@@ -517,10 +515,10 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
     uint32_t version = decode_u32(header + 8);
     uint32_t numeric = decode_u32(header + 16);
     uint32_t header_size = decode_u32(header + 20);
-    const int is_float = version == BUNDLE_VERSION_FLOAT32 &&
+    const int is_float = version == MODEL_BUNDLE_FORMAT_V1 &&
                          numeric == BUNDLE_NUMERIC_FLOAT32 &&
                          header_size == BUNDLE_HEADER_V1_SIZE;
-    const int is_quantized = version == BUNDLE_VERSION_QUANTIZED &&
+    const int is_quantized = version == MODEL_BUNDLE_FORMAT_V2 &&
                              numeric == BUNDLE_NUMERIC_QUANTIZED &&
                              header_size == BUNDLE_HEADER_V2_SIZE;
     if ((!is_float && !is_quantized) || !float32_supported()) {
@@ -788,6 +786,7 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
     out_metadata->seed = seed;
     out_metadata->input_fingerprint = input_fingerprint;
     out_metadata->input_bytes = input_bytes;
+    out_metadata->format_version = version;
     *model = loaded;
     *out_encoder = encoder;
     return BUNDLE_SUCCESS;
@@ -835,7 +834,7 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
     uint32_t version = decode_u32(mapping + 8);
     uint32_t numeric = decode_u32(mapping + 16);
     uint32_t header_size = decode_u32(mapping + 20);
-    if (version != BUNDLE_VERSION_FLOAT32 ||
+    if (version != MODEL_BUNDLE_FORMAT_V1 ||
         numeric != BUNDLE_NUMERIC_FLOAT32 ||
         header_size != BUNDLE_HEADER_V1_SIZE ||
         !float32_supported() || !host_is_little_endian()) {
@@ -952,6 +951,7 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
     out_metadata->seed = seed;
     out_metadata->input_fingerprint = input_fingerprint;
     out_metadata->input_bytes = input_bytes;
+    out_metadata->format_version = MODEL_BUNDLE_FORMAT_V1;
     *model = loaded;
     *out_encoder = encoder;
     return BUNDLE_SUCCESS;

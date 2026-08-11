@@ -1,5 +1,6 @@
 DRANZER_1.0 {
     global:
+        dranzer_api_version;
         dranzer_bundle_load;
         dranzer_model_free;
         dranzer_tokenizer_free;
