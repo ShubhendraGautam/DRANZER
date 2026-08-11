@@ -28,11 +28,12 @@ typedef enum {
     MODEL_ARCH_ROPE = UINT32_C(1) << 1,
     MODEL_ARCH_RMSNORM = UINT32_C(1) << 2,
     MODEL_ARCH_GELU = UINT32_C(1) << 3,
+    MODEL_ARCH_SWIGLU = UINT32_C(1) << 4,
 } model_architecture_flag_t;
 
 #define MODEL_ARCHITECTURE_SUPPORTED_MASK \
     (MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_ROPE | MODEL_ARCH_RMSNORM | \
-     MODEL_ARCH_GELU)
+     MODEL_ARCH_GELU | MODEL_ARCH_SWIGLU)
 
 /* Learning metrics tracking for Phase 2 stability improvements */
 typedef struct {
@@ -71,6 +72,9 @@ typedef struct {
     // Feedforward (embedding_dim x ffn_dim, ffn_dim x embedding_dim; ffn_dim = embedding_dim*4)
     float *W_ff1, *b_ff1, *W_ff2, *b_ff2;
     float *W_ff1_grad, *b_ff1_grad, *W_ff2_grad, *b_ff2_grad;
+    // Optional parallel linear branch for SwiGLU (embedding_dim x ffn_dim)
+    float *W_ff_gate, *b_ff_gate;
+    float *W_ff_gate_grad, *b_ff_gate_grad;
 
     // Post-FFN normalization (embedding_dim); beta is NULL for RMSNorm
     float *ln_gamma_ffn, *ln_beta_ffn;
@@ -181,7 +185,8 @@ typedef struct {
     float **cache_attn_xhat;    // [num_layers], each max_seq_len*embedding_dim (attn-LN normalized values)
     float **cache_attn_std;     // [num_layers], each max_seq_len (attn-LN std-dev per position)
     float **cache_ff_hidden;    // [num_layers], each max_seq_len*ffn_dim (post-activation)
-    float **cache_ff_pre_activation; // GELU only, each max_seq_len*ffn_dim
+    float **cache_ff_pre_activation; // GELU/SwiGLU activated branch input
+    float **cache_ff_gate;      // SwiGLU only, linear branch before multiplication
     float **cache_ffn_xhat;     // [num_layers], each max_seq_len*embedding_dim (FFN-LN normalized values)
     float **cache_ffn_std;      // [num_layers], each max_seq_len (FFN-LN std-dev per position)
     float **cache_attn_dropout_mask;  // [num_layers], each max_seq_len*embedding_dim (1.0 keep / 0.0 drop)
@@ -203,6 +208,7 @@ typedef struct {
     float *ws_dhidden_in, *ws_dhidden_out;               // backward: dL/dhidden ping-pong, max_seq_len*embedding_dim
     float *ws_d_s2, *ws_d_x1_total, *ws_d_s1;            // backward: intermediate gradients, max_seq_len*embedding_dim
     float *ws_d_ff_hidden;                               // backward: dL/dff_hidden, max_seq_len*ffn_dim
+    float *ws_d_ff_gate;                                 // SwiGLU backward: dL/dlinear branch, max_seq_len*ffn_dim
     float *ws_d_attn_concat;                             // backward: dL/dattn_concat (= dL/dcontext), max_seq_len*embedding_dim
     float *ws_d_scores;                                  // backward: per-head dL/dprobs -> dL/dscores, num_heads*max_seq_len*max_seq_len (one disjoint slab per head, so the head loop can run in parallel under OMP=1)
     float *ws_d_Q, *ws_d_K, *ws_d_V;                     // backward: dL/dQ,dK,dV accumulators, max_seq_len*embedding_dim
@@ -243,6 +249,10 @@ static inline int model_uses_rmsnorm(const neural_model_t *model) {
 
 static inline int model_uses_gelu(const neural_model_t *model) {
     return model && (model->architecture_flags & MODEL_ARCH_GELU) != 0;
+}
+
+static inline int model_uses_swiglu(const neural_model_t *model) {
+    return model && (model->architecture_flags & MODEL_ARCH_SWIGLU) != 0;
 }
 
 #endif // MODEL_TYPES_H

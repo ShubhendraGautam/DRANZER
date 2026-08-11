@@ -49,6 +49,8 @@ static inline float relu_derivative(float x) {
 
 float gelu(float x);
 float gelu_derivative(float x);
+float silu(float x);
+float silu_derivative(float x);
 
 /* In-place layer normalization + scale/shift, single row of `size`
  * elements. Used by the public layer_normalize() wrapper only; the

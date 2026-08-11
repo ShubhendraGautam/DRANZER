@@ -77,7 +77,7 @@ all version-1/version-2 fields at the same offsets and appends:
 
 | Offset | Size | Field |
 |---:|---:|---|
-| 184 | 4 | Architecture flags (`bit 0`: tied embeddings; `bit 1`: RoPE; `bit 2`: RMSNorm without beta tensors; `bit 3`: GELU feed-forward activation) |
+| 184 | 4 | Architecture flags (`bit 0`: tied embeddings; `bit 1`: RoPE; `bit 2`: RMSNorm without beta tensors; `bit 3`: GELU; `bit 4`: SwiGLU) |
 | 188 | 4 | Reserved zero |
 
 A version-3 bundle may use numeric type `1` for lossless float32 parameters or type `2` for the
@@ -90,6 +90,10 @@ and no independent `[embedding × vocabulary]` output projection. The head reads
 transposed, and backward accumulates the output-head and input-lookup contributions into that one
 gradient slice. Unknown architecture bits, a parameter count computed for the wrong layout, or a
 non-zero reserved field are rejected before allocation.
+
+With SwiGLU, each layer stores `W_ff_gate[embedding × 4·embedding]` and
+`b_ff_gate[4·embedding]` immediately after `b_ff1`; these tensors are also separate records in a
+quantized version-3 payload. GELU and SwiGLU bits may not both be set.
 
 ## Loading and safety
 

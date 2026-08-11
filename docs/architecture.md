@@ -183,6 +183,13 @@ and cached decoding. Training retains the pre-activation values required by GELU
 ordinary ReLU models do not allocate that activation buffer. GELU changes no parameter tensors or
 bundle payload sizes.
 
+With `--swiglu`, the feed-forward hidden state is
+`SiLU(xW₁+b₁) ⊙ (xW_gate+b_gate)`. The parallel gate adds one `embedding_dim × 4·embedding_dim`
+projection and one `4·embedding_dim` bias per layer; the existing `W_ff2` projects the gated
+product back to the embedding width. Full-prefix forward caches both branch inputs for the matched
+backward, and cached decode carries a single additional gate scratch row. `--swiglu` and `--gelu`
+are mutually exclusive architecture choices.
+
 Forward matmuls normally use the CPU dispatch path (or opt-in GPU path), which picks a kernel from
 the shape of the call and the instruction set the running CPU supports - see
 [CPU matmul kernels](matmul.md). Setting `model.use_scalar_matmul`
@@ -267,7 +274,7 @@ Headers live under `src/include/` and mirror the source hierarchy. External call
 ## Current design boundaries
 
 - Fixed sinusoidal positional encodings by default, with optional RoPE
-- ReLU feed-forward network with width `4 × embedding_dim` by default, with optional GELU
+- ReLU feed-forward network with width `4 × embedding_dim` by default, with optional GELU or SwiGLU
 - Ring-KV-cached generation with a fixed retained window and absolute position tracking
 - Last-position next-token prediction
 - Linux-focused runtime and hardware probing

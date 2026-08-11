@@ -80,6 +80,12 @@ size_t model_param_tensors(const neural_model_t *model,
              embedding_dim, ffn_dim, PARAM_KIND_PROJECTION);
         emit(out, capacity, &count, "b_ff1", l, layer->b_ff1,
              1, ffn_dim, PARAM_KIND_BIAS);
+        if (model_uses_swiglu(model)) {
+            emit(out, capacity, &count, "W_ff_gate", l, layer->W_ff_gate,
+                 embedding_dim, ffn_dim, PARAM_KIND_PROJECTION);
+            emit(out, capacity, &count, "b_ff_gate", l, layer->b_ff_gate,
+                 1, ffn_dim, PARAM_KIND_BIAS);
+        }
         emit(out, capacity, &count, "W_ff2", l, layer->W_ff2,
              ffn_dim, embedding_dim, PARAM_KIND_PROJECTION);
         emit(out, capacity, &count, "b_ff2", l, layer->b_ff2,

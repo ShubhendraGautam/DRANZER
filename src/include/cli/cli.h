@@ -60,6 +60,7 @@ typedef struct {
     int use_rope;           // rotary Q/K positions instead of additive sinusoids
     int use_rmsnorm;        // RMSNorm without beta instead of LayerNorm
     int use_gelu;           // GELU instead of ReLU in the FFN
+    int use_swiglu;         // gated SiLU feed-forward branch
 
     /* Training hyperparameters */
     int epochs;

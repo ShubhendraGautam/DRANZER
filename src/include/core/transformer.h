@@ -24,6 +24,7 @@ typedef struct {
     float *attn_concat;
     float *attn_raw;
     float *ff_hidden;
+    float *ff_gate;
     float *ff_raw;
     float *scores;
     float *position_embedding;

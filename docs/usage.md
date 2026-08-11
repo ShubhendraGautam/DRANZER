@@ -161,6 +161,7 @@ honest bounded streaming shuffle, not a global whole-corpus permutation.
 | `--rope` | off | Rotate per-head attention Q/K pairs by absolute position instead of adding sinusoidal vectors |
 | `--rmsnorm` | off | Use RMSNorm scales without LayerNorm mean subtraction or beta tensors |
 | `--gelu` | off | Use exact erf-based GELU instead of ReLU in feed-forward layers |
+| `--swiglu` | off | Use `SiLU(xW₁+b₁) ⊙ (xW_gate+b_gate)`; mutually exclusive with `--gelu` |
 | `--optimizer NAME` | `adam` | `adam` or `sgd` |
 | `--dropout RATE` | `0.0` | Sublayer-output dropout rate |
 | `--grad-clip NORM` | `1.0` | Global gradient norm limit; `0` disables it |

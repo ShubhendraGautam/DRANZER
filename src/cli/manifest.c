@@ -89,6 +89,7 @@ int run_manifest_write(const cli_args_t *args,
                      "rope = %d\n"
                      "rmsnorm = %d\n"
                      "gelu = %d\n"
+                     "swiglu = %d\n"
                      "train_window = %zu\n"
                      "train_stride = %zu\n"
                      "epochs = %d\n"
@@ -121,6 +122,7 @@ int run_manifest_write(const cli_args_t *args,
                      model_uses_rope(model),
                      model_uses_rmsnorm(model),
                      model_uses_gelu(model),
+                     model_uses_swiglu(model),
                      run_state->train_window, run_state->train_stride,
                      args->epochs, args->batch_size,
                      args->gradient_accumulation_steps, effective_batch, args->shuffle,

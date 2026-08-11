@@ -49,7 +49,7 @@ int main(void) {
                                       MODEL_ARCH_TIED_EMBEDDINGS |
                                           MODEL_ARCH_ROPE |
                                           MODEL_ARCH_RMSNORM |
-                                          MODEL_ARCH_GELU) != MODEL_SUCCESS) {
+                                          MODEL_ARCH_SWIGLU) != MODEL_SUCCESS) {
         fprintf(stderr, "checkpoint fixture initialization failed\n");
         failed = 1;
         goto cleanup;

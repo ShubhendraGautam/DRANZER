@@ -563,9 +563,10 @@ that the floor may erase.
   where that is the honest answer. Listed here only to note that R2 and R3 are its prerequisites,
   not its follow-up.
 
-  Tied embeddings, RoPE, RMSNorm, and GELU are implemented behind independent architecture flags with
+  Tied embeddings, RoPE, RMSNorm, GELU, and SwiGLU are implemented behind architecture flags with
   persistence and source-level test coverage. Review, bundled execution, comparison against the
-  seed floor, and the remaining SwiGLU implementation are still pending.
+  seed floor, and the ablation measurements are still pending. GELU and SwiGLU are mutually
+  exclusive alternatives.
 
 - [ ] **P1. Does overlapping the training window buy held-out quality?**
   `--train-stride` exists precisely so this comparison is possible, and

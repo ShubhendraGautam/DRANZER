@@ -160,18 +160,32 @@ static void check_model(const config_t *config, uint32_t architecture_flags) {
     for (size_t l = 0; l < config->layers; l++) {
         char wanted[48];
         snprintf(wanted, sizeof(wanted), "layer%zu.W_ff1", l);
-        int found = 0;
+        char wanted_gate[48];
+        snprintf(wanted_gate, sizeof(wanted_gate), "layer%zu.W_ff_gate", l);
+        int found = 0, found_gate = 0;
         for (size_t i = 0; i < count; i++) {
-            if (strcmp(tensors[i].name, wanted) != 0) continue;
-            found = 1;
-            if (tensors[i].values != model.layers[l].W_ff1 ||
-                tensors[i].rows != config->embedding_dim ||
-                tensors[i].cols != config->embedding_dim * 4 ||
-                tensors[i].layer != l) {
-                fail("a layer tensor is described wrongly");
+            if (strcmp(tensors[i].name, wanted) == 0) {
+                found = 1;
+                if (tensors[i].values != model.layers[l].W_ff1 ||
+                    tensors[i].rows != config->embedding_dim ||
+                    tensors[i].cols != config->embedding_dim * 4 ||
+                    tensors[i].layer != l) {
+                    fail("a layer tensor is described wrongly");
+                }
+            }
+            if (strcmp(tensors[i].name, wanted_gate) == 0) {
+                found_gate = 1;
+                if (tensors[i].values != model.layers[l].W_ff_gate ||
+                    tensors[i].rows != config->embedding_dim ||
+                    tensors[i].cols != config->embedding_dim * 4 ||
+                    tensors[i].layer != l) {
+                    fail("the SwiGLU gate tensor is described wrongly");
+                }
             }
         }
         if (!found) fail("a layer tensor is missing from the inventory");
+        if (found_gate != model_uses_swiglu(&model))
+            fail("the SwiGLU gate inventory does not match the architecture");
     }
 
     free(tensors);
@@ -184,8 +198,9 @@ int main(void) {
         0,
         MODEL_ARCH_TIED_EMBEDDINGS,
         MODEL_ARCH_GELU,
+        MODEL_ARCH_SWIGLU,
         MODEL_ARCH_RMSNORM,
-        MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_RMSNORM | MODEL_ARCH_GELU,
+        MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_RMSNORM | MODEL_ARCH_SWIGLU,
     };
     for (size_t c = 0; c < CONFIG_COUNT; c++) {
         for (size_t variant = 0;

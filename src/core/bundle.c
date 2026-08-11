@@ -140,6 +140,8 @@ static int bundle_shape_valid(const uint64_t dims[6], uint32_t architecture_flag
     uint64_t layer_params, all_layers, computed_total, sequence_square;
     uint64_t attention_cache, workspace_limit;
     if ((architecture_flags & ~MODEL_ARCHITECTURE_SUPPORTED_MASK) != 0 ||
+        ((architecture_flags & MODEL_ARCH_GELU) != 0 &&
+         (architecture_flags & MODEL_ARCH_SWIGLU) != 0) ||
         vocab == 0 || embedding == 0 || heads == 0 || layers == 0 ||
         sequence == 0 || embedding % heads != 0 ||
         !checked_u64_multiply(embedding, embedding, &emb2) ||
@@ -149,10 +151,13 @@ static int bundle_shape_valid(const uint64_t dims[6], uint32_t architecture_flag
             (architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) ? 1 : 2,
             &global) ||
         !checked_u64_add(global, vocab, &global) ||
-        !checked_u64_multiply(emb2, 12, &layer_square) ||
+        !checked_u64_multiply(
+            emb2, (architecture_flags & MODEL_ARCH_SWIGLU) ? 16 : 12,
+            &layer_square) ||
         !checked_u64_multiply(
             embedding,
-            (architecture_flags & MODEL_ARCH_RMSNORM) ? 7 : 9,
+            ((architecture_flags & MODEL_ARCH_RMSNORM) ? 7 : 9) +
+                ((architecture_flags & MODEL_ARCH_SWIGLU) ? 4 : 0),
             &layer_linear) ||
         !checked_u64_add(layer_square, layer_linear, &layer_params) ||
         !checked_u64_multiply(layers, layer_params, &all_layers) ||

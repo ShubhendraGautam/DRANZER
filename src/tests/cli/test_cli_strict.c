@@ -38,6 +38,8 @@ int main(void) {
     char *rope[] = {"app", "train", "--rope"};
     char *rmsnorm[] = {"app", "train", "--rmsnorm"};
     char *gelu_option[] = {"app", "train", "--gelu"};
+    char *swiglu_option[] = {"app", "train", "--swiglu"};
+    char *activation_conflict[] = {"app", "train", "--gelu", "--swiglu"};
     char *valid[] = {"app", "train", "--batch-size", "4",
                      "--gradient-accumulation", "3", "--shuffle",
                      "--checkpoint-interval", "0", "--dropout", "0.2"};
@@ -55,6 +57,7 @@ int main(void) {
                  !must_reject(4, full_dropout) || !must_reject(4, negative_seed) ||
                  !must_reject(4, bad_penalty) || !must_reject(4, empty_stop) ||
                  !must_reject(4, misplaced_stop) ||
+                 !must_reject(4, activation_conflict) ||
                  !must_reject(20, too_many_stops) ||
                  !must_reject(4, bad_stride) ||
                  cli_parse(4, zero_stride, &parsed) != 0 ||
@@ -69,6 +72,8 @@ int main(void) {
                  !cli_option_was_explicit(&parsed, "--rmsnorm") ||
                  cli_parse(3, gelu_option, &parsed) != 0 || !parsed.use_gelu ||
                  !cli_option_was_explicit(&parsed, "--gelu") ||
+                 cli_parse(3, swiglu_option, &parsed) != 0 || !parsed.use_swiglu ||
+                 !cli_option_was_explicit(&parsed, "--swiglu") ||
                  cli_parse(11, valid, &parsed) != 0 || parsed.batch_size != 4 ||
                  parsed.gradient_accumulation_steps != 3 || !parsed.shuffle ||
                  parsed.checkpoint_interval != 0 || parsed.dropout_rate != 0.2f ||

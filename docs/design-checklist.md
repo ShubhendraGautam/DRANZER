@@ -742,7 +742,7 @@ speed/memory improvement is reproducible on identified hardware.
 - [~] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
 
-  **Tied-embedding, RoPE, RMSNorm, and GELU implementations are ready; review and measurement are deferred.**
+  **Tied-embedding, RoPE, RMSNorm, GELU, and SwiGLU implementations are ready; review and measurement are deferred.**
   `--tie-embeddings` removes the duplicate output matrix and uses the token table transposed in
   full-prefix, cached-decode, and all-position training paths. Both gradient contributions land in
   the one shared parameter slice. Architecture flags persist through exact checkpoints, immutable
@@ -760,7 +760,13 @@ speed/memory improvement is reproducible on identified hardware.
   RMSNorm copy/mmap persistence. GELU is independently enabled by `--gelu`, uses the exact erf form
   in full-prefix and cached decoding, and allocates its pre-activation cache only for GELU models.
   Its focused test covers scalar and end-to-end numerical gradients, cached/full equivalence, flat
-  layout stability, and pure-GELU copy/mmap persistence. SwiGLU remains unimplemented.
+  layout stability, and pure-GELU copy/mmap persistence. SwiGLU is independently enabled by
+  `--swiglu` and implements `SiLU(xW₁+b₁) ⊙ (xW_gate+b_gate)` with a second projection,
+  bias, activation cache, cached-decode scratch, and matched gradients for both branches. GELU and
+  SwiGLU are mutually exclusive. Its focused test covers scalar SiLU derivatives, the integrated
+  gate equation, numerical gradients for both projections, parameter layout/inventory, cached/full
+  equivalence, invalid flag combinations, checkpoint continuation, and pure-SwiGLU copy/mmap
+  plus quantized persistence. No build, test, or ablation has run before review.
 - [~] Add padding and general attention masks before variable-length batching.
   `model_attention_mask_t` now combines a per-position padding mask with an optional general
   row-major edge mask, always intersected with causality. Mask-aware forward and all-position

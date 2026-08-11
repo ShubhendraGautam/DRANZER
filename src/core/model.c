@@ -36,7 +36,8 @@ static int checked_add(size_t left, size_t right, size_t *out) {
 /* Carves one transformer_layer_t's worth of views out of the params/grads
  * cursors. model_new validates the complete count before calling this. */
 static void layout_layer(transformer_layer_t *layer, float **pc, float **gc,
-                         size_t embedding_dim, int use_rmsnorm) {
+                         size_t embedding_dim, int use_rmsnorm,
+                         int use_swiglu) {
     size_t ffn_dim = embedding_dim * 4;
     size_t emb2 = embedding_dim * embedding_dim;
 
@@ -52,6 +53,10 @@ static void layout_layer(transformer_layer_t *layer, float **pc, float **gc,
 
     layer->W_ff1 = *pc; layer->W_ff1_grad = *gc; *pc += embedding_dim * ffn_dim; *gc += embedding_dim * ffn_dim;
     layer->b_ff1 = *pc; layer->b_ff1_grad = *gc; *pc += ffn_dim; *gc += ffn_dim;
+    if (use_swiglu) {
+        layer->W_ff_gate = *pc; layer->W_ff_gate_grad = *gc; *pc += embedding_dim * ffn_dim; *gc += embedding_dim * ffn_dim;
+        layer->b_ff_gate = *pc; layer->b_ff_gate_grad = *gc; *pc += ffn_dim; *gc += ffn_dim;
+    }
     layer->W_ff2 = *pc; layer->W_ff2_grad = *gc; *pc += ffn_dim * embedding_dim; *gc += ffn_dim * embedding_dim;
     layer->b_ff2 = *pc; layer->b_ff2_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
 
@@ -89,6 +94,8 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
         num_heads == 0 || embedding_dim % num_heads != 0 ||
         num_layers == 0 || max_seq_len == 0 ||
         (architecture_flags & ~MODEL_ARCHITECTURE_SUPPORTED_MASK) != 0 ||
+        ((architecture_flags & MODEL_ARCH_GELU) != 0 &&
+         (architecture_flags & MODEL_ARCH_SWIGLU) != 0) ||
         ((architecture_flags & MODEL_ARCH_ROPE) != 0 &&
          (embedding_dim / num_heads) % 2 != 0)) {
         return MODEL_INVALID_INPUT;
@@ -98,11 +105,15 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     size_t vocab_emb, global_count, layered_params;
     size_t total_param_count, seq_emb, ffn_cache, max_seq_squared, probs_cache;
     size_t hidden_pointer_count;
+    size_t layer_square_factor =
+        (architecture_flags & MODEL_ARCH_SWIGLU) ? 16 : 12;
+    size_t layer_linear_factor =
+        ((architecture_flags & MODEL_ARCH_RMSNORM) ? 7 : 9) +
+        ((architecture_flags & MODEL_ARCH_SWIGLU) ? 4 : 0);
     if (!checked_multiply(embedding_dim, 4, &ffn_dim) ||
         !checked_multiply(embedding_dim, embedding_dim, &emb2) ||
-        !checked_multiply(emb2, 12, &layer_square_term) ||
-        !checked_multiply(embedding_dim,
-                          (architecture_flags & MODEL_ARCH_RMSNORM) ? 7 : 9,
+        !checked_multiply(emb2, layer_square_factor, &layer_square_term) ||
+        !checked_multiply(embedding_dim, layer_linear_factor,
                           &layer_linear_term) ||
         !checked_add(layer_square_term, layer_linear_term, &layer_params) ||
         !checked_multiply(vocab_size, embedding_dim, &vocab_emb) ||
@@ -213,7 +224,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
 
     for (size_t l = 0; l < num_layers; l++) {
         layout_layer(&model->layers[l], &pc, &gc, embedding_dim,
-                     model_uses_rmsnorm(model));
+                     model_uses_rmsnorm(model), model_uses_swiglu(model));
     }
 
     if (external_parameters == NULL) {
@@ -230,9 +241,15 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
             xavier_init(layer->W_v, embedding_dim * embedding_dim, embedding_dim, embedding_dim, &init_rng);
             xavier_init(layer->W_o, embedding_dim * embedding_dim, embedding_dim, embedding_dim, &init_rng);
             xavier_init(layer->W_ff1, embedding_dim * ffn_dim, embedding_dim, ffn_dim, &init_rng);
+            if (model_uses_swiglu(model)) {
+                xavier_init(layer->W_ff_gate, embedding_dim * ffn_dim,
+                            embedding_dim, ffn_dim, &init_rng);
+            }
             xavier_init(layer->W_ff2, ffn_dim * embedding_dim, ffn_dim, embedding_dim, &init_rng);
 
             memset(layer->b_ff1, 0, ffn_dim * sizeof(float));
+            if (model_uses_swiglu(model))
+                memset(layer->b_ff_gate, 0, ffn_dim * sizeof(float));
             memset(layer->b_ff2, 0, embedding_dim * sizeof(float));
             for (size_t d = 0; d < embedding_dim; d++) {
                 layer->ln_gamma_attn[d] = 1.0f;
@@ -271,6 +288,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     model->cache_attn_std = malloc(num_layers * sizeof(float *));
     model->cache_ff_hidden = malloc(num_layers * sizeof(float *));
     model->cache_ff_pre_activation = calloc(num_layers, sizeof(float *));
+    model->cache_ff_gate = calloc(num_layers, sizeof(float *));
     model->cache_ffn_xhat = malloc(num_layers * sizeof(float *));
     model->cache_ffn_std = malloc(num_layers * sizeof(float *));
     model->cache_attn_dropout_mask = malloc(num_layers * sizeof(float *));
@@ -279,7 +297,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     if (!model->cache_hidden || !model->cache_Q || !model->cache_K || !model->cache_V ||
         !model->cache_probs || !model->cache_attn_concat || !model->cache_attn_ln_out ||
         !model->cache_attn_xhat || !model->cache_attn_std || !model->cache_ff_hidden ||
-        !model->cache_ff_pre_activation ||
+        !model->cache_ff_pre_activation || !model->cache_ff_gate ||
         !model->cache_ffn_xhat || !model->cache_ffn_std ||
         !model->cache_attn_dropout_mask || !model->cache_ffn_dropout_mask) {
         model_free(model);
@@ -320,8 +338,10 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
         model->cache_attn_xhat[l] = malloc(seq_emb * sizeof(float));
         model->cache_attn_std[l] = malloc(max_seq_len * sizeof(float));
         model->cache_ff_hidden[l] = malloc(ffn_cache * sizeof(float));
-        if (model_uses_gelu(model))
+        if (model_uses_gelu(model) || model_uses_swiglu(model))
             model->cache_ff_pre_activation[l] = malloc(ffn_cache * sizeof(float));
+        if (model_uses_swiglu(model))
+            model->cache_ff_gate[l] = malloc(ffn_cache * sizeof(float));
         model->cache_ffn_xhat[l] = malloc(seq_emb * sizeof(float));
         model->cache_ffn_std[l] = malloc(max_seq_len * sizeof(float));
         model->cache_attn_dropout_mask[l] = malloc(seq_emb * sizeof(float));
@@ -330,7 +350,9 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
         if (!model->cache_Q[l] || !model->cache_K[l] || !model->cache_V[l] || !model->cache_probs[l] ||
             !model->cache_attn_concat[l] || !model->cache_attn_ln_out[l] || !model->cache_attn_xhat[l] ||
             !model->cache_attn_std[l] || !model->cache_ff_hidden[l] ||
-            (model_uses_gelu(model) && !model->cache_ff_pre_activation[l]) ||
+            ((model_uses_gelu(model) || model_uses_swiglu(model)) &&
+             !model->cache_ff_pre_activation[l]) ||
+            (model_uses_swiglu(model) && !model->cache_ff_gate[l]) ||
             !model->cache_ffn_xhat[l] ||
             !model->cache_ffn_std[l] || !model->cache_attn_dropout_mask[l] || !model->cache_ffn_dropout_mask[l]) {
             model_free(model);
@@ -347,6 +369,8 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     model->ws_d_x1_total = malloc(seq_emb * sizeof(float));
     model->ws_d_s1 = malloc(seq_emb * sizeof(float));
     model->ws_d_ff_hidden = malloc(ffn_cache * sizeof(float));
+    if (model_uses_swiglu(model))
+        model->ws_d_ff_gate = malloc(ffn_cache * sizeof(float));
     model->ws_d_attn_concat = malloc(seq_emb * sizeof(float));
     model->ws_d_scores = malloc(num_heads * max_seq_len * max_seq_len * sizeof(float));
     model->ws_d_Q = malloc(seq_emb * sizeof(float));
@@ -371,6 +395,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
 
     if (!model->ws_fwd_attn_raw || !model->ws_fwd_ff_raw || !model->ws_dhidden_in || !model->ws_dhidden_out ||
         !model->ws_d_s2 || !model->ws_d_x1_total || !model->ws_d_s1 || !model->ws_d_ff_hidden ||
+        (model_uses_swiglu(model) && !model->ws_d_ff_gate) ||
         !model->ws_d_attn_concat || !model->ws_d_scores || !model->ws_d_Q || !model->ws_d_K || !model->ws_d_V ||
         !model->ws_d_attn_dropout || !model->ws_d_ffn_dropout || !model->ws_logits || !model->ws_grad_logits ||
         !model->ws_logits_all || !model->ws_grad_logits_all) {
@@ -505,6 +530,7 @@ void model_free(neural_model_t *model) {
     FREE_LAYER_CACHE(cache_attn_std)
     FREE_LAYER_CACHE(cache_ff_hidden)
     FREE_LAYER_CACHE(cache_ff_pre_activation)
+    FREE_LAYER_CACHE(cache_ff_gate)
     FREE_LAYER_CACHE(cache_ffn_xhat)
     FREE_LAYER_CACHE(cache_ffn_std)
     FREE_LAYER_CACHE(cache_attn_dropout_mask)
@@ -519,6 +545,7 @@ void model_free(neural_model_t *model) {
     free(model->ws_d_x1_total);
     free(model->ws_d_s1);
     free(model->ws_d_ff_hidden);
+    free(model->ws_d_ff_gate);
     free(model->ws_d_attn_concat);
     free(model->ws_d_scores);
     free(model->ws_d_Q);

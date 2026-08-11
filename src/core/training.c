@@ -88,13 +88,27 @@ static void backward_layer_stack(neural_model_t *model,
         model_dispatch_backward_input(model, model->ws_d_ffn_dropout, layer->W_ff2, model->ws_d_ff_hidden,
                                seq_len, ffn_dim, embedding_dim);
 
-        /* Activation backward. ReLU can use its cached output as the sign
-         * indicator; GELU needs the pre-activation cached by forward. */
-        for (size_t idx = 0; idx < seq_len * ffn_dim; idx++) {
-            float derivative = model_uses_gelu(model)
-                ? gelu_derivative(model->cache_ff_pre_activation[l][idx])
-                : relu_derivative(model->cache_ff_hidden[l][idx]);
-            model->ws_d_ff_hidden[idx] *= derivative;
+        /* Activation backward. SwiGLU splits the incoming gradient between
+         * silu(u) and its parallel linear gate v. */
+        if (model_uses_swiglu(model)) {
+            for (size_t idx = 0; idx < seq_len * ffn_dim; idx++) {
+                float upstream = model->ws_d_ff_hidden[idx];
+                float pre_activation =
+                    model->cache_ff_pre_activation[l][idx];
+                float gate = model->cache_ff_gate[l][idx];
+                model->ws_d_ff_gate[idx] = upstream * silu(pre_activation);
+                model->ws_d_ff_hidden[idx] =
+                    upstream * gate * silu_derivative(pre_activation);
+            }
+        } else {
+            /* ReLU can use its cached output as the sign indicator; GELU
+             * needs the pre-activation cached by forward. */
+            for (size_t idx = 0; idx < seq_len * ffn_dim; idx++) {
+                float derivative = model_uses_gelu(model)
+                    ? gelu_derivative(model->cache_ff_pre_activation[l][idx])
+                    : relu_derivative(model->cache_ff_hidden[l][idx]);
+                model->ws_d_ff_hidden[idx] *= derivative;
+            }
         }
 
         for (size_t d = 0; d < ffn_dim; d++) {
@@ -104,10 +118,26 @@ static void backward_layer_stack(neural_model_t *model,
         }
         model_dispatch_backward_weight(model, model->cache_attn_ln_out[l], model->ws_d_ff_hidden, layer->W_ff1_grad,
                                 seq_len, embedding_dim, ffn_dim);
+        if (model_uses_swiglu(model)) {
+            for (size_t d = 0; d < ffn_dim; d++) {
+                float sum = 0.0f;
+                for (size_t i = 0; i < seq_len; i++)
+                    sum += model->ws_d_ff_gate[i * ffn_dim + d];
+                layer->b_ff_gate_grad[d] += sum;
+            }
+            model_dispatch_backward_weight(
+                model, model->cache_attn_ln_out[l], model->ws_d_ff_gate,
+                layer->W_ff_gate_grad, seq_len, embedding_dim, ffn_dim);
+        }
 
         memset(model->ws_d_x1_total, 0, seq_len * embedding_dim * sizeof(float));
         model_dispatch_backward_input(model, model->ws_d_ff_hidden, layer->W_ff1, model->ws_d_x1_total,
                                seq_len, embedding_dim, ffn_dim);
+        if (model_uses_swiglu(model)) {
+            model_dispatch_backward_input(
+                model, model->ws_d_ff_gate, layer->W_ff_gate,
+                model->ws_d_x1_total, seq_len, embedding_dim, ffn_dim);
+        }
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {
             model->ws_d_x1_total[i] += model->ws_d_s2[i]; /* + residual branch (bypasses dropout) */
         }

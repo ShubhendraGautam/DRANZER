@@ -26,6 +26,24 @@ float gelu_derivative(float x) {
            x * inverse_sqrt_two_pi * expf(-0.5f * x * x);
 }
 
+static float stable_sigmoid(float x) {
+    if (x >= 0.0f) {
+        float z = expf(-x);
+        return 1.0f / (1.0f + z);
+    }
+    float z = expf(x);
+    return z / (1.0f + z);
+}
+
+float silu(float x) {
+    return x * stable_sigmoid(x);
+}
+
+float silu_derivative(float x) {
+    float sigmoid = stable_sigmoid(x);
+    return sigmoid * (1.0f + x * (1.0f - sigmoid));
+}
+
 void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out,
                  uint64_t *rng_state) {
     float limit = sqrtf(6.0f / (fan_in + fan_out));

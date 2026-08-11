@@ -462,16 +462,27 @@ model_errors_t model_forward_hidden_masked(
         /* FFN sub-block: matmul -> bias -> activation -> matmul -> bias -> dropout -> residual -> LN */
         float *x1 = model->cache_attn_ln_out[l];
         model_dispatch_matmul(model, x1, layer->W_ff1, model->cache_ff_hidden[l], seq_len, embedding_dim, ffn_dim);
+        if (model_uses_swiglu(model)) {
+            model_dispatch_matmul(model, x1, layer->W_ff_gate,
+                                  model->cache_ff_gate[l], seq_len,
+                                  embedding_dim, ffn_dim);
+        }
         for (size_t i = 0; i < seq_len; i++) {
             for (size_t d = 0; d < ffn_dim; d++) {
-                float *v = &model->cache_ff_hidden[l][i * ffn_dim + d];
-                float pre_activation = *v + layer->b_ff1[d];
-                if (model_uses_gelu(model)) {
-                    model->cache_ff_pre_activation[l][i * ffn_dim + d] =
-                        pre_activation;
-                    *v = gelu(pre_activation);
+                size_t index = i * ffn_dim + d;
+                float *hidden = &model->cache_ff_hidden[l][index];
+                float pre_activation = *hidden + layer->b_ff1[d];
+                if (model_uses_swiglu(model)) {
+                    float gate = model->cache_ff_gate[l][index] +
+                                 layer->b_ff_gate[d];
+                    model->cache_ff_pre_activation[l][index] = pre_activation;
+                    model->cache_ff_gate[l][index] = gate;
+                    *hidden = silu(pre_activation) * gate;
+                } else if (model_uses_gelu(model)) {
+                    model->cache_ff_pre_activation[l][index] = pre_activation;
+                    *hidden = gelu(pre_activation);
                 } else {
-                    *v = relu(pre_activation);
+                    *hidden = relu(pre_activation);
                 }
             }
         }
@@ -619,12 +630,16 @@ model_errors_t model_kv_cache_init_with_capacity(model_kv_cache_t *cache,
     cache->attn_concat = malloc(embedding_dim * sizeof(float));
     cache->attn_raw = malloc(embedding_dim * sizeof(float));
     cache->ff_hidden = malloc(ffn_dim * sizeof(float));
+    if (model_uses_swiglu(model))
+        cache->ff_gate = malloc(ffn_dim * sizeof(float));
     cache->ff_raw = malloc(embedding_dim * sizeof(float));
     cache->scores = malloc(model->num_heads * capacity * sizeof(float));
     cache->position_embedding = malloc(embedding_dim * sizeof(float));
 
     if (!cache->hidden || !cache->attn_norm || !cache->query || !cache->attn_concat ||
-        !cache->attn_raw || !cache->ff_hidden || !cache->ff_raw || !cache->scores ||
+        !cache->attn_raw || !cache->ff_hidden ||
+        (model_uses_swiglu(model) && !cache->ff_gate) ||
+        !cache->ff_raw || !cache->scores ||
         !cache->position_embedding) {
         model_kv_cache_free(cache);
         return MODEL_ALLOCATION_FAILURE;
@@ -657,6 +672,7 @@ void model_kv_cache_free(model_kv_cache_t *cache) {
     free(cache->attn_concat);
     free(cache->attn_raw);
     free(cache->ff_hidden);
+    free(cache->ff_gate);
     free(cache->ff_raw);
     free(cache->scores);
     free(cache->position_embedding);
@@ -800,11 +816,20 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
 
         model_dispatch_matmul(model, cache->attn_norm, layer->W_ff1, cache->ff_hidden,
                         1, embedding_dim, ffn_dim);
+        if (model_uses_swiglu(model)) {
+            model_dispatch_matmul(model, cache->attn_norm, layer->W_ff_gate,
+                                  cache->ff_gate, 1, embedding_dim, ffn_dim);
+        }
         for (size_t d = 0; d < ffn_dim; d++) {
             float pre_activation = cache->ff_hidden[d] + layer->b_ff1[d];
-            cache->ff_hidden[d] = model_uses_gelu(model)
-                                      ? gelu(pre_activation)
-                                      : relu(pre_activation);
+            if (model_uses_swiglu(model)) {
+                float gate = cache->ff_gate[d] + layer->b_ff_gate[d];
+                cache->ff_hidden[d] = silu(pre_activation) * gate;
+            } else {
+                cache->ff_hidden[d] = model_uses_gelu(model)
+                                          ? gelu(pre_activation)
+                                          : relu(pre_activation);
+            }
         }
         model_dispatch_matmul(model, cache->ff_hidden, layer->W_ff2, cache->ff_raw,
                         1, ffn_dim, embedding_dim);
