@@ -325,9 +325,11 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
         model_free(&loaded);
         return BUNDLE_CHECKSUM_ERROR;
     }
-    /* Reject a mismatched or malicious allocation request before asking the
-     * tokenizer decoder to allocate its vocabulary table. */
-    if (decode_u64(tokenizer_data) != dims[0]) {
+    uint64_t tokenizer_max_vocab = 0;
+    if (bpe_encoder_portable_max_vocab(tokenizer_data,
+                                       (size_t)tokenizer_bytes,
+                                       &tokenizer_max_vocab) != BPE_SUCCESS ||
+        tokenizer_max_vocab != dims[0]) {
         free(tokenizer_data);
         model_free(&loaded);
         return BUNDLE_FORMAT_ERROR;

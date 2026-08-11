@@ -182,7 +182,7 @@ static int emit_until(const bpe_encoder_t *encoder,
             !bpe_token_is_control(encoder, token_id) &&
             encoder->tokens[token_id].token) {
             text = encoder->tokens[token_id].token;
-            text_length = strlen(text);
+            text_length = encoder->tokens[token_id].length;
         }
         if (options->on_token(token_id, text, text_length,
                               options->callback_data) != 0) {

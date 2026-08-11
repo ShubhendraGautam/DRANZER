@@ -31,9 +31,11 @@ The fixed 152-byte header is followed by the two checked payloads and an eight-b
 | after weights | variable | Portable frozen-tokenizer payload |
 | final 8 | 8 | Footer: `DRNZDONE` |
 
-The tokenizer payload stores its maximum and occupied vocabulary sizes, frozen flag, special-token
-mode, then every learned token in merge order as length, signed frequency, and bytes. The
-deterministic byte tokens 0–255 and fixed special IDs are reconstructed rather than duplicated.
+The tokenizer payload begins with `DRNZBPP2`, then stores its maximum and occupied vocabulary
+sizes, frozen flag, special-token mode, and every learned token in merge order as length, signed
+frequency, and bytes. Token bytes are length-delimited and may contain NUL. The deterministic byte
+tokens 0–255 and fixed special IDs are reconstructed rather than duplicated. The loader retains
+read support for the older unmarked payload, whose learned tokens were C strings.
 
 The header checksum is calculated with its two split fields zeroed. FNV-1a checksums detect
 accidental corruption; they are not cryptographic signatures. Do not use them to establish

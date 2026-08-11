@@ -34,11 +34,12 @@ windows. Padding masks remain an explicit later architecture goal.
 
 ## Compatibility
 
-Legacy `DRNZBPE1` tokenizers keep their original interpretation: byte IDs are 0–255 and learned
-merges begin at 256. They do not silently gain BOS/EOS behavior. New `DRNZBPE2` sidecars and portable
-bundle payloads record `special-v1` mode; checkpoints embed that same flag. Loading an old model and
-sidecar therefore preserves its old token stream exactly, while new training defaults to the
-special-aware mode.
+Legacy `DRNZBPE1`/`DRNZBPE2` tokenizers remain readable and keep their original ID interpretation:
+plain mode uses byte IDs 0–255 and merges from 256; special mode reserves IDs 256–259 and merges
+from 260. Binary-safe sidecars are `DRNZBPE3` for plain mode and `DRNZBPE4` for special mode. Bundle
+payloads carry their own `DRNZBPP2` version marker and record the mode separately. Loading an old
+model and sidecar therefore preserves its old token stream exactly, while new training defaults to
+the special-aware, binary-safe format.
 
 Tokenizer mode is part of model compatibility. A legacy tokenizer cannot be substituted for a
 special-aware bundle, and an explicit sidecar cannot override a bundle's embedded tokenizer.

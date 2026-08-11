@@ -2,6 +2,7 @@
 #define HASHMAP_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -18,6 +19,7 @@ typedef enum {
 typedef enum {
     HASHMAP_VALUE_START = 0,
     HASHMAP_VALUE_TYPE_INT,
+    HASHMAP_VALUE_TYPE_UINT32,
     HASHMAP_VALUE_TYPE_FLOAT,
     HASHMAP_VALUE_TYPE_STRING,
     HASHMAP_VALUE_TYPE_FLOAT_VECTOR,
@@ -26,6 +28,7 @@ typedef enum {
 
 typedef struct hashmap_entry {
     char *key;
+    size_t key_length;
     void* value;
     hashmap_value_type_t value_type;
     struct hashmap_entry *next;
@@ -43,6 +46,7 @@ typedef struct {
 
 /* Function declarations */
 unsigned long hash(const char *str);
+unsigned long hash_bytes(const void *data, size_t length);
 
 int hashmap_new(hashmap_t *map, int bucket_count);
 int hashmap_free(hashmap_t *map);
@@ -50,5 +54,14 @@ int hashmap_insert(hashmap_t *map, const char *key, const void *value, hashmap_v
 int hashmap_get(hashmap_t *map, const char *key, void *value, hashmap_value_type_t *value_type);
 int hashmap_remove(hashmap_t *map, const char *key);
 int hashmap_contains(hashmap_t *map, const char *key);
+
+/* Length-aware variants for binary keys. The map owns a copy and appends a
+ * sentinel NUL for diagnostics only; hashing and equality use key_length. */
+int hashmap_insert_bytes(hashmap_t *map, const void *key, size_t key_length,
+                         const void *value, hashmap_value_type_t value_type);
+int hashmap_get_bytes(hashmap_t *map, const void *key, size_t key_length,
+                      void *value, hashmap_value_type_t *value_type);
+int hashmap_remove_bytes(hashmap_t *map, const void *key, size_t key_length);
+int hashmap_contains_bytes(hashmap_t *map, const void *key, size_t key_length);
 
 #endif /* HASHMAP_H */

@@ -18,7 +18,8 @@ typedef enum {
 } bpe_errors_t;
 
 typedef struct {
-    char *token;           // The token string (could be multi-char like "ab" or "ing")
+    char *token;           // Token bytes; sentinel-terminated for diagnostics only
+    size_t length;         // Authoritative length; token bytes may contain NUL
     uint32_t id;           // Token ID
     int frequency;         // Frequency of this token in the current vocabulary
 } bpe_token_t;
@@ -29,8 +30,8 @@ typedef struct {
     size_t max_vocab_size; // Maximum vocabulary size to build to
     int is_frozen;         // Frozen vocabularies reject further training
     int has_special_tokens;// IDs 256..259 are reserved control tokens
-    hashmap_t token_to_id; // Map from token string to token ID
-    hashmap_t id_to_token; // Map from token ID to token string
+    hashmap_t token_to_id; // Map from length-delimited token bytes to token ID
+    hashmap_t id_to_token; // Compatibility mirror of the byte-keyed token map
 } bpe_encoder_t;
 
 typedef enum {
@@ -120,13 +121,20 @@ bpe_errors_t bpe_encoder_write(const bpe_encoder_t *encoder, FILE *file);
 bpe_errors_t bpe_encoder_read(bpe_encoder_t *encoder, FILE *file);
 
 /* Canonical little-endian tokenizer payload used inside versioned model
- * bundles. The returned byte buffer is owned by the caller. */
+ * bundles. Version 2 payloads begin with DRNZBPP2 and store binary-safe token
+ * bytes; the reader retains support for the unmarked version 1 payload. The
+ * returned byte buffer is owned by the caller. */
 bpe_errors_t bpe_encoder_serialize_portable(const bpe_encoder_t *encoder,
                                             uint8_t **out_data,
                                             size_t *out_size);
 bpe_errors_t bpe_encoder_deserialize_portable(bpe_encoder_t *encoder,
                                               const uint8_t *data,
                                               size_t size);
+
+/* Read only the allocation-driving max-vocabulary field after validating the
+ * portable payload version and fixed header. */
+bpe_errors_t bpe_encoder_portable_max_vocab(const uint8_t *data, size_t size,
+                                            uint64_t *out_max_vocab);
 
 /**
  * Load a vocabulary saved by bpe_encoder_save into an uninitialized

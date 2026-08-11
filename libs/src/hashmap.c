@@ -1,6 +1,6 @@
 /*
-    Very Basic Hashmap implementation in C to support tokensization.
-    Specialized for accepting string keys and float array values (vectors).
+    Very Basic Hashmap implementation in C to support tokenization.
+    Accepts both string keys and length-delimited binary keys.
 
 */
 
@@ -8,14 +8,18 @@
 #include "hashmap.h"
 #include "debug.h"
 
-unsigned long hash(const char *str) {
+unsigned long hash_bytes(const void *data, size_t length) {
+    const unsigned char *bytes = data;
     unsigned long h = 5381;
-    int c;
-
-    while ((c = *str++))
-        h = ((h << 5) + h) + c; // h * 33 + c
+    for (size_t i = 0; i < length; i++) {
+        h = ((h << 5) + h) + bytes[i]; // h * 33 + byte
+    }
 
     return h;
+}
+
+unsigned long hash(const char *str) {
+    return hash_bytes(str, strlen(str));
 }
 
 /* Forward declaration */
@@ -69,6 +73,14 @@ int hashmap_internal_duplicate_value(const void *src, void **dest, hashmap_value
             *(int *)(*dest) = *(const int *)src;
             break;
 
+        case HASHMAP_VALUE_TYPE_UINT32:
+            *dest = malloc(sizeof(uint32_t));
+            if ( *dest == NULL ) {
+                return HASHMAP_ALLOCATION_FAILURE;
+            }
+            *(uint32_t *)(*dest) = *(const uint32_t *)src;
+            break;
+
         case HASHMAP_VALUE_TYPE_FLOAT:
             *dest = malloc(sizeof(float));
             if ( *dest == NULL ) {
@@ -115,6 +127,7 @@ static void hashmap_internal_free_value(void *value, hashmap_value_type_t value_
 
     switch ( value_type ) {
         case HASHMAP_VALUE_TYPE_INT:
+        case HASHMAP_VALUE_TYPE_UINT32:
         case HASHMAP_VALUE_TYPE_FLOAT:
         case HASHMAP_VALUE_TYPE_STRING:
             free(value);
@@ -137,9 +150,10 @@ static void hashmap_internal_free_value(void *value, hashmap_value_type_t value_
 }
 
 
-// Inserts a key-value pair into the hashmap.
-int hashmap_insert(hashmap_t *map, const char *key, const void *value, hashmap_value_type_t value_type) {
-    DEBUG_PRINT("Inserting key='%s' with type=%d\n", key, value_type);
+// Inserts a length-delimited key-value pair into the hashmap.
+int hashmap_insert_bytes(hashmap_t *map, const void *key, size_t key_length,
+                         const void *value, hashmap_value_type_t value_type) {
+    DEBUG_PRINT("Inserting key of %zu bytes with type=%d\n", key_length, value_type);
     hashmap_errors_t rc = HASHMAP_SUCCESS; 
 
     // Input validation
@@ -165,12 +179,19 @@ int hashmap_insert(hashmap_t *map, const char *key, const void *value, hashmap_v
         return HASHMAP_ALLOCATION_FAILURE;
     }
 
-    // Duplicate the key
-    new_entry->key = strdup(key);
+    // Duplicate the key. The sentinel is not part of its identity.
+    if (key_length == SIZE_MAX) {
+        free(new_entry);
+        return HASHMAP_INVALID_INPUT_ERROR;
+    }
+    new_entry->key = malloc(key_length + 1);
     if ( new_entry->key == NULL ) {
         free(new_entry);
         return HASHMAP_ALLOCATION_FAILURE;
     }
+    if (key_length > 0) memcpy(new_entry->key, key, key_length);
+    new_entry->key[key_length] = '\0';
+    new_entry->key_length = key_length;
 
     // Duplicate the value
     rc = hashmap_internal_duplicate_value(value, &new_entry->value, value_type);
@@ -187,7 +208,7 @@ int hashmap_insert(hashmap_t *map, const char *key, const void *value, hashmap_v
     new_entry->next = NULL;
 
     // Find the appropriate bucket
-    int bucket_index = hash(key) % map->bucket_count;
+    size_t bucket_index = hash_bytes(key, key_length) % map->bucket_count;
 
     // If the bucket is empty, insert the new entry directly
     if ( map->buckets[bucket_index] == NULL ) {
@@ -197,11 +218,16 @@ int hashmap_insert(hashmap_t *map, const char *key, const void *value, hashmap_v
     else {
         hashmap_entry_t *current = map->buckets[bucket_index];
         while ( current != NULL ) {
-            if ( strcmp(current->key, key) == 0 ) {
+            if (current->key_length == key_length &&
+                memcmp(current->key, key, key_length) == 0) {
                 // Key already exists, update the value
                 void *temp_value;
                 rc = hashmap_internal_duplicate_value(value, &temp_value, value_type);
                 if ( rc != HASHMAP_SUCCESS ) {
+                    free(new_entry->key);
+                    hashmap_internal_free_value(new_entry->value,
+                                                new_entry->value_type);
+                    free(new_entry);
                     return rc; // Propagate the allocation failure, old value remains unchanged
                 }
 
@@ -226,8 +252,15 @@ int hashmap_insert(hashmap_t *map, const char *key, const void *value, hashmap_v
     return HASHMAP_SUCCESS;
 }
 
-// Retrieves the value associated with a key from the hashmap.
-int hashmap_get(hashmap_t *map, const char *key, void *value, hashmap_value_type_t *value_type) {
+int hashmap_insert(hashmap_t *map, const char *key, const void *value,
+                   hashmap_value_type_t value_type) {
+    if (key == NULL) return HASHMAP_NULL_KEY;
+    return hashmap_insert_bytes(map, key, strlen(key), value, value_type);
+}
+
+// Retrieves the value associated with a length-delimited key from the hashmap.
+int hashmap_get_bytes(hashmap_t *map, const void *key, size_t key_length,
+                      void *value, hashmap_value_type_t *value_type) {
     // Input validation
     if ( map == NULL ) {
         return HASHMAP_NULL_MAP;
@@ -242,16 +275,21 @@ int hashmap_get(hashmap_t *map, const char *key, void *value, hashmap_value_type
     }
 
     // Find the appropriate bucket
-    int bucket_index = hash(key) % map->bucket_count;
+    size_t bucket_index = hash_bytes(key, key_length) % map->bucket_count;
     hashmap_entry_t *current = map->buckets[bucket_index];
 
     // Search for the key in the bucket chain
     while ( current != NULL ) {
-        if ( strcmp(current->key, key) == 0 ) {
+        if (current->key_length == key_length &&
+            memcmp(current->key, key, key_length) == 0) {
             // Key found, copy the value based on its type
             switch ( current->value_type ) {
                 case HASHMAP_VALUE_TYPE_INT:
                     *(int *)value = *(const int *)current->value;
+                    break;
+
+                case HASHMAP_VALUE_TYPE_UINT32:
+                    *(uint32_t *)value = *(const uint32_t *)current->value;
                     break;
 
                 case HASHMAP_VALUE_TYPE_FLOAT:
@@ -285,8 +323,14 @@ int hashmap_get(hashmap_t *map, const char *key, void *value, hashmap_value_type
     return HASHMAP_INVALID_INPUT_ERROR;
 }
 
-// Removes a key-value pair from the hashmap.
-int hashmap_remove(hashmap_t *map, const char *key) {
+int hashmap_get(hashmap_t *map, const char *key, void *value,
+                hashmap_value_type_t *value_type) {
+    if (key == NULL) return HASHMAP_NULL_KEY;
+    return hashmap_get_bytes(map, key, strlen(key), value, value_type);
+}
+
+// Removes a length-delimited key-value pair from the hashmap.
+int hashmap_remove_bytes(hashmap_t *map, const void *key, size_t key_length) {
     // Input validation
     if ( map == NULL ) {
         return HASHMAP_NULL_MAP;
@@ -297,13 +341,14 @@ int hashmap_remove(hashmap_t *map, const char *key) {
     }
 
     // Find the appropriate bucket
-    int bucket_index = hash(key) % map->bucket_count;
+    size_t bucket_index = hash_bytes(key, key_length) % map->bucket_count;
     hashmap_entry_t *current = map->buckets[bucket_index];
     hashmap_entry_t *prev = NULL;
 
     // Search for the key in the bucket chain
     while ( current != NULL ) {
-        if ( strcmp(current->key, key) == 0 ) {
+        if (current->key_length == key_length &&
+            memcmp(current->key, key, key_length) == 0) {
             // Key found, remove it
             if ( prev == NULL ) {
                 // Removing the first entry in the bucket
@@ -328,8 +373,13 @@ int hashmap_remove(hashmap_t *map, const char *key) {
     return HASHMAP_INVALID_INPUT_ERROR;
 }
 
-// Checks if a key exists in the hashmap.
-int hashmap_contains(hashmap_t *map, const char *key) {
+int hashmap_remove(hashmap_t *map, const char *key) {
+    if (key == NULL) return HASHMAP_NULL_KEY;
+    return hashmap_remove_bytes(map, key, strlen(key));
+}
+
+// Checks if a length-delimited key exists in the hashmap.
+int hashmap_contains_bytes(hashmap_t *map, const void *key, size_t key_length) {
     // Input validation
     if ( map == NULL ) {
         return HASHMAP_NULL_MAP;
@@ -340,12 +390,13 @@ int hashmap_contains(hashmap_t *map, const char *key) {
     }
 
     // Find the appropriate bucket
-    int bucket_index = hash(key) % map->bucket_count;
+    size_t bucket_index = hash_bytes(key, key_length) % map->bucket_count;
     hashmap_entry_t *current = map->buckets[bucket_index];
 
     // Search for the key in the bucket chain
     while ( current != NULL ) {
-        if ( strcmp(current->key, key) == 0 ) {
+        if (current->key_length == key_length &&
+            memcmp(current->key, key, key_length) == 0) {
             // Key found
             return HASHMAP_SUCCESS;
         }
@@ -354,4 +405,9 @@ int hashmap_contains(hashmap_t *map, const char *key) {
 
     // Key not found
     return HASHMAP_INVALID_INPUT_ERROR;
+}
+
+int hashmap_contains(hashmap_t *map, const char *key) {
+    if (key == NULL) return HASHMAP_NULL_KEY;
+    return hashmap_contains_bytes(map, key, strlen(key));
 }

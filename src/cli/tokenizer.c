@@ -152,7 +152,7 @@ tokenizer_errors_t tokenizer_tokenize_file(bpe_encoder_t *encoder, const char *f
         return TOKENIZER_INVALID_INPUT;
     }
 
-    FILE *file = fopen(filename, "r");
+    FILE *file = fopen(filename, "rb");
     if (file == NULL) {
         DEBUG_PRINT("Could not open file: %s\n", filename);
         return TOKENIZER_FILE_NOT_FOUND;
@@ -184,9 +184,11 @@ tokenizer_errors_t tokenizer_tokenize_file(bpe_encoder_t *encoder, const char *f
 
     buffer[file_size] = '\0';
 
-    // Tokenize the buffer
+    // Tokenize the exact bytes read; buffer may contain embedded NULs.
     DEBUG_PRINT("File read successfully. Size: %ld bytes. Tokenizing...\n", file_size);
-    tokenizer_errors_t result = tokenizer_tokenize(encoder, buffer, output);
+    tokenizer_errors_t result =
+        bpe_encode(encoder, buffer, read_size, output) == BPE_SUCCESS
+            ? TOKENIZER_SUCCESS : TOKENIZER_ENCODING_ERROR;
     if (result == TOKENIZER_SUCCESS) {
         DEBUG_PRINT("Tokenization complete. Token count: %zu\n", output->token_count);
     }

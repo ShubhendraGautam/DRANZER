@@ -13,7 +13,7 @@ int main(void) {
     snprintf(path, sizeof(path), "/tmp/dranzer-special-tokens-%ld.bin", (long)getpid());
     const char *text = "banana bandana banana bandana";
     bpe_encoder_t encoder = {0}, sidecar = {0}, portable = {0}, rejected = {0};
-    bpe_encoder_t legacy = {0}, legacy_portable = {0};
+    bpe_encoder_t legacy = {0}, legacy_portable = {0}, portable_v1 = {0};
     bpe_tokens_t encoded = {0}, sidecar_tokens = {0};
     uint8_t *portable_data = NULL;
     size_t portable_size = 0;
@@ -74,6 +74,7 @@ int main(void) {
                encoded.token_count * sizeof(*encoded.token_ids)) != 0 ||
         bpe_encoder_serialize_portable(&encoder, &portable_data,
                                        &portable_size) != BPE_SUCCESS ||
+        portable_size < 8 || memcmp(portable_data, "DRNZBPP2", 8) != 0 ||
         bpe_encoder_deserialize_portable(&portable, portable_data,
                                          portable_size) != BPE_SUCCESS ||
         !bpe_encoder_has_special_tokens(&portable) ||
@@ -82,6 +83,19 @@ int main(void) {
         failed = 1;
         goto cleanup;
     }
+
+    char sidecar_magic[8] = {0};
+    FILE *sidecar_file = fopen(path, "rb");
+    if (!sidecar_file ||
+        fread(sidecar_magic, 1, sizeof(sidecar_magic), sidecar_file) !=
+            sizeof(sidecar_magic) ||
+        memcmp(sidecar_magic, "DRNZBPE4", sizeof(sidecar_magic)) != 0) {
+        fprintf(stderr, "special tokenizer sidecar did not carry binary format version 4\n");
+        if (sidecar_file) fclose(sidecar_file);
+        failed = 1;
+        goto cleanup;
+    }
+    fclose(sidecar_file);
 
     uint32_t prompt[] = {10, 11, 12, 13, 14};
     uint32_t prepared[4] = {0};
@@ -155,6 +169,23 @@ int main(void) {
     }
     if (failed) goto cleanup;
 
+    /* The old unmarked portable payload remains readable. It cannot contain
+     * embedded-NUL learned tokens, but byte ID 0 is reconstructed correctly. */
+    static const uint8_t portable_v1_fixture[24] = {
+        [1] = 1,  /* max_vocab_size = 256 */
+        [9] = 1,  /* vocab_size = 256 */
+        [16] = 1, /* frozen */
+    };
+    if (bpe_encoder_deserialize_portable(&portable_v1,
+                                         portable_v1_fixture,
+                                         sizeof(portable_v1_fixture)) != BPE_SUCCESS ||
+        portable_v1.vocab_size != 256 || portable_v1.tokens[0].length != 1 ||
+        portable_v1.tokens[0].token[0] != '\0') {
+        fprintf(stderr, "portable tokenizer version 1 compatibility changed\n");
+        failed = 1;
+        goto cleanup;
+    }
+
     const uint16_t endian_probe = 1;
     if (sizeof(uint64_t) == 8 && *(const uint8_t *)&endian_probe == 1) {
         static const uint8_t legacy_v1_fixture[24] = {
@@ -198,6 +229,7 @@ cleanup:
     bpe_encoder_free(&portable);
     bpe_encoder_free(&legacy);
     bpe_encoder_free(&legacy_portable);
+    bpe_encoder_free(&portable_v1);
     remove(path);
     printf("\n%s\n", failed ? "SPECIAL TOKEN CONTRACT CHECK FAILED"
                               : "SPECIAL TOKEN CONTRACT CHECK PASSED");

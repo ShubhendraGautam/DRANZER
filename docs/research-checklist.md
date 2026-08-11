@@ -319,14 +319,13 @@ that looks fine and is not.
   is checked against `p*(1-lr*wd)` so a decay applied twice or routed through the adaptive step would
   fail even though it would still "move everything".
 
-- [ ] **P1. The tokenizer silently drops NUL bytes, so a corpus hash need not describe what was
+- [~] **P1. The tokenizer silently drops NUL bytes, so a corpus hash need not describe what was
   trained on.**
   Found by `tests/core/test_fuzz_tokenizer.c` while building it, not by inspection.
-  `libs/src/byte_pair_encoding.c` represents every token as a NUL-terminated C string —
-  `snprintf(token, MAX_PAIR_LEN, "%c", input[i])` to build one, `strlen()` to measure it — so an
-  input byte of `0x00` becomes an empty token and disappears. A sweep over all 256 byte values
-  establishes the boundary exactly: **that one value is lost and the other 255 round-trip byte for
-  byte**.
+  The old `libs/src/byte_pair_encoding.c` represented every token as a NUL-terminated C string, so
+  an input byte of `0x00` became an empty token and disappeared. A sweep over all 256 byte values
+  established the boundary exactly: that one value was lost and the other 255 round-tripped byte
+  for byte.
 
   This is filed under threats to results rather than under hygiene because of what it does to the
   corpus manifests above. A manifest hashes the bytes on disk; if the tokenizer deletes some of them,
@@ -335,13 +334,23 @@ that looks fine and is not.
   tree contains no NULs, so nothing measured so far is affected — which is exactly why this should be
   fixed while that is still true.
 
-  The fix is to represent a token as a length plus bytes rather than as a C string. That touches the
-  merge loop, the hashmap keys, and the portable serialization format, so it needs a format version
-  bump and its own commit.
+  The fix represents a token as a length plus bytes rather than as a C string. That touches the
+  merge loop, hashmap keys, file-tokenization and generation boundaries, and both serialization
+  formats, so it carries explicit new format versions.
 
   *Acceptance gate:* every one of the 256 byte values survives an encode/decode round trip, the
   allowance in `test_fuzz_tokenizer.c` is removed rather than widened, and the serialized tokenizer
   format carries a version that distinguishes the two representations.
+
+  **Implemented, pending code review and deliberately not built or run.** `bpe_token_t` now carries
+  an authoritative byte length; training, merge selection, encoding, decoding, generation callbacks,
+  and file tokenization use it rather than `strlen()`. The hashmap has length-aware binary-key APIs,
+  so token and pair identity includes bytes after NUL. Sidecars write `DRNZBPE3`/`DRNZBPE4`, portable
+  bundle payloads write `DRNZBPP2`, and both readers retain the old formats while rejecting embedded
+  NULs under their old C-string semantics. The fuzz allowance is gone, serialization fixtures include
+  a learned token containing NUL, and format-version assertions cover plain, special, portable, and
+  retained portable-v1 payloads. This stays partial until the requested review happens and the
+  acceptance tests are allowed to run.
 
 ---
 
@@ -699,19 +708,11 @@ that the floor may erase.
   reader is driven at chunk sizes 1, 3, and 8192 so no chunk boundary can be assumed to fall on a
   token or a line. Runs in the ordinary suite and therefore under both sanitizer nightlies.
 
-  **It found that the tokenizer silently drops `0x00`.** `libs/src/byte_pair_encoding.c` represents
-  every token as a NUL-terminated C string — `snprintf(..., "%c", input[i])` to build them, `strlen()`
-  to measure them — so a NUL input byte becomes an empty token and vanishes. A sweep over all 256 byte
-  values confirmed the boundary: **exactly one value is affected and the other 255 round-trip
-  exactly**. That matters beyond tidiness — it breaks the chain between a corpus manifest's hash and
-  what was actually trained on.
-
-  It is pinned, not tolerated: the round-trip assertion predicts the loss precisely from the NUL
-  count, checks that the surviving bytes are the input with its NULs deleted, and
-  `check_every_byte_value()` fails if a second value ever starts vanishing *or* if NULs start
-  surviving (in which case it says to remove the allowance and tick the item below). The fix is a
-  change to the library's token representation and its serialized format, so it is listed separately
-  rather than done here.
+  **It found that the tokenizer silently dropped `0x00`.** The original implementation represented
+  every token as a NUL-terminated C string, so a NUL input byte became an empty token and vanished.
+  A sweep over all 256 byte values established the boundary: exactly one value was affected. The
+  dedicated item below now removes that allowance and requires all 256 values to round-trip; its
+  implementation is awaiting review and execution.
 
 - [x] **P2. A determinism test that actually runs twice.**
   Exact resume is tested (T3). What is not tested is the simpler claim underneath it: the same

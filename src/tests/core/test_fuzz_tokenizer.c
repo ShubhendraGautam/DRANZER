@@ -47,14 +47,6 @@ static void fail(const char *what, size_t case_index) {
     failures++;
 }
 
-static size_t count_nuls(const char *bytes, size_t length) {
-    size_t nuls = 0;
-    for (size_t i = 0; i < length; i++) {
-        if (bytes[i] == '\0') nuls++;
-    }
-    return nuls;
-}
-
 /* Inputs that have historically broken text handling, checked before the random
  * cases so a regression in one of them is reported plainly rather than as a case
  * number. Anything the random sweep ever finds belongs here too. */
@@ -76,28 +68,15 @@ static const struct { const char *bytes; size_t length; const char *what; } fixt
 /* Train, encode, decode. The invariants:
  *   - every call returns a defined status rather than crashing;
  *   - every produced token id is inside the vocabulary the encoder reports;
- *   - decode(encode(x)) == x, byte for byte, for every byte except NUL.
+ *   - decode(encode(x)) == x, byte for byte, for every byte value.
  *
  * The round trip is the load-bearing one. A tokenizer that drops a byte produces
  * a corpus that differs from the file on disk, and every loss number measured
  * afterwards is measured on something other than the data the manifest hashed.
  *
- * THE NUL EXCEPTION IS A KNOWN DEFECT, NOT A DESIGN CHOICE.
- *
- * This sweep found it. libs/src/byte_pair_encoding.c represents every token as a
- * NUL-terminated C string - `snprintf(tokens[i], MAX_PAIR_LEN, "%c", input[i])`
- * to build them, `strlen()` to measure them - so a 0x00 input byte becomes an
- * empty token and vanishes. Exactly one byte value is affected: a separate sweep
- * over all 256 confirmed the other 255 round-trip exactly, and
- * check_every_byte_value() below keeps that pinned.
- *
- * It is pinned rather than tolerated. count_nuls() predicts precisely how many
- * bytes will be lost, so the shape of the defect is asserted: if it ever changes
- * - if a second byte value starts vanishing, or if NULs start surviving - this
- * test fails and says which. Fixing it means changing the library's token
- * representation from C strings to length-prefixed bytes, which is a real change
- * to a serialized format and belongs in its own commit, so it is recorded in
- * docs/research-checklist.md rather than done here. */
+ * This sweep originally found that 0x00 alone vanished because tokens were C
+ * strings. Tokens are now length-delimited bytes, so NUL has no exception here:
+ * the manifest bytes and the bytes presented to the model must be identical. */
 static void exercise(const char *input, size_t length, size_t case_index,
                      const char *label) {
     bpe_encoder_t encoder = {0};
@@ -125,37 +104,17 @@ static void exercise(const char *input, size_t length, size_t case_index,
         size_t decoded_length = 0;
         if (bpe_decode(&encoder, tokens.token_ids, tokens.token_count, &decoded,
                        &decoded_length) == BPE_SUCCESS) {
-            /* The expectation, with the known NUL defect subtracted so that
-             * anything else losing a byte still fails. */
-            size_t nuls = count_nuls(input, length);
-            size_t expected_length = length - nuls;
-            if (decoded_length != expected_length) {
+            if (decoded_length != length) {
                 fprintf(stderr,
                         "FAIL [case %zu, %s]: round trip returned %zu bytes, "
-                        "expected %zu (%zu in, %zu NUL%s)\n",
-                        case_index, label, decoded_length, expected_length,
-                        length, nuls, nuls == 1 ? "" : "s");
+                        "expected %zu\n",
+                        case_index, label, decoded_length, length);
                 failures++;
-            } else if (nuls == 0 && length > 0 &&
-                       memcmp(decoded, input, length) != 0) {
+            } else if (length > 0 && memcmp(decoded, input, length) != 0) {
                 fprintf(stderr,
                         "FAIL [case %zu, %s]: round trip preserved the length "
                         "but changed the bytes\n", case_index, label);
                 failures++;
-            } else if (nuls > 0) {
-                /* With NULs removed, what survives must be the input with its
-                 * NULs deleted - not merely the right number of bytes. */
-                size_t j = 0;
-                for (size_t i = 0; i < length; i++) {
-                    if (input[i] == '\0') continue;
-                    if (decoded[j++] != input[i]) {
-                        fprintf(stderr,
-                                "FAIL [case %zu, %s]: NUL removal also changed "
-                                "a surviving byte at %zu\n", case_index, label, i);
-                        failures++;
-                        break;
-                    }
-                }
             }
             free(decoded);
         }
@@ -225,15 +184,12 @@ static void exercise_reader(const char *input, size_t length, size_t case_index,
 /* Every one of the 256 byte values, one at a time, wrapped in printable bytes so
  * the encoder has something to merge around it.
  *
- * This is the check that turned "the fuzz sweep loses bytes sometimes" into
- * "exactly 0x00 is lost". A defect with a known boundary can be fixed and its
- * fix verified; a defect that shows up as an occasional length mismatch in a
- * random sweep cannot. It also guards the boundary: if a second byte value ever
- * starts vanishing, this reports which one rather than leaving it to be inferred
- * from a byte count. */
+ * This check originally turned "the fuzz sweep loses bytes sometimes" into
+ * "exactly 0x00 is lost." It now pins the repaired boundary directly: all 256
+ * values must survive, and a regression reports the first lost value. */
 static void check_every_byte_value(void) {
     size_t lost = 0;
-    int first_unexpected = -1;
+    int first_lost = -1;
 
     for (int b = 0; b < 256; b++) {
         char input[3];
@@ -262,25 +218,14 @@ static void check_every_byte_value(void) {
 
         if (!survived) {
             lost++;
-            if (b != 0 && first_unexpected < 0) first_unexpected = b;
-        } else if (b == 0) {
-            printf("  NOTE: 0x00 now survives a round trip. The known defect is "
-                   "fixed - remove the count_nuls() allowance above and this "
-                   "note, and tick the item in docs/research-checklist.md.\n");
-            failures++;
+            if (first_lost < 0) first_lost = b;
         }
     }
 
-    printf("byte values surviving a round trip: %zu of 256 "
-           "(0x00 is the known C-string defect)\n", 256 - lost);
-    if (first_unexpected >= 0) {
-        fprintf(stderr, "FAIL: byte 0x%02X does not survive a round trip, and "
-                        "only 0x00 is a known defect\n", first_unexpected);
-        failures++;
-    }
-    if (lost > 1) {
-        fprintf(stderr, "FAIL: %zu byte values are lost, expected exactly 1\n",
-                lost);
+    printf("byte values surviving a round trip: %zu of 256\n", 256 - lost);
+    if (lost != 0) {
+        fprintf(stderr, "FAIL: %zu byte values are lost; first is 0x%02X\n",
+                lost, first_lost);
         failures++;
     }
 }

@@ -134,12 +134,11 @@ Being explicit about the boundary, since a reader will assume more than is true:
 - **Wall time, throughput, or memory.** Nothing about a seed makes a timing
   reproducible; those need the provenance record the benchmarks already carry.
 
-## Known gap: NUL bytes in a corpus
+## Pending verification: NUL bytes in a corpus
 
-The tokenizer silently drops `0x00` bytes (`tests/core/test_fuzz_tokenizer.c`
-found this and pins its exact boundary — exactly one of the 256 byte values is
-affected). A corpus containing NULs therefore trains on bytes that differ from the
-file its manifest hashed, which breaks the chain between a manifest and a result.
-Recorded as an open item in
-[`docs/research-checklist.md`](research-checklist.md); the fix is a change to the
-BPE library's token representation and belongs in its own commit.
+`tests/core/test_fuzz_tokenizer.c` found that the C-string tokenizer dropped
+`0x00`, making the trained byte stream differ from the file its manifest hashed.
+The implementation now uses length-delimited token bytes and versioned binary-safe
+serialization, but that change is awaiting code review and has deliberately not
+been built or run. The acceptance state remains tracked in
+[`docs/research-checklist.md`](research-checklist.md).
