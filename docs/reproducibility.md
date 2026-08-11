@@ -30,7 +30,7 @@ A difference here is a fact about float arithmetic, not a defect.
 | axis | initial weights | trained weights | established by |
 |---|---|---|---|
 | (a) the same binary, run twice | bit-identical | **bit-identical** | `tests/integration/test_determinism.sh` — two independent runs, 6 artifacts compared byte for byte, dropout on and `--shuffle` on |
-| (b) a rebuild with the same compiler and flags | bit-identical | **bit-identical** | reproducibility matrix, row 2 |
+| (b) a rebuild with the same compiler and flags | bit-identical | **bit-identical** | reproducibility matrix, row 2; `tools/check_reproducible_builds.sh` release gate |
 | (c) a different compiler (gcc 11.4 vs clang 14) | bit-identical | **not guaranteed** | reproducibility matrix, row 3 |
 | (d) a different optimization level (`-Os` vs `-O3`) | bit-identical | **not guaranteed** | reproducibility matrix, row 5 |
 | (e) a different CPU ISA (`DRANZER_CPU_ISA` cap) | bit-identical | **not guaranteed** | reproducibility matrix, rows 6–7 |
@@ -104,6 +104,10 @@ scripts/repro/reproducibility_matrix.sh docs/generated/repro-matrix.md
 
 Seven clean rebuilds, a few minutes. The measured table as of the commit that
 added this document:
+
+For the smaller release invariant—two clean GCC builds and two clean Clang builds reproduce their
+own shipped binaries and same-seed artifacts—run `make -C src release-repro-check`. It also requires
+the initial-weight fingerprint to agree across both compilers.
 
 | build / runtime | initial weights | matches | trained weights | matches |
 |---|---|:-:|---|:-:|

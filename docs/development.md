@@ -114,6 +114,10 @@ A leak in the project's own `gpu_cuda.c` or `gpu_matmul.c` is therefore not caug
 and has to be reasoned about from the shutdown paths, which `gpu_matmul_shutdown()` covers by
 destroying the context that owns every device allocation.
 
+For a release-style run on a machine without an NVIDIA driver, set `FULL_LEAK_CHECK=1`. This removes
+the GPU-test exception so every test process runs under LeakSanitizer. Do not use that override on a
+driver-equipped machine unless its process-global allocations are suppressed independently.
+
 ## Performance regression tests
 
 `src/tests/perf/` and `test_gpu_latency_invariants.c` run inside the ordinary suite and fail the
@@ -163,6 +167,15 @@ the complete suite with GCC and Clang on Ubuntu 24.04.
 - the size-optimized configuration;
 - compilation of the benchmark and GPU probe;
 - CLI and hardware-probe smoke tests.
+
+`.github/workflows/release-gates.yml` runs for `v*` tags and by manual dispatch. It promotes the
+deterministic tokenizer/corpus fuzz sweep and bundle mutation sweep to ASan/UBSan gates, enables
+LeakSanitizer for every test process with `FULL_LEAK_CHECK=1`, and invokes
+`tools/check_reproducible_builds.sh`. That script performs two clean builds under each of GCC and
+Clang, compares the CLI/static/shared/fingerprint binaries byte for byte within each compiler,
+requires compiler-independent initial weights, and runs the same-seed training-artifact comparison
+under each rebuilt CLI. It intentionally does not compare trained weights across compilers, which
+the floating-point reproducibility contract does not promise.
 
 `.github/workflows/performance.yml` runs nightly at 03:41 UTC and is manually dispatchable with
 custom tiers and repeat counts. It exists because a developer machine is a poor measurement

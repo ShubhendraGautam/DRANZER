@@ -782,7 +782,12 @@ the CLI is a client of the same supported API available to external programs.
   The C ABI has explicit enum values, a size-negotiated 64-byte info record, runtime version
   reporting, compile-time layout/signature assertions, and a checked-in shared-symbol baseline.
   Execution remains deferred to the final bundled validation pass.
-- [ ] Run fuzzing, full leak detection, and deterministic GCC/Clang build checks in release gates.
+- [~] Run fuzzing, full leak detection, and deterministic GCC/Clang build checks in release gates.
+  The tag/manual `release-gates.yml` promotes deterministic tokenizer/corpus and bundle mutation
+  fuzzing to ASan/UBSan gates, removes the ordinary GPU-test leak exemption on driver-free hosted
+  runners, and compares two clean builds under each compiler. GCC and Clang must each reproduce
+  their own CLI/static/shared binaries and same-seed training artifacts; compiler-independent
+  initial weights are compared across them. Execution is deferred to the final bundled pass.
 - [ ] Maintain semantic versions, a changelog, reproducible release artifacts, and migration notes.
 - [ ] Document supported operating systems, CPU features, and optional GPU behavior precisely.
 

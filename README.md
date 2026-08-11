@@ -77,6 +77,7 @@ make -C src clean test CC=clang ASAN=1  # memory-safety checks
 make -C src bench && ./src/bench.out     # model benchmarks
 make -C src bench-bundle-load            # copied vs mmap bundle startup/RSS
 make -C src public-api-check             # static/shared embedding artifacts
+make -C src release-repro-check          # clean GCC/Clang reproducibility gate
 make -C src profile CC=gcc               # frame-pointer build for perf
 make -C src gpu-probe && ./src/gpu_probe.out
 make -C src gpu-latency && ./src/gpu_latency.out  # GPU per-call cost

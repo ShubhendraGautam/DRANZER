@@ -1,0 +1,65 @@
+name: Release gates
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz-and-leaks:
+    name: Sanitizer fuzzing and full leak detection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # FULL_LEAK_CHECK removes the ordinary GPU-test LeakSanitizer exemption.
+      # Hosted release runners have no NVIDIA driver, so self-skipping GPU
+      # cases do not introduce the driver's process-global false positives.
+      - name: Run all tests, deterministic fuzz cases, and leak checks
+        run: >-
+          make -C src clean all test CC=clang ASAN=1 FULL_LEAK_CHECK=1
+
+  undefined-behavior:
+    name: UndefinedBehaviorSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run all tests and deterministic fuzz cases
+        run: make -C src clean all test CC=clang UBSAN=1
+
+  reproducible-builds:
+    name: Reproducible GCC and Clang builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare clean builds and same-seed artifacts
+        run: bash src/tools/check_reproducible_builds.sh gcc clang
