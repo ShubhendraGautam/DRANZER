@@ -16,6 +16,7 @@ typedef struct {
     size_t num_heads;
     size_t num_layers;
     size_t max_seq_len;
+    uint32_t architecture_flags;
     float learning_rate;
     
     /* Training hyperparameters */

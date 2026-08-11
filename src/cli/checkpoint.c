@@ -11,12 +11,14 @@
 #define CHECKPOINT_MAGIC "DRNZCKP1"
 #define CHECKPOINT_END "DRNZEND1"
 #define CHECKPOINT_MAGIC_SIZE 8
-/* 3: added train_stride to the run scalars. Bumped rather than appended
+/* 4: added architecture_flags after model dimensions. Bumped rather than
+ * treating the shorter version-3 layout as if it had default flags.
+ * 3: added train_stride to the run scalars. Bumped rather than appended
  * so a version-2 checkpoint is rejected outright instead of resuming with a
  * garbage stride - it was written by a binary that supervised one position
  * per window, so its step_in_epoch cursor counts targets where this one
  * counts windows, and replaying it would silently train on the wrong data. */
-#define CHECKPOINT_VERSION UINT32_C(3)
+#define CHECKPOINT_VERSION UINT32_C(4)
 
 static int write_exact(FILE *file, const void *data, size_t size) {
     return fwrite(data, 1, size, file) == size;
@@ -93,6 +95,8 @@ static int write_checkpoint(FILE *file, const neural_model_t *model,
              write_string(file, state->model_path) &&
              write_string(file, state->checkpoint_dir) &&
              write_exact(file, dims, sizeof(dims)) &&
+             write_exact(file, &model->architecture_flags,
+                         sizeof(model->architecture_flags)) &&
              write_exact(file, &model->training_steps, sizeof(model->training_steps)) &&
              write_exact(file, &model->current_loss, sizeof(model->current_loss)) &&
              write_exact(file, &optimizer, sizeof(optimizer)) &&
@@ -208,6 +212,7 @@ static int read_checkpoint(FILE *file, neural_model_t *model, bpe_encoder_t **ou
     int32_t run_ints[4];
     int32_t batching_ints[2];
     uint64_t dims[6];
+    uint32_t architecture_flags = 0;
     uint32_t optimizer = 0, is_training = 0, has_adam = 0;
     uint64_t history_size = 0;
 
@@ -225,7 +230,8 @@ static int read_checkpoint(FILE *file, neural_model_t *model, bpe_encoder_t **ou
         !read_string(file, state->tokenizer_path, sizeof(state->tokenizer_path)) ||
         !read_string(file, state->model_path, sizeof(state->model_path)) ||
         !read_string(file, state->checkpoint_dir, sizeof(state->checkpoint_dir)) ||
-        !read_exact(file, dims, sizeof(dims))) return 0;
+        !read_exact(file, dims, sizeof(dims)) ||
+        !read_exact(file, &architecture_flags, sizeof(architecture_flags))) return 0;
 
     state->step_in_epoch = run_scalars[0];
     state->input_fingerprint = run_scalars[1];
@@ -243,8 +249,10 @@ static int read_checkpoint(FILE *file, neural_model_t *model, bpe_encoder_t **ou
         state->use_gpu < 0 || state->use_gpu > 1) return 0;
     if (dims[0] > SIZE_MAX || dims[1] > SIZE_MAX || dims[2] > SIZE_MAX ||
         dims[3] > SIZE_MAX || dims[4] > SIZE_MAX || dims[5] > SIZE_MAX ||
-        model_new(model, (size_t)dims[0], (size_t)dims[1], (size_t)dims[2],
-                  (size_t)dims[3], (size_t)dims[4]) != MODEL_SUCCESS ||
+        model_new_seeded_architecture(
+            model, (size_t)dims[0], (size_t)dims[1], (size_t)dims[2],
+            (size_t)dims[3], (size_t)dims[4], MODEL_DEFAULT_SEED,
+            architecture_flags) != MODEL_SUCCESS ||
         model->total_param_count != (size_t)dims[5]) return 0;
 
     if (!read_exact(file, &model->training_steps, sizeof(model->training_steps)) ||

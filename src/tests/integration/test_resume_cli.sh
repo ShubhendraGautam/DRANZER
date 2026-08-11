@@ -62,7 +62,7 @@ cmp -s uninterrupted-final.ckpt "$final_checkpoint"
 # --gradient-accumulation 2) = 24 examples replayed. It is unchanged by
 # all-position supervision only because it counts examples, and an example
 # is still one submission - but an example is now a whole window rather than
-# a single target, which is why CHECKPOINT_VERSION was bumped to 3 rather
+# a single target, which is why CHECKPOINT_VERSION was first bumped to 3 rather
 # than letting a version-2 cursor be reinterpreted in the new unit.
 grep -Eq "Resumed .* at epoch 1 after 24 predictions" resumed.log
 grep -q "Corpus tokens streamed:" resumed.log

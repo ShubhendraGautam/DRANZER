@@ -19,6 +19,7 @@ void config_get_defaults(config_t *out_config) {
     out_config->num_heads = 4;
     out_config->num_layers = 2;
     out_config->max_seq_len = 512;
+    out_config->architecture_flags = 0;
     out_config->learning_rate = 0.001f;
     
     out_config->batch_size = 1;           // Start with single sample
@@ -71,6 +72,8 @@ int config_load(const char *filename, config_t *out_config) {
         if (sscanf(line, "num_heads = %zu", &out_config->num_heads)) continue;
         if (sscanf(line, "num_layers = %zu", &out_config->num_layers)) continue;
         if (sscanf(line, "max_seq_len = %zu", &out_config->max_seq_len)) continue;
+        if (sscanf(line, "architecture_flags = %" SCNu32,
+                   &out_config->architecture_flags)) continue;
         if (sscanf(line, "learning_rate = %f", &out_config->learning_rate)) continue;
         if (sscanf(line, "batch_size = %zu", &out_config->batch_size)) continue;
         if (sscanf(line, "gradient_accumulation_steps = %zu",
@@ -128,7 +131,9 @@ int config_save(const char *filename, const config_t *config) {
     fprintf(f, "embedding_dim = %zu\n", config->embedding_dim);
     fprintf(f, "num_heads = %zu\n", config->num_heads);
     fprintf(f, "num_layers = %zu\n", config->num_layers);
-    fprintf(f, "max_seq_len = %zu\n\n", config->max_seq_len);
+    fprintf(f, "max_seq_len = %zu\n", config->max_seq_len);
+    fprintf(f, "architecture_flags = %" PRIu32 "\n\n",
+            config->architecture_flags);
     
     fprintf(f, "# Training Settings\n");
     fprintf(f, "learning_rate = %.8f\n", config->learning_rate);
@@ -186,6 +191,8 @@ void config_print(const config_t *config) {
     printf("  Attention heads: %zu\n", config->num_heads);
     printf("  Layers: %zu\n", config->num_layers);
     printf("  Max sequence length: %zu\n", config->max_seq_len);
+    printf("  Architecture flags: 0x%08" PRIx32 "\n",
+           config->architecture_flags);
     printf("\nTraining Settings:\n");
     printf("  Learning rate: %.8f\n", config->learning_rate);
     printf("  Batch size: %zu\n", config->batch_size);

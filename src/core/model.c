@@ -79,15 +79,17 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
                                              size_t num_layers,
                                              size_t max_seq_len,
                                              uint64_t seed,
+                                             uint32_t architecture_flags,
                                              float *external_parameters) {
     if (model == NULL || vocab_size == 0 || embedding_dim == 0 ||
         num_heads == 0 || embedding_dim % num_heads != 0 ||
-        num_layers == 0 || max_seq_len == 0) {
+        num_layers == 0 || max_seq_len == 0 ||
+        (architecture_flags & ~MODEL_ARCHITECTURE_SUPPORTED_MASK) != 0) {
         return MODEL_INVALID_INPUT;
     }
 
     size_t ffn_dim, emb2, layer_params, layer_square_term, layer_linear_term;
-    size_t vocab_emb, global_count, doubled_vocab_emb, layered_params;
+    size_t vocab_emb, global_count, layered_params;
     size_t total_param_count, seq_emb, ffn_cache, max_seq_squared, probs_cache;
     size_t hidden_pointer_count;
     if (!checked_multiply(embedding_dim, 4, &ffn_dim) ||
@@ -96,8 +98,10 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
         !checked_multiply(embedding_dim, 9, &layer_linear_term) ||
         !checked_add(layer_square_term, layer_linear_term, &layer_params) ||
         !checked_multiply(vocab_size, embedding_dim, &vocab_emb) ||
-        !checked_multiply(vocab_emb, 2, &doubled_vocab_emb) ||
-        !checked_add(doubled_vocab_emb, vocab_size, &global_count) ||
+        !checked_multiply(vocab_emb,
+                          (architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) ? 1 : 2,
+                          &global_count) ||
+        !checked_add(global_count, vocab_size, &global_count) ||
         !checked_multiply(num_layers, layer_params, &layered_params) ||
         !checked_add(global_count, layered_params, &total_param_count) ||
         !checked_multiply(max_seq_len, embedding_dim, &seq_emb) ||
@@ -128,6 +132,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     model->num_layers = num_layers;
     model->max_seq_len = max_seq_len;
     model->learning_rate = 0.001f;
+    model->architecture_flags = architecture_flags;
 
     /* --- Optimizer/schedule/dropout defaults. Override any of these on
      * the model directly before training starts, same as learning_rate. --- */
@@ -191,8 +196,10 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
 
     model->token_embeddings = pc; model->token_embeddings_grad = gc;
     pc += vocab_size * embedding_dim; gc += vocab_size * embedding_dim;
-    model->output_projection = pc; model->output_projection_grad = gc;
-    pc += embedding_dim * vocab_size; gc += embedding_dim * vocab_size;
+    if (!model_uses_tied_embeddings(model)) {
+        model->output_projection = pc; model->output_projection_grad = gc;
+        pc += embedding_dim * vocab_size; gc += embedding_dim * vocab_size;
+    }
     model->output_bias = pc; model->output_bias_grad = gc;
     pc += vocab_size; gc += vocab_size;
 
@@ -227,7 +234,10 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
         }
 
         xavier_init(model->token_embeddings, vocab_size * embedding_dim, 1, embedding_dim, &init_rng);
-        xavier_init(model->output_projection, embedding_dim * vocab_size, embedding_dim, vocab_size, &init_rng);
+        if (!model_uses_tied_embeddings(model)) {
+            xavier_init(model->output_projection, embedding_dim * vocab_size,
+                        embedding_dim, vocab_size, &init_rng);
+        }
         memset(model->output_bias, 0, vocab_size * sizeof(float));
     }
 
@@ -385,8 +395,22 @@ model_errors_t model_new_seeded(neural_model_t *model,
                                 size_t num_layers,
                                 size_t max_seq_len,
                                 uint64_t seed) {
+    return model_new_seeded_architecture(
+        model, vocab_size, embedding_dim, num_heads, num_layers, max_seq_len,
+        seed, 0);
+}
+
+model_errors_t model_new_seeded_architecture(neural_model_t *model,
+                                             size_t vocab_size,
+                                             size_t embedding_dim,
+                                             size_t num_heads,
+                                             size_t num_layers,
+                                             size_t max_seq_len,
+                                             uint64_t seed,
+                                             uint32_t architecture_flags) {
     return model_new_seeded_impl(model, vocab_size, embedding_dim, num_heads,
-                                 num_layers, max_seq_len, seed, NULL);
+                                 num_layers, max_seq_len, seed,
+                                 architecture_flags, NULL);
 }
 
 model_errors_t model_new_external_parameters(neural_model_t *model,
@@ -396,10 +420,25 @@ model_errors_t model_new_external_parameters(neural_model_t *model,
                                               size_t num_layers,
                                               size_t max_seq_len,
                                               float *parameters) {
+    return model_new_external_parameters_architecture(
+        model, vocab_size, embedding_dim, num_heads, num_layers, max_seq_len,
+        0, parameters);
+}
+
+model_errors_t model_new_external_parameters_architecture(
+    neural_model_t *model,
+    size_t vocab_size,
+    size_t embedding_dim,
+    size_t num_heads,
+    size_t num_layers,
+    size_t max_seq_len,
+    uint32_t architecture_flags,
+    float *parameters) {
     if (parameters == NULL) return MODEL_INVALID_INPUT;
     return model_new_seeded_impl(model, vocab_size, embedding_dim, num_heads,
                                  num_layers, max_seq_len,
-                                 MODEL_DEFAULT_SEED, parameters);
+                                 MODEL_DEFAULT_SEED, architecture_flags,
+                                 parameters);
 }
 
 void model_seed_rng(neural_model_t *model, uint64_t seed) {

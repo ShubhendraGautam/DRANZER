@@ -49,9 +49,11 @@ size_t model_param_tensors(const neural_model_t *model,
     emit(out, capacity, &count, "token_embeddings", global,
          model->token_embeddings, vocab_size, embedding_dim,
          PARAM_KIND_EMBEDDING);
-    emit(out, capacity, &count, "output_projection", global,
-         model->output_projection, embedding_dim, vocab_size,
-         PARAM_KIND_PROJECTION);
+    if ((model->architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) == 0) {
+        emit(out, capacity, &count, "output_projection", global,
+             model->output_projection, embedding_dim, vocab_size,
+             PARAM_KIND_PROJECTION);
+    }
     emit(out, capacity, &count, "output_bias", global,
          model->output_bias, 1, vocab_size, PARAM_KIND_BIAS);
 

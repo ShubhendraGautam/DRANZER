@@ -229,17 +229,15 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
     for (size_t i = 0; i < model->vocab_size; i++) {
         model->output_bias_grad[i] += grad_logits[i];
     }
-    model_dispatch_backward_weight(model, last_hidden, grad_logits, model->output_projection_grad,
-                            1, embedding_dim, model->vocab_size);
-
     /* Only the LAST sequence position feeds the output head, so dL/dhidden
      * is zero everywhere else - zero the whole buffer, then fill just the
      * last row. This is what model_accumulate_gradients_all() above replaces:
      * there, every row is filled, and the rest of the backward is identical. */
     memset(model->ws_dhidden_in, 0, seq_len * embedding_dim * sizeof(float));
-    model_dispatch_backward_input(model, grad_logits, model->output_projection,
-                           &model->ws_dhidden_in[(seq_len - 1) * embedding_dim],
-                           1, embedding_dim, model->vocab_size);
+    model_errors_t head_rc = lm_head_project_backward(
+        model, last_hidden, grad_logits,
+        &model->ws_dhidden_in[(seq_len - 1) * embedding_dim], 1);
+    if (head_rc != MODEL_SUCCESS) return head_rc;
 
     backward_layer_stack(model, token_ids, seq_len);
 

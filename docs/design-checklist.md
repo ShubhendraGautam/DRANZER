@@ -739,8 +739,17 @@ speed/memory improvement is reproducible on identified hardware.
   corpus, compiler, and source identities. The shared comparison API still returns "unresolvable at
   this N" when an interval clears zero but sits inside that floor. No floor number is claimed until
   the reviewed source is built and the sweep runs in the final validation pass.
-- [ ] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
+- [~] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
+
+  **Tied-embedding implementation is ready; review and measurement are deferred.**
+  `--tie-embeddings` removes the duplicate output matrix and uses the token table transposed in
+  full-prefix, cached-decode, and all-position training paths. Both gradient contributions land in
+  the one shared parameter slice. Architecture flags persist through exact checkpoints, immutable
+  manifests/config, and lossless or quantized bundle version 3; unflagged writers retain exact v1/v2
+  behavior. Focused tests cover layout reduction, forward/backward math, parameter-inventory tiling,
+  checkpoint resume, CLI parsing, and copy/mmap/quantized persistence. No build, test, or ablation has
+  run before review, and RoPE, RMSNorm, and GELU/SwiGLU remain unimplemented.
 - [~] Add padding and general attention masks before variable-length batching.
   `model_attention_mask_t` now combines a per-position padding mask with an optional general
   row-major edge mask, always intersected with causality. Mask-aware forward and all-position
@@ -787,8 +796,8 @@ the CLI is a client of the same supported API available to external programs.
   the release gate uploads the resulting directory. Execution and the resulting measured metric are
   deliberately deferred to the final bundled validation pass, so this remains partial until then.
 - [~] Guarantee and test the documented model-format and public-API compatibility window.
-  Bundle versions 1–2 and public API version 1 are now promised through the 1.x release line.
-  Loaders report the actual wire version; fixed v1/v2 header fields are pinned in the bundle test.
+  Bundle versions 1–3 and public API version 1 are now promised through the 1.x release line.
+  Loaders report the actual wire version; fixed v1/v2/v3 header fields are pinned in bundle tests.
   The C ABI has explicit enum values, a size-negotiated 64-byte info record, runtime version
   reporting, compile-time layout/signature assertions, and a checked-in shared-symbol baseline.
   Execution remains deferred to the final bundled validation pass.

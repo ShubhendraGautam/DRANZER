@@ -15,6 +15,10 @@ model_errors_t model_write_state(const neural_model_t *model, FILE *f) {
     if (!model || !f) {
         return MODEL_INVALID_INPUT;
     }
+    /* The host-native legacy layout has no architecture field. Refuse to
+     * emit a tied model that its own reader would reinterpret as untied.
+     * Portable bundles carry architecture flags and are the supported path. */
+    if (model->architecture_flags != 0) return MODEL_INVALID_INPUT;
 
     fwrite(&model->vocab_size, sizeof(size_t), 1, f);
     fwrite(&model->embedding_dim, sizeof(size_t), 1, f);
@@ -76,7 +80,7 @@ model_errors_t model_read_state(neural_model_t *model, FILE *f) {
 }
 
 model_errors_t model_save(neural_model_t *model, const char *filename) {
-    if (!model || !filename) {
+    if (!model || !filename || model->architecture_flags != 0) {
         return MODEL_INVALID_INPUT;
     }
 

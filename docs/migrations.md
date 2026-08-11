@@ -33,7 +33,7 @@ The CLI still reads the old host-native weight file plus optional `.tokenizer` s
 output is a canonical bundle containing architecture, weights, tokenizer, and provenance. There is
 no in-place conversion command because legacy files do not contain all bundle provenance; keep the
 matching sidecar when retaining one, and publish newly trained artifacts as bundles. Bundle
-versions 1 and 2 are the portable compatibility window; checkpoint files are exact-resume state
+versions 1 through 3 are the portable compatibility window; checkpoint files are exact-resume state
 and have a separate, narrower contract.
 
 ## Diagnostics

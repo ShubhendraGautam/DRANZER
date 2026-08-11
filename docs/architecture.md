@@ -161,7 +161,10 @@ right padding.
 
 All trainable parameters live in one contiguous `params` allocation. Gradients use an identical
 contiguous layout in `grads`; Adam moment buffers use that layout as well and are allocated lazily.
-Named fields such as `W_q` and `output_projection` are views into those buffers.
+Named fields such as `W_q` and `output_projection` are views into those buffers. With
+`--tie-embeddings`, the independent output-projection slice is omitted: logits use
+`token_embeddings` transposed, both gradient paths accumulate into the same embedding slice, and
+the parameter count falls by `vocab_size × embedding_dim`. The output bias remains independent.
 
 Forward matmuls normally use the CPU dispatch path (or opt-in GPU path), which picks a kernel from
 the shape of the call and the instruction set the running CPU supports - see

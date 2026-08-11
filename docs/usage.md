@@ -157,6 +157,7 @@ honest bounded streaming shuffle, not a global whole-corpus permutation.
 | `--max-seq-len N` | `32` | Retained training and ring-KV attention window |
 | `--train-window N` | `16` | Training context length, clamped to max sequence length |
 | `--train-stride N` | `0` | Tokens the window advances between examples; `0` means a whole window |
+| `--tie-embeddings` | off | Share the token embedding table with the output projection |
 | `--optimizer NAME` | `adam` | `adam` or `sgd` |
 | `--dropout RATE` | `0.0` | Sublayer-output dropout rate |
 | `--grad-clip NORM` | `1.0` | Global gradient norm limit; `0` disables it |

@@ -19,7 +19,7 @@ extern "C" {
 #define DRANZER_VERSION_PRERELEASE "dev"
 #define DRANZER_VERSION_STRING "0.5.0-dev"
 #define DRANZER_BUNDLE_FORMAT_OLDEST_SUPPORTED UINT32_C(1)
-#define DRANZER_BUNDLE_FORMAT_CURRENT UINT32_C(2)
+#define DRANZER_BUNDLE_FORMAT_CURRENT UINT32_C(3)
 #define DRANZER_BUNDLE_INFO_V1_SIZE UINT32_C(64)
 
 typedef struct dranzer_model dranzer_model_t;
@@ -64,8 +64,9 @@ uint32_t dranzer_api_version(void);
 const char *dranzer_version_string(void);
 
 /* Load one bundle into separately owned opaque model and tokenizer handles.
- * On failure both outputs are NULL. MMAP accepts version-1 float bundles and
- * creates an inference-only model; COPY also accepts version 2. If out_info
+ * On failure both outputs are NULL. MMAP creates an inference-only model for
+ * lossless versions 1 and 3; COPY also
+ * accepts quantized versions 2 and 3. If out_info
  * is non-NULL, initialize it with DRANZER_BUNDLE_INFO_INIT. On return,
  * struct_size reports the bytes understood by the loaded library. */
 dranzer_status_t dranzer_bundle_load(const char *path,

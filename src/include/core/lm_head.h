@@ -37,6 +37,24 @@
 /* Target sentinel: this position is not supervised. */
 #define LM_HEAD_IGNORE_TARGET UINT32_MAX
 
+/* Project row-major hidden states to vocabulary logits. Untied models dispatch
+ * the ordinary hidden@projection matmul; tied models dot each hidden row with
+ * each token-embedding row, i.e. hidden@embeddings^T. */
+model_errors_t lm_head_project(neural_model_t *model,
+                               const float *hidden,
+                               float *logits,
+                               size_t rows);
+
+/* Accumulate the projection-weight gradient and dL/dhidden. The destination
+ * hidden gradient must be zero-initialized. In tied mode the head contribution
+ * accumulates directly into token_embeddings_grad, where the later embedding
+ * lookup backward adds its contribution to the same parameter exactly once. */
+model_errors_t lm_head_project_backward(neural_model_t *model,
+                                        const float *hidden,
+                                        const float *grad_logits,
+                                        float *grad_hidden,
+                                        size_t rows);
+
 /* Project every position to logits, into model->ws_logits_all as a
  * [seq_len x vocab_size] row-major block. Expects model_forward_hidden() to
  * have already run for this same seq_len. */
@@ -69,8 +87,9 @@ model_errors_t lm_head_loss_and_grad_all_masked(
     const uint8_t *position_mask, size_t seq_len,
     float *out_loss, size_t *out_supervised);
 
-/* Backprop the head: accumulate into output_projection_grad and
- * output_bias_grad, and seed model->ws_dhidden_in with dL/d(final hidden)
+/* Backprop the head: accumulate into the independent projection gradient or
+ * the tied embedding gradient, plus output_bias_grad, and seed
+ * model->ws_dhidden_in with dL/d(final hidden)
  * for every position. Overwrites ws_dhidden_in rather than accumulating into
  * it, so the caller need not pre-zero it.
  *

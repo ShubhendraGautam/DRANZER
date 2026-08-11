@@ -45,8 +45,8 @@ dranzer_tokenizer_free(tokenizer);
 dranzer_model_free(model);
 ```
 
-`DRANZER_LOAD_COPY` accepts version-1 and version-2 bundles and produces ordinary writable internal
-parameters. `DRANZER_LOAD_MMAP` accepts version 1 and uses the checked read-only mapping described in
+`DRANZER_LOAD_COPY` accepts bundle versions 1 through 3 and produces ordinary writable internal
+parameters. `DRANZER_LOAD_MMAP` accepts lossless versions 1 and 3 and uses the checked read-only mapping described in
 [Model bundle format](model-bundle.md). The public API currently exposes inference, so both modes
 have the same public operations.
 

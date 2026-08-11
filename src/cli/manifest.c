@@ -84,6 +84,8 @@ int run_manifest_write(const cli_args_t *args,
                      "num_heads = %zu\n"
                      "num_layers = %zu\n"
                      "max_seq_len = %zu\n"
+                     "architecture_flags = %" PRIu32 "\n"
+                     "tie_embeddings = %d\n"
                      "train_window = %zu\n"
                      "train_stride = %zu\n"
                      "epochs = %d\n"
@@ -111,6 +113,8 @@ int run_manifest_write(const cli_args_t *args,
                      bpe_encoder_special_token_id(encoder, BPE_SPECIAL_EOS),
                      model->embedding_dim,
                      model->num_heads, model->num_layers, model->max_seq_len,
+                     model->architecture_flags,
+                     model_uses_tied_embeddings(model),
                      run_state->train_window, run_state->train_stride,
                      args->epochs, args->batch_size,
                      args->gradient_accumulation_steps, effective_batch, args->shuffle,

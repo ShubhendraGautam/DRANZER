@@ -558,10 +558,14 @@ experiment re-implements it, and the one that forgets is the one that gets publi
 Each of these is gated on R2's seed-variance floor. Running any of them first produces a ranking
 that the floor may erase.
 
-- [ ] **P1. The architecture ablations already listed in v0.5** — tied embeddings, RoPE, RMSNorm,
+- [~] **P1. The architecture ablations already listed in v0.5** — tied embeddings, RoPE, RMSNorm,
   GELU/SwiGLU — one change at a time, each against the floor, reporting "no resolvable difference"
   where that is the honest answer. Listed here only to note that R2 and R3 are its prerequisites,
   not its follow-up.
+
+  Tied embeddings are implemented behind an explicit architecture flag with persistence and
+  source-level test coverage. Review, bundled execution, comparison against the seed floor, and the
+  remaining three architecture implementations are still pending.
 
 - [ ] **P1. Does overlapping the training window buy held-out quality?**
   `--train-stride` exists precisely so this comparison is possible, and

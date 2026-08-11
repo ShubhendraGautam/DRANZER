@@ -11,11 +11,82 @@
 #include <stdint.h>
 #include <string.h>
 
+model_errors_t lm_head_project(neural_model_t *model,
+                               const float *hidden,
+                               float *logits,
+                               size_t rows) {
+    if (!model || !hidden || !logits || rows == 0) return MODEL_INVALID_INPUT;
+    const size_t embedding_dim = model->embedding_dim;
+    const size_t vocab_size = model->vocab_size;
+    if (!model_uses_tied_embeddings(model)) {
+        if (!model->output_projection) return MODEL_INVALID_INPUT;
+        model_dispatch_matmul(model, hidden, model->output_projection, logits,
+                              rows, embedding_dim, vocab_size);
+        return MODEL_SUCCESS;
+    }
+
+    if (!model->use_scalar_matmul) {
+        /* The existing backward-input kernel computes X @ W^T. With
+         * X=[rows,D] and the embedding table W=[V,D], that is exactly the
+         * tied projection. Its contract accumulates, so clear the output. */
+        memset(logits, 0, rows * vocab_size * sizeof(float));
+        model_dispatch_backward_input(model, (float *)hidden,
+                                      model->token_embeddings, logits,
+                                      rows, vocab_size, embedding_dim);
+        return MODEL_SUCCESS;
+    }
+
+    for (size_t i = 0; i < rows; i++) {
+        for (size_t v = 0; v < vocab_size; v++) {
+            float sum = 0.0f;
+            for (size_t d = 0; d < embedding_dim; d++) {
+                sum += hidden[i * embedding_dim + d] *
+                       model->token_embeddings[v * embedding_dim + d];
+            }
+            logits[i * vocab_size + v] = sum;
+        }
+    }
+    return MODEL_SUCCESS;
+}
+
+model_errors_t lm_head_project_backward(neural_model_t *model,
+                                        const float *hidden,
+                                        const float *grad_logits,
+                                        float *grad_hidden,
+                                        size_t rows) {
+    if (!model || !hidden || !grad_logits || !grad_hidden || rows == 0) {
+        return MODEL_INVALID_INPUT;
+    }
+    const size_t embedding_dim = model->embedding_dim;
+    const size_t vocab_size = model->vocab_size;
+    if (!model_uses_tied_embeddings(model)) {
+        if (!model->output_projection || !model->output_projection_grad) {
+            return MODEL_INVALID_INPUT;
+        }
+        model_dispatch_backward_weight(model, hidden, grad_logits,
+                                       model->output_projection_grad,
+                                       rows, embedding_dim, vocab_size);
+        model_dispatch_backward_input(model, grad_logits,
+                                      model->output_projection, grad_hidden,
+                                      rows, embedding_dim, vocab_size);
+        return MODEL_SUCCESS;
+    }
+
+    /* Reinterpret the same two standard derivatives with V and D swapped:
+     * dE = grad_logits^T @ hidden, dHidden = grad_logits @ E. */
+    model_dispatch_backward_weight(model, (float *)grad_logits, (float *)hidden,
+                                   model->token_embeddings_grad,
+                                   rows, vocab_size, embedding_dim);
+    model_dispatch_matmul(model, (float *)grad_logits,
+                          model->token_embeddings, grad_hidden,
+                          rows, vocab_size, embedding_dim);
+    return MODEL_SUCCESS;
+}
+
 model_errors_t lm_head_forward_all(neural_model_t *model, size_t seq_len) {
     if (!model || !model->ws_logits_all) return MODEL_INVALID_INPUT;
     if (seq_len == 0 || seq_len > model->max_seq_len) return MODEL_INVALID_INPUT;
 
-    size_t embedding_dim = model->embedding_dim;
     size_t vocab_size = model->vocab_size;
     float *hidden = model->cache_hidden[model->num_layers];
     float *logits = model->ws_logits_all;
@@ -23,8 +94,8 @@ model_errors_t lm_head_forward_all(neural_model_t *model, size_t seq_len) {
     /* One [seq_len x embedding_dim] @ [embedding_dim x vocab_size] instead of
      * the last-position path's [1 x embedding_dim] @ [...]. Same weights,
      * same dispatch, seq_len times the rows. */
-    model_dispatch_matmul(model, hidden, model->output_projection, logits,
-                          seq_len, embedding_dim, vocab_size);
+    model_errors_t project_rc = lm_head_project(model, hidden, logits, seq_len);
+    if (project_rc != MODEL_SUCCESS) return project_rc;
 
     for (size_t i = 0; i < seq_len; i++) {
         float *row = &logits[i * vocab_size];
@@ -143,18 +214,11 @@ model_errors_t lm_head_backward_all(neural_model_t *model, size_t seq_len) {
         }
     }
 
-    model_dispatch_backward_weight(model, hidden, grad,
-                                   model->output_projection_grad,
-                                   seq_len, embedding_dim, vocab_size);
-
     /* Every position now feeds the head, so unlike the single-target path
      * there is no zero-everywhere-but-one row structure to preserve - but
      * matmul_backward_input accumulates, so the destination still has to
      * start at zero. */
     memset(model->ws_dhidden_in, 0, seq_len * embedding_dim * sizeof(float));
-    model_dispatch_backward_input(model, grad, model->output_projection,
-                                  model->ws_dhidden_in,
-                                  seq_len, embedding_dim, vocab_size);
-
-    return MODEL_SUCCESS;
+    return lm_head_project_backward(model, hidden, grad,
+                                    model->ws_dhidden_in, seq_len);
 }

@@ -18,7 +18,8 @@
 #define BUNDLE_NUMERIC_QUANTIZED UINT32_C(2)
 #define BUNDLE_HEADER_V1_SIZE UINT32_C(152)
 #define BUNDLE_HEADER_V2_SIZE UINT32_C(184)
-#define BUNDLE_HEADER_MAX_SIZE BUNDLE_HEADER_V2_SIZE
+#define BUNDLE_HEADER_V3_SIZE UINT32_C(192)
+#define BUNDLE_HEADER_MAX_SIZE BUNDLE_HEADER_V3_SIZE
 #define BUNDLE_TENSOR_RECORD_SIZE UINT32_C(32)
 #define BUNDLE_TENSOR_FLOAT32 UINT32_C(1)
 #define BUNDLE_TENSOR_QUANTIZED UINT32_C(2)
@@ -132,17 +133,21 @@ static int checked_u64_add(uint64_t left, uint64_t right, uint64_t *out) {
  * activation cache before model_new allocates anything. The workspace
  * ratio rejects tiny artifacts claiming enormous context windows while
  * remaining generous for ordinary transformer shapes. */
-static int bundle_shape_valid(const uint64_t dims[6]) {
+static int bundle_shape_valid(const uint64_t dims[6], uint32_t architecture_flags) {
     uint64_t vocab = dims[0], embedding = dims[1], heads = dims[2];
     uint64_t layers = dims[3], sequence = dims[4], total = dims[5];
     uint64_t emb2, vocab_emb, global, layer_square, layer_linear;
     uint64_t layer_params, all_layers, computed_total, sequence_square;
     uint64_t attention_cache, workspace_limit;
-    if (vocab == 0 || embedding == 0 || heads == 0 || layers == 0 ||
+    if ((architecture_flags & ~MODEL_ARCHITECTURE_SUPPORTED_MASK) != 0 ||
+        vocab == 0 || embedding == 0 || heads == 0 || layers == 0 ||
         sequence == 0 || embedding % heads != 0 ||
         !checked_u64_multiply(embedding, embedding, &emb2) ||
         !checked_u64_multiply(vocab, embedding, &vocab_emb) ||
-        !checked_u64_multiply(vocab_emb, 2, &global) ||
+        !checked_u64_multiply(
+            vocab_emb,
+            (architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) ? 1 : 2,
+            &global) ||
         !checked_u64_add(global, vocab, &global) ||
         !checked_u64_multiply(emb2, 12, &layer_square) ||
         !checked_u64_multiply(embedding, 9, &layer_linear) ||
@@ -169,7 +174,8 @@ bundle_errors_t model_bundle_save(const neural_model_t *model,
         model->vocab_size, model->embedding_dim, model->num_heads,
         model->num_layers, model->max_seq_len, model->total_param_count,
     };
-    if (!bundle_shape_valid(dims) || model->total_param_count > UINT64_MAX / 4 ||
+    if (!bundle_shape_valid(dims, model->architecture_flags) ||
+        model->total_param_count > UINT64_MAX / 4 ||
         metadata->train_window == 0 || metadata->train_window > model->max_seq_len) {
         return BUNDLE_FORMAT_ERROR;
     }
@@ -187,12 +193,16 @@ bundle_errors_t model_bundle_save(const neural_model_t *model,
     uint32_t loss_bits = 0;
     memcpy(&loss_bits, &model->current_loss, sizeof(loss_bits));
 
-    uint8_t header[BUNDLE_HEADER_V1_SIZE] = {0};
+    uint32_t version = model->architecture_flags == 0
+                           ? MODEL_BUNDLE_FORMAT_V1 : MODEL_BUNDLE_FORMAT_V3;
+    uint32_t header_size = model->architecture_flags == 0
+                               ? BUNDLE_HEADER_V1_SIZE : BUNDLE_HEADER_V3_SIZE;
+    uint8_t header[BUNDLE_HEADER_MAX_SIZE] = {0};
     memcpy(header, BUNDLE_MAGIC, 8);
-    encode_u32(header + 8, MODEL_BUNDLE_FORMAT_V1);
+    encode_u32(header + 8, version);
     encode_u32(header + 12, BUNDLE_MARKER);
     encode_u32(header + 16, BUNDLE_NUMERIC_FLOAT32);
-    encode_u32(header + 20, BUNDLE_HEADER_V1_SIZE);
+    encode_u32(header + 20, header_size);
     encode_u64(header + 24, model->vocab_size);
     encode_u64(header + 32, model->embedding_dim);
     encode_u64(header + 40, model->num_heads);
@@ -209,7 +219,9 @@ bundle_errors_t model_bundle_save(const neural_model_t *model,
     encode_u64(header + 128, tokenizer_size);
     encode_u64(header + 136, weight_checksum);
     encode_u64(header + 144, tokenizer_checksum);
-    uint64_t header_checksum = checksum_buffer(header, sizeof(header));
+    if (version == MODEL_BUNDLE_FORMAT_V3)
+        encode_u32(header + 184, model->architecture_flags);
+    uint64_t header_checksum = checksum_buffer(header, header_size);
     encode_u32(header + 76, (uint32_t)header_checksum);
     encode_u32(header + 84, (uint32_t)(header_checksum >> 32));
 
@@ -226,7 +238,7 @@ bundle_errors_t model_bundle_save(const neural_model_t *model,
         return BUNDLE_IO_ERROR;
     }
 
-    int ok = write_bytes(file, header, sizeof(header));
+    int ok = write_bytes(file, header, header_size);
 
     for (size_t i = 0; ok && i < model->total_param_count; i++) {
         uint32_t bits = 0;
@@ -275,7 +287,8 @@ bundle_errors_t model_bundle_save_quantized(
         model->vocab_size, model->embedding_dim, model->num_heads,
         model->num_layers, model->max_seq_len, model->total_param_count,
     };
-    if (!bundle_shape_valid(dims) || metadata->train_window == 0 ||
+    if (!bundle_shape_valid(dims, model->architecture_flags) ||
+        metadata->train_window == 0 ||
         metadata->train_window > model->max_seq_len) return BUNDLE_FORMAT_ERROR;
 
     size_t tensor_count = model_param_tensor_count(model);
@@ -333,8 +346,12 @@ bundle_errors_t model_bundle_save_quantized(
         return tokenizer_rc == BPE_ALLOCATION_FAILURE
                    ? BUNDLE_ALLOCATION_FAILURE : BUNDLE_FORMAT_ERROR;
     }
+    uint32_t version = model->architecture_flags == 0
+                           ? MODEL_BUNDLE_FORMAT_V2 : MODEL_BUNDLE_FORMAT_V3;
+    uint32_t header_size = model->architecture_flags == 0
+                               ? BUNDLE_HEADER_V2_SIZE : BUNDLE_HEADER_V3_SIZE;
     uint64_t artifact_bytes = 0;
-    if (!checked_file_size(BUNDLE_HEADER_V2_SIZE, weight_bytes,
+    if (!checked_file_size(header_size, weight_bytes,
                            tokenizer_size, &artifact_bytes)) {
         free(tokenizer_data);
         free(tensors);
@@ -356,10 +373,10 @@ bundle_errors_t model_bundle_save_quantized(
         return BUNDLE_IO_ERROR;
     }
 
-    uint8_t empty_header[BUNDLE_HEADER_V2_SIZE] = {0};
+    uint8_t empty_header[BUNDLE_HEADER_MAX_SIZE] = {0};
     uint64_t weight_checksum = DRANZER_FNV_OFFSET;
     bundle_errors_t write_error = BUNDLE_IO_ERROR;
-    int ok = write_bytes(file, empty_header, sizeof(empty_header));
+    int ok = write_bytes(file, empty_header, header_size);
     for (size_t i = 0; ok && i < tensor_count; i++) {
         const param_tensor_t *tensor = &tensors[i];
         const int included = model_quantize_includes(config, tensor->kind);
@@ -415,14 +432,14 @@ bundle_errors_t model_bundle_save_quantized(
     ok = ok && write_bytes(file, tokenizer_data, tokenizer_size) &&
          write_bytes(file, BUNDLE_FOOTER, 8);
 
-    uint8_t header[BUNDLE_HEADER_V2_SIZE] = {0};
+    uint8_t header[BUNDLE_HEADER_MAX_SIZE] = {0};
     uint32_t loss_bits = 0;
     memcpy(&loss_bits, &model->current_loss, sizeof(loss_bits));
     memcpy(header, BUNDLE_MAGIC, 8);
-    encode_u32(header + 8, MODEL_BUNDLE_FORMAT_V2);
+    encode_u32(header + 8, version);
     encode_u32(header + 12, BUNDLE_MARKER);
     encode_u32(header + 16, BUNDLE_NUMERIC_QUANTIZED);
-    encode_u32(header + 20, BUNDLE_HEADER_V2_SIZE);
+    encode_u32(header + 20, header_size);
     encode_u64(header + 24, model->vocab_size);
     encode_u64(header + 32, model->embedding_dim);
     encode_u64(header + 40, model->num_heads);
@@ -447,12 +464,14 @@ bundle_errors_t model_bundle_save_quantized(
     encode_u32(header + 164, (uint32_t)tensor_count);
     encode_u64(header + 168, values_quantized);
     encode_u64(header + 176, scales_stored);
-    uint64_t header_checksum = checksum_buffer(header, sizeof(header));
+    if (version == MODEL_BUNDLE_FORMAT_V3)
+        encode_u32(header + 184, model->architecture_flags);
+    uint64_t header_checksum = checksum_buffer(header, header_size);
     encode_u32(header + 76, (uint32_t)header_checksum);
     encode_u32(header + 84, (uint32_t)(header_checksum >> 32));
 
     if (ok) ok = fseek(file, 0, SEEK_SET) == 0 &&
-                 write_bytes(file, header, sizeof(header));
+                 write_bytes(file, header, header_size);
     free(tokenizer_data);
     free(tensors);
     if (ok) ok = fflush(file) == 0;
@@ -515,12 +534,14 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
     uint32_t version = decode_u32(header + 8);
     uint32_t numeric = decode_u32(header + 16);
     uint32_t header_size = decode_u32(header + 20);
-    const int is_float = version == MODEL_BUNDLE_FORMAT_V1 &&
-                         numeric == BUNDLE_NUMERIC_FLOAT32 &&
-                         header_size == BUNDLE_HEADER_V1_SIZE;
-    const int is_quantized = version == MODEL_BUNDLE_FORMAT_V2 &&
-                             numeric == BUNDLE_NUMERIC_QUANTIZED &&
-                             header_size == BUNDLE_HEADER_V2_SIZE;
+    const int is_v3 = version == MODEL_BUNDLE_FORMAT_V3 &&
+                      header_size == BUNDLE_HEADER_V3_SIZE;
+    const int is_float = numeric == BUNDLE_NUMERIC_FLOAT32 &&
+                         ((version == MODEL_BUNDLE_FORMAT_V1 &&
+                           header_size == BUNDLE_HEADER_V1_SIZE) || is_v3);
+    const int is_quantized = numeric == BUNDLE_NUMERIC_QUANTIZED &&
+                             ((version == MODEL_BUNDLE_FORMAT_V2 &&
+                               header_size == BUNDLE_HEADER_V2_SIZE) || is_v3);
     if ((!is_float && !is_quantized) || !float32_supported()) {
         fclose(file);
         return BUNDLE_UNSUPPORTED;
@@ -555,16 +576,26 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
     uint64_t tokenizer_bytes = decode_u64(header + 128);
     uint64_t expected_weight_checksum = decode_u64(header + 136);
     uint64_t expected_tokenizer_checksum = decode_u64(header + 144);
+    uint32_t architecture_flags = is_v3 ? decode_u32(header + 184) : 0;
     for (size_t i = 0; i < 6; i++) {
         if (dims[i] > SIZE_MAX) { fclose(file); return BUNDLE_FORMAT_ERROR; }
     }
-    if (!bundle_shape_valid(dims) || tokenizer_bytes < 24 ||
+    if ((is_v3 && (architecture_flags == 0 || decode_u32(header + 188) != 0)) ||
+        !bundle_shape_valid(dims, architecture_flags) || tokenizer_bytes < 24 ||
         tokenizer_bytes > SIZE_MAX || train_window == 0 ||
         train_window > dims[4] || train_window > SIZE_MAX ||
         (is_float && (dims[5] > UINT64_MAX / 4 ||
                       weight_bytes != dims[5] * 4))) {
         fclose(file);
         return BUNDLE_FORMAT_ERROR;
+    }
+    if (is_v3 && is_float) {
+        for (size_t i = 152; i < 184; i++) {
+            if (header[i] != 0) {
+                fclose(file);
+                return BUNDLE_FORMAT_ERROR;
+            }
+        }
     }
 
     model_quant_config_t quant_config = {0};
@@ -614,9 +645,10 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
     }
 
     neural_model_t loaded = {0};
-    model_errors_t model_rc = model_new(
+    model_errors_t model_rc = model_new_seeded_architecture(
         &loaded, (size_t)dims[0], (size_t)dims[1], (size_t)dims[2],
-        (size_t)dims[3], (size_t)dims[4]);
+        (size_t)dims[3], (size_t)dims[4], MODEL_DEFAULT_SEED,
+        architecture_flags);
     if (model_rc != MODEL_SUCCESS || loaded.total_param_count != (size_t)dims[5]) {
         model_free(&loaded);
         fclose(file);
@@ -834,9 +866,12 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
     uint32_t version = decode_u32(mapping + 8);
     uint32_t numeric = decode_u32(mapping + 16);
     uint32_t header_size = decode_u32(mapping + 20);
-    if (version != MODEL_BUNDLE_FORMAT_V1 ||
+    const int is_v1_float = version == MODEL_BUNDLE_FORMAT_V1 &&
+                            header_size == BUNDLE_HEADER_V1_SIZE;
+    const int is_v3_float = version == MODEL_BUNDLE_FORMAT_V3 &&
+                            header_size == BUNDLE_HEADER_V3_SIZE;
+    if ((!is_v1_float && !is_v3_float) ||
         numeric != BUNDLE_NUMERIC_FLOAT32 ||
-        header_size != BUNDLE_HEADER_V1_SIZE ||
         !float32_supported() || !host_is_little_endian()) {
         munmap(mapping, file_size);
         return BUNDLE_UNSUPPORTED;
@@ -846,14 +881,18 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
         return BUNDLE_UNSUPPORTED;
     }
 
-    uint8_t header[BUNDLE_HEADER_V1_SIZE];
-    memcpy(header, mapping, sizeof(header));
+    if (file_size < (size_t)header_size + 8) {
+        munmap(mapping, file_size);
+        return BUNDLE_FORMAT_ERROR;
+    }
+    uint8_t header[BUNDLE_HEADER_MAX_SIZE] = {0};
+    memcpy(header, mapping, header_size);
     uint64_t stored_header_checksum =
         (uint64_t)decode_u32(header + 76) |
         ((uint64_t)decode_u32(header + 84) << 32);
     memset(header + 76, 0, 4);
     memset(header + 84, 0, 4);
-    if (checksum_buffer(header, sizeof(header)) != stored_header_checksum) {
+    if (checksum_buffer(header, header_size) != stored_header_checksum) {
         munmap(mapping, file_size);
         return BUNDLE_CHECKSUM_ERROR;
     }
@@ -876,7 +915,11 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
     uint64_t tokenizer_bytes = decode_u64(mapping + 128);
     uint64_t expected_weight_checksum = decode_u64(mapping + 136);
     uint64_t expected_tokenizer_checksum = decode_u64(mapping + 144);
-    if (!bundle_shape_valid(dims) || dims[5] > UINT64_MAX / 4 ||
+    uint32_t architecture_flags = is_v3_float ? decode_u32(mapping + 184) : 0;
+    if ((is_v3_float &&
+         (architecture_flags == 0 || decode_u32(mapping + 188) != 0)) ||
+        !bundle_shape_valid(dims, architecture_flags) ||
+        dims[5] > UINT64_MAX / 4 ||
         weight_bytes != dims[5] * 4 || tokenizer_bytes < 24 ||
         tokenizer_bytes > SIZE_MAX || train_window == 0 ||
         train_window > dims[4] || train_window > SIZE_MAX) {
@@ -884,14 +927,22 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
         return BUNDLE_FORMAT_ERROR;
     }
     uint64_t expected_file_size = 0;
-    if (!checked_file_size(BUNDLE_HEADER_V1_SIZE, weight_bytes,
+    if (is_v3_float) {
+        for (size_t i = 152; i < 184; i++) {
+            if (mapping[i] != 0) {
+                munmap(mapping, file_size);
+                return BUNDLE_FORMAT_ERROR;
+            }
+        }
+    }
+    if (!checked_file_size(header_size, weight_bytes,
                            tokenizer_bytes, &expected_file_size) ||
         expected_file_size != file_size_u64) {
         munmap(mapping, file_size);
         return BUNDLE_FORMAT_ERROR;
     }
 
-    const uint8_t *weight_data = mapping + BUNDLE_HEADER_V1_SIZE;
+    const uint8_t *weight_data = mapping + header_size;
     const uint8_t *tokenizer_data = weight_data + (size_t)weight_bytes;
     if (checksum_buffer(weight_data, (size_t)weight_bytes) !=
         expected_weight_checksum ||
@@ -914,9 +965,10 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
     }
 
     neural_model_t loaded = {0};
-    model_errors_t model_rc = model_new_external_parameters(
+    model_errors_t model_rc = model_new_external_parameters_architecture(
         &loaded, (size_t)dims[0], (size_t)dims[1], (size_t)dims[2],
         (size_t)dims[3], (size_t)dims[4],
+        architecture_flags,
         (float *)(void *)weight_data);
     if (model_rc != MODEL_SUCCESS ||
         loaded.total_param_count != (size_t)dims[5]) {
@@ -951,7 +1003,7 @@ bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
     out_metadata->seed = seed;
     out_metadata->input_fingerprint = input_fingerprint;
     out_metadata->input_bytes = input_bytes;
-    out_metadata->format_version = MODEL_BUNDLE_FORMAT_V1;
+    out_metadata->format_version = version;
     *model = loaded;
     *out_encoder = encoder;
     return BUNDLE_SUCCESS;

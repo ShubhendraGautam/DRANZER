@@ -14,6 +14,7 @@ int main(void) {
     before.batch_size = 8;
     before.gradient_accumulation_steps = 4;
     before.shuffle = 1;
+    before.architecture_flags = UINT32_C(1);
     before.tokenizer_vocab_size = 273;
     before.tokenizer_has_special_tokens = 1;
     before.pad_token_id = 256;
@@ -44,6 +45,7 @@ int main(void) {
         after.batch_size != before.batch_size ||
         after.gradient_accumulation_steps != before.gradient_accumulation_steps ||
         after.shuffle != before.shuffle ||
+        after.architecture_flags != before.architecture_flags ||
         after.tokenizer_vocab_size != before.tokenizer_vocab_size ||
         after.tokenizer_has_special_tokens != before.tokenizer_has_special_tokens ||
         after.pad_token_id != before.pad_token_id ||

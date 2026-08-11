@@ -56,6 +56,15 @@ model_errors_t model_new_seeded(neural_model_t *model,
                                 size_t max_seq_len,
                                 uint64_t seed);
 
+model_errors_t model_new_seeded_architecture(neural_model_t *model,
+                                             size_t vocab_size,
+                                             size_t embedding_dim,
+                                             size_t num_heads,
+                                             size_t num_layers,
+                                             size_t max_seq_len,
+                                             uint64_t seed,
+                                             uint32_t architecture_flags);
+
 /* The seed model_new() uses. Named so that a test comparing against a fresh
  * model does not have to repeat the literal. */
 #define MODEL_DEFAULT_SEED UINT64_C(0)
@@ -82,6 +91,21 @@ model_errors_t model_new_external_parameters(neural_model_t *model,
                                               size_t num_layers,
                                               size_t max_seq_len,
                                               float *parameters);
+
+model_errors_t model_new_external_parameters_architecture(
+    neural_model_t *model,
+    size_t vocab_size,
+    size_t embedding_dim,
+    size_t num_heads,
+    size_t num_layers,
+    size_t max_seq_len,
+    uint32_t architecture_flags,
+    float *parameters);
+
+static inline int model_uses_tied_embeddings(const neural_model_t *model) {
+    return model &&
+           (model->architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) != 0;
+}
 
 /* Reseed the model-owned dropout stream, without touching the weights.
  *

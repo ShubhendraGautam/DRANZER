@@ -90,6 +90,8 @@ static int reject_resume_override(const cli_args_t *requested,
     REJECT_DIFFERENT("--num-heads", requested->num_heads != model->num_heads);
     REJECT_DIFFERENT("--num-layers", requested->num_layers != model->num_layers);
     REJECT_DIFFERENT("--max-seq-len", requested->max_seq_len != model->max_seq_len);
+    REJECT_DIFFERENT("--tie-embeddings",
+                     requested->tie_embeddings != model_uses_tied_embeddings(model));
     REJECT_DIFFERENT("--train-window", requested->train_window != state->train_window);
     /* state->train_stride is the resolved value (never 0), so compare the
      * resolved request against it rather than the raw flag. */
@@ -656,6 +658,7 @@ int mode_train(const cli_args_t *args) {
         effective_args.num_heads = model.num_heads;
         effective_args.num_layers = model.num_layers;
         effective_args.max_seq_len = model.max_seq_len;
+        effective_args.tie_embeddings = model_uses_tied_embeddings(&model);
         effective_args.train_window = checkpoint_state.train_window;
         effective_args.train_stride = checkpoint_state.train_stride;
         effective_args.batch_size = checkpoint_state.batch_size;
@@ -762,10 +765,13 @@ int mode_train(const cli_args_t *args) {
 
     /* ===== STEP 2: Initialize Model ===== */
     printf("[2] Initializing neural model...\n");
+    uint32_t architecture_flags = args->tie_embeddings
+                                    ? MODEL_ARCH_TIED_EMBEDDINGS : 0;
     model_errors_t init_rc = resumed ? MODEL_SUCCESS :
-        model_new_seeded(&model, args->vocab_size, args->embedding_dim,
-                         args->num_heads, args->num_layers, args->max_seq_len,
-                         args->seed);
+        model_new_seeded_architecture(
+            &model, args->vocab_size, args->embedding_dim,
+            args->num_heads, args->num_layers, args->max_seq_len,
+            args->seed, architecture_flags);
 
     if (init_rc != MODEL_SUCCESS) {
         fprintf(stderr, "Error: Model initialization failed (code: %d)\n", init_rc);
@@ -1201,6 +1207,7 @@ int mode_train(const cli_args_t *args) {
     config.num_layers = model.num_layers;
     config.vocab_size = model.vocab_size;
     config.max_seq_len = model.max_seq_len;
+    config.architecture_flags = model.architecture_flags;
     config.learning_rate = model.metrics.initial_learning_rate;
     config.batch_size = (size_t)args->batch_size;
     config.gradient_accumulation_steps =

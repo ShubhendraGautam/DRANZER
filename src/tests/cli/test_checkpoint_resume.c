@@ -12,6 +12,7 @@ static int models_equal(const neural_model_t *a, const neural_model_t *b) {
     size_t bytes = a->total_param_count * sizeof(float);
     size_t history_bytes = a->metrics.history_size * sizeof(float);
     return a->total_param_count == b->total_param_count &&
+           a->architecture_flags == b->architecture_flags &&
            memcmp(a->params, b->params, bytes) == 0 &&
            memcmp(a->grads, b->grads, bytes) == 0 &&
            a->adam_m && b->adam_m && a->adam_v && b->adam_v &&
@@ -44,7 +45,8 @@ int main(void) {
 
     if (!encoder || bpe_train(encoder, "banana banana", 13) != BPE_SUCCESS ||
         bpe_encoder_freeze(encoder) != BPE_SUCCESS ||
-        model_new_seeded(&original, 264, 8, 2, 1, 8, 101) != MODEL_SUCCESS) {
+        model_new_seeded_architecture(&original, 264, 8, 2, 1, 8, 101,
+                                      MODEL_ARCH_TIED_EMBEDDINGS) != MODEL_SUCCESS) {
         fprintf(stderr, "checkpoint fixture initialization failed\n");
         failed = 1;
         goto cleanup;

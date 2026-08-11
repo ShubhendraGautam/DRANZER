@@ -21,6 +21,14 @@ typedef enum {
     OPTIMIZER_ADAM,
 } optimizer_type_t;
 
+/* Persisted architecture bits. These are wire values in bundles and
+ * checkpoints, so assigned positions may never be reused. */
+typedef enum {
+    MODEL_ARCH_TIED_EMBEDDINGS = UINT32_C(1) << 0,
+} model_architecture_flag_t;
+
+#define MODEL_ARCHITECTURE_SUPPORTED_MASK MODEL_ARCH_TIED_EMBEDDINGS
+
 /* Learning metrics tracking for Phase 2 stability improvements */
 typedef struct {
     float *loss_history;      // Array of losses per training step
@@ -71,6 +79,7 @@ typedef struct {
     size_t num_heads;
     size_t num_layers;
     float learning_rate;
+    uint32_t architecture_flags;
 
     // --- Optimizer configuration. Defaults are set by model_new; the
     // caller may override any of these fields directly before training
@@ -134,7 +143,8 @@ typedef struct {
     // Stacked transformer blocks
     transformer_layer_t *layers;  // num_layers entries
 
-    // Output head (next token prediction, reads only the last sequence position)
+    // Output head. In tied mode the projection is token_embeddings transposed,
+    // owns no separate parameter slice, and both projection pointers are NULL.
     float *output_projection, *output_bias;             // views into params
     float *output_projection_grad, *output_bias_grad;    // views into grads
 

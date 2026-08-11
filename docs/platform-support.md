@@ -68,8 +68,8 @@ ordinary compiler output and the resulting executable may fault on an older CPU.
 
 ## Memory-mapped bundles
 
-Copy loading supports bundle formats 1 and 2 on a host with IEEE-754 binary32. Direct mmap loading
-is Linux/POSIX, inference-only, and limited to the canonical version-1 float format. It additionally
+Copy loading supports bundle formats 1 through 3 on a host with IEEE-754 binary32. Direct mmap loading
+is Linux/POSIX, inference-only, and limited to canonical lossless version-1/version-3 files. It additionally
 requires a little-endian host because parameter views point directly at on-disk bytes. The loader
 checks all of these conditions and returns `BUNDLE_UNSUPPORTED`/`DRANZER_UNSUPPORTED` rather than
 silently copying or reinterpreting data.

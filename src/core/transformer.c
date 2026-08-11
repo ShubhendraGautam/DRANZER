@@ -10,6 +10,7 @@
 #include "core/parallel.h"
 #include "core/tensor_ops.h"
 #include "core/matmul_dispatch.h"
+#include "core/lm_head.h"
 #include "common/debug.h"
 #include <stdlib.h>
 #include <string.h>
@@ -471,7 +472,8 @@ model_errors_t model_forward_masked(neural_model_t *model,
     size_t embedding_dim = model->embedding_dim;
     float *last_hidden = &model->cache_hidden[model->num_layers]
                                       [last_position * embedding_dim];
-    model_dispatch_matmul(model, last_hidden, model->output_projection, output_logits, 1, embedding_dim, model->vocab_size);
+    rc = lm_head_project(model, last_hidden, output_logits, 1);
+    if (rc != MODEL_SUCCESS) return rc;
 
     for (size_t i = 0; i < model->vocab_size; i++) {
         output_logits[i] += model->output_bias[i];
@@ -713,8 +715,9 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
                         layer->ln_gamma_ffn, layer->ln_beta_ffn, epsilon);
     }
 
-    model_dispatch_matmul(model, cache->hidden, model->output_projection, output_logits,
-                    1, embedding_dim, model->vocab_size);
+    model_errors_t head_rc = lm_head_project(model, cache->hidden,
+                                             output_logits, 1);
+    if (head_rc != MODEL_SUCCESS) return head_rc;
     for (size_t i = 0; i < model->vocab_size; i++) {
         output_logits[i] += model->output_bias[i];
     }

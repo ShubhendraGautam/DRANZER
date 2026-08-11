@@ -11,8 +11,9 @@
  * wire-format identifiers, not release numbers, and may never be reused. */
 #define MODEL_BUNDLE_FORMAT_V1 UINT32_C(1)
 #define MODEL_BUNDLE_FORMAT_V2 UINT32_C(2)
+#define MODEL_BUNDLE_FORMAT_V3 UINT32_C(3)
 #define MODEL_BUNDLE_FORMAT_OLDEST_SUPPORTED MODEL_BUNDLE_FORMAT_V1
-#define MODEL_BUNDLE_FORMAT_CURRENT MODEL_BUNDLE_FORMAT_V2
+#define MODEL_BUNDLE_FORMAT_CURRENT MODEL_BUNDLE_FORMAT_V3
 
 typedef enum {
     BUNDLE_SUCCESS = 0,
@@ -71,11 +72,12 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
                                   model_bundle_metadata_t *out_metadata,
                                   const char *filename);
 
-/* Map a version-1 float32 bundle and make every parameter view point directly
+/* Map a version-1 or version-3 float32 bundle and make every parameter view point directly
  * into its read-only weight payload. This avoids the parameter allocation,
  * initialization, and copy performed by model_bundle_load(); model_free()
  * releases the mapping. The resulting model is inference-only. Quantized
- * version-2 bundles require unpacking and therefore return BUNDLE_UNSUPPORTED.
+ * quantized version-2/version-3 bundles require unpacking and therefore return
+ * BUNDLE_UNSUPPORTED.
  * As above, model must be zero-initialized. */
 bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
                                        bpe_encoder_t **out_encoder,

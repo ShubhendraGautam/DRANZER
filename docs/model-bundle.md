@@ -70,6 +70,27 @@ memory representation therefore remain unchanged. The save API reports total art
 weight-payload bytes, tokenizer bytes, and quantized tensor/value/scale counts so storage can be
 compared to the accuracy report produced by `model_quantize_weights()`.
 
+## Version 3 architecture flags
+
+Version 3 carries architecture choices that change the parameter layout. Its 192-byte header keeps
+all version-1/version-2 fields at the same offsets and appends:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 184 | 4 | Architecture flags (`bit 0`: tied token/input embeddings and output projection) |
+| 188 | 4 | Reserved zero |
+
+A version-3 bundle may use numeric type `1` for lossless float32 parameters or type `2` for the
+version-2 quantized tensor representation. For lossless files, bytes 152–183 are canonical zeros.
+The ordinary writers preserve existing artifacts: an unflagged lossless model is still version 1
+and an unflagged quantized model is still version 2. A flagged model uses version 3.
+
+With tied embeddings, the parameter payload contains one `[vocabulary × embedding]` token table
+and no independent `[embedding × vocabulary]` output projection. The head reads the table
+transposed, and backward accumulates the output-head and input-lookup contributions into that one
+gradient slice. Unknown architecture bits, a parameter count computed for the wrong layout, or a
+non-zero reserved field are rejected before allocation.
+
 ## Loading and safety
 
 The loader rejects unsupported versions, endian/numeric markers, header corruption, shape or
@@ -86,17 +107,19 @@ destination untouched.
 
 ## Read-only memory-mapped loading
 
-`model_bundle_load_mmap()` maps a version-1 bundle with `MAP_PRIVATE`/`PROT_READ` and lays every
-named parameter view directly over the canonical weight payload. It still validates the header,
+`model_bundle_load_mmap()` maps a lossless version-1 or version-3 bundle with
+`MAP_PRIVATE`/`PROT_READ` and lays every named parameter view directly over the canonical weight
+payload. It still validates the header,
 exact file size, footer, weight checksum, tokenizer checksum, model shape, and tokenizer vocabulary
 before publishing the model. It avoids allocating, randomly initializing, and then overwriting a
 second parameter buffer. `model_free()` owns and releases the mapping after a successful load.
 
 A mapped model is explicitly inference-only. Training accumulation, optimizer steps, and direct
-weight decay return `MODEL_INVALID_INPUT` before writing. Version-2 bundles return
-`BUNDLE_UNSUPPORTED` from this entry point because their packed codes and scales must be unpacked;
+weight decay return `MODEL_INVALID_INPUT` before writing. Quantized version-2/version-3 bundles
+return `BUNDLE_UNSUPPORTED` from this entry point because their packed codes and scales must be
+unpacked;
 use `model_bundle_load()` when a writable float model is required. Direct mapping also requires a
-little-endian host with IEEE-754 binary32, matching the bytes in version 1.
+little-endian host with IEEE-754 binary32, matching the lossless payload bytes.
 
 Build the focused measurement tool and run each mode in a separate process so peak RSS is not
 contaminated by the other allocator strategy:
@@ -114,9 +137,10 @@ numbers are intentionally deferred to the project's bundled validation run.
 
 ## Compatibility policy
 
-- Bundle versions 1 through 2 are the current compatibility window and remain readable throughout
-  the 1.x release line. Version 1 remains the default lossless writer; version 2 is the opt-in
-  quantized writer. Version identifiers are never reused. Removing either reader or changing a
+- Bundle versions 1 through 3 are the current compatibility window and remain readable throughout
+  the 1.x release line. Version 1 remains the default lossless writer; version 2 is the default
+  opt-in quantized writer; version 3 records parameter-layout architecture flags. Version identifiers
+  are never reused. Removing a reader or changing a
   field's meaning requires a project major-version change and migration notes.
 - Unknown bundle versions fail explicitly; the loader does not guess. Public callers receive the
   actual loaded version in `dranzer_bundle_info_t.format_version`.
@@ -133,7 +157,8 @@ numbers are intentionally deferred to the project's bundled validation run.
   resume state; a bundle is the smaller inference/evaluation artifact.
 
 `test_model_bundle.c` pins the magic, numeric type, header size, footer, and reported version for
-both fixed wire formats. It also protects exact copied and memory-mapped version-1 round trips, mapped-model
+the original fixed wire formats. `test_tied_embeddings.c` pins version 3 through lossless,
+quantized, copied, and mmap round trips. Together they protect exact version-1 round trips, mapped-model
 ownership and training rejection, version-2 reconstruction against the
 simulated quantizer, artifact-size accounting, both payload checksums, tensor-shape validation,
 truncation, unsupported versions, unsafe shapes, malformed tokenizer bounds, a deterministic

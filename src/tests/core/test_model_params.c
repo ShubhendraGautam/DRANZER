@@ -33,10 +33,12 @@ static const config_t configs[] = {
 };
 #define CONFIG_COUNT (sizeof(configs) / sizeof(configs[0]))
 
-static void check_model(const config_t *config) {
+static void check_model(const config_t *config, uint32_t architecture_flags) {
     neural_model_t model = {0};
-    if (model_new_seeded(&model, config->vocab, config->embedding_dim, config->heads,
-                  config->layers, config->seq, 7) != MODEL_SUCCESS) {
+    if (model_new_seeded_architecture(
+            &model, config->vocab, config->embedding_dim, config->heads,
+            config->layers, config->seq, 7,
+            architecture_flags) != MODEL_SUCCESS) {
         fail("model_new failed");
         return;
     }
@@ -149,8 +151,10 @@ static void check_model(const config_t *config) {
             }
         }
     }
-    if (!found_embeddings || !found_output) {
-        fail("a known global tensor is missing from the inventory");
+    if (!found_embeddings ||
+        (found_output ==
+         ((architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) != 0))) {
+        fail("a known global tensor does not match the architecture");
     }
 
     for (size_t l = 0; l < config->layers; l++) {
@@ -176,7 +180,10 @@ static void check_model(const config_t *config) {
 }
 
 int main(void) {
-    for (size_t c = 0; c < CONFIG_COUNT; c++) check_model(&configs[c]);
+    for (size_t c = 0; c < CONFIG_COUNT; c++) {
+        check_model(&configs[c], 0);
+        check_model(&configs[c], MODEL_ARCH_TIED_EMBEDDINGS);
+    }
 
     /* A model that was never constructed must produce nothing rather than
      * walking null pointers. */
@@ -188,7 +195,7 @@ int main(void) {
         fail("a null model produced descriptors");
     }
 
-    printf("configurations=%zu\n", CONFIG_COUNT);
+    printf("configurations=%zu\n", CONFIG_COUNT * 2);
     if (failures != 0) {
         printf("\nPARAMETER INVENTORY CHECK FAILED (%d problem%s)\n",
                failures, failures == 1 ? "" : "s");
