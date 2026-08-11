@@ -25,9 +25,11 @@ typedef enum {
  * checkpoints, so assigned positions may never be reused. */
 typedef enum {
     MODEL_ARCH_TIED_EMBEDDINGS = UINT32_C(1) << 0,
+    MODEL_ARCH_ROPE = UINT32_C(1) << 1,
 } model_architecture_flag_t;
 
-#define MODEL_ARCHITECTURE_SUPPORTED_MASK MODEL_ARCH_TIED_EMBEDDINGS
+#define MODEL_ARCHITECTURE_SUPPORTED_MASK \
+    (MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_ROPE)
 
 /* Learning metrics tracking for Phase 2 stability improvements */
 typedef struct {
@@ -138,7 +140,7 @@ typedef struct {
 
     // Embeddings
     float *token_embeddings, *token_embeddings_grad;   // views into params/grads
-    float *position_embeddings;   // max_seq_len x embedding_dim (fixed sinusoidal, separately owned, not trained)
+    float *position_embeddings;   // fixed additive sinusoid; allocated but bypassed by RoPE
 
     // Stacked transformer blocks
     transformer_layer_t *layers;  // num_layers entries
@@ -221,5 +223,14 @@ typedef struct {
     float *ws_logits_all, *ws_grad_logits_all;
 
 } neural_model_t;
+
+static inline int model_uses_tied_embeddings(const neural_model_t *model) {
+    return model &&
+           (model->architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) != 0;
+}
+
+static inline int model_uses_rope(const neural_model_t *model) {
+    return model && (model->architecture_flags & MODEL_ARCH_ROPE) != 0;
+}
 
 #endif // MODEL_TYPES_H

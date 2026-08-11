@@ -742,14 +742,19 @@ speed/memory improvement is reproducible on identified hardware.
 - [~] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
 
-  **Tied-embedding implementation is ready; review and measurement are deferred.**
+  **Tied-embedding and RoPE implementations are ready; review and measurement are deferred.**
   `--tie-embeddings` removes the duplicate output matrix and uses the token table transposed in
   full-prefix, cached-decode, and all-position training paths. Both gradient contributions land in
   the one shared parameter slice. Architecture flags persist through exact checkpoints, immutable
   manifests/config, and lossless or quantized bundle version 3; unflagged writers retain exact v1/v2
   behavior. Focused tests cover layout reduction, forward/backward math, parameter-inventory tiling,
   checkpoint resume, CLI parsing, and copy/mmap/quantized persistence. No build, test, or ablation has
-  run before review, and RoPE, RMSNorm, and GELU/SwiGLU remain unimplemented.
+  run before review. RoPE is independently enabled by `--rope`, removes additive positions, rotates
+  Q/K per head in full and cached attention, inverse-rotates gradients, and rejects odd head widths.
+  Its focused source test covers rotation/inversion, pair-norm preservation, no-additive-position
+  input, cached/full equivalence, a numerical Q-gradient, and pure-RoPE copy/mmap bundle persistence.
+  RMSNorm and GELU/SwiGLU remain
+  unimplemented.
 - [~] Add padding and general attention masks before variable-length batching.
   `model_attention_mask_t` now combines a per-position padding mask with an optional general
   row-major edge mask, always intersected with causality. Mask-aware forward and all-position

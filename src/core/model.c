@@ -84,7 +84,9 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     if (model == NULL || vocab_size == 0 || embedding_dim == 0 ||
         num_heads == 0 || embedding_dim % num_heads != 0 ||
         num_layers == 0 || max_seq_len == 0 ||
-        (architecture_flags & ~MODEL_ARCHITECTURE_SUPPORTED_MASK) != 0) {
+        (architecture_flags & ~MODEL_ARCHITECTURE_SUPPORTED_MASK) != 0 ||
+        ((architecture_flags & MODEL_ARCH_ROPE) != 0 &&
+         (embedding_dim / num_heads) % 2 != 0)) {
         return MODEL_INVALID_INPUT;
     }
 

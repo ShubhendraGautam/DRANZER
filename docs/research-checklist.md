@@ -563,9 +563,9 @@ that the floor may erase.
   where that is the honest answer. Listed here only to note that R2 and R3 are its prerequisites,
   not its follow-up.
 
-  Tied embeddings are implemented behind an explicit architecture flag with persistence and
-  source-level test coverage. Review, bundled execution, comparison against the seed floor, and the
-  remaining three architecture implementations are still pending.
+  Tied embeddings and RoPE are implemented behind independent architecture flags with persistence
+  and source-level test coverage. Review, bundled execution, comparison against the seed floor, and
+  the remaining RMSNorm and GELU/SwiGLU implementations are still pending.
 
 - [ ] **P1. Does overlapping the training window buy held-out quality?**
   `--train-stride` exists precisely so this comparison is possible, and

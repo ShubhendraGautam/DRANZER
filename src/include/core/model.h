@@ -102,11 +102,6 @@ model_errors_t model_new_external_parameters_architecture(
     uint32_t architecture_flags,
     float *parameters);
 
-static inline int model_uses_tied_embeddings(const neural_model_t *model) {
-    return model &&
-           (model->architecture_flags & MODEL_ARCH_TIED_EMBEDDINGS) != 0;
-}
-
 /* Reseed the model-owned dropout stream, without touching the weights.
  *
  * model_new_seeded() already does this from the same seed, so this is only for

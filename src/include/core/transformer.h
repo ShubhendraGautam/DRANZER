@@ -29,6 +29,16 @@ typedef struct {
     float *position_embedding;
 } model_kv_cache_t;
 
+/* Apply standard adjacent-pair rotary position embeddings independently in
+ * every attention head. `start_position` is the absolute position of row 0.
+ * The backward form multiplies by the transpose/inverse rotation in place. */
+model_errors_t model_rope_forward(float *values, size_t rows,
+                                  size_t embedding_dim, size_t num_heads,
+                                  size_t start_position);
+model_errors_t model_rope_backward(float *gradients, size_t rows,
+                                   size_t embedding_dim, size_t num_heads,
+                                   size_t start_position);
+
 /* Optional restrictions layered on top of causal self-attention.
  *
  * padding_mask has seq_len entries: zero marks padding, nonzero marks a real

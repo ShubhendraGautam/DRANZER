@@ -35,6 +35,7 @@ int main(void) {
     char *zero_stride[] = {"app", "train", "--train-stride", "0"};
     char *explicit_stride[] = {"app", "train", "--train-stride", "3"};
     char *tied[] = {"app", "train", "--tie-embeddings"};
+    char *rope[] = {"app", "train", "--rope"};
     char *valid[] = {"app", "train", "--batch-size", "4",
                      "--gradient-accumulation", "3", "--shuffle",
                      "--checkpoint-interval", "0", "--dropout", "0.2"};
@@ -60,6 +61,8 @@ int main(void) {
                  parsed.train_stride != 3 ||
                  cli_parse(3, tied, &parsed) != 0 || !parsed.tie_embeddings ||
                  !cli_option_was_explicit(&parsed, "--tie-embeddings") ||
+                 cli_parse(3, rope, &parsed) != 0 || !parsed.use_rope ||
+                 !cli_option_was_explicit(&parsed, "--rope") ||
                  cli_parse(11, valid, &parsed) != 0 || parsed.batch_size != 4 ||
                  parsed.gradient_accumulation_steps != 3 || !parsed.shuffle ||
                  parsed.checkpoint_interval != 0 || parsed.dropout_rate != 0.2f ||

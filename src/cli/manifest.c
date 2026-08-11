@@ -86,6 +86,7 @@ int run_manifest_write(const cli_args_t *args,
                      "max_seq_len = %zu\n"
                      "architecture_flags = %" PRIu32 "\n"
                      "tie_embeddings = %d\n"
+                     "rope = %d\n"
                      "train_window = %zu\n"
                      "train_stride = %zu\n"
                      "epochs = %d\n"
@@ -115,6 +116,7 @@ int run_manifest_write(const cli_args_t *args,
                      model->num_heads, model->num_layers, model->max_seq_len,
                      model->architecture_flags,
                      model_uses_tied_embeddings(model),
+                     model_uses_rope(model),
                      run_state->train_window, run_state->train_stride,
                      args->epochs, args->batch_size,
                      args->gradient_accumulation_steps, effective_batch, args->shuffle,

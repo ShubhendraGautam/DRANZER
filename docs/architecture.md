@@ -166,6 +166,13 @@ Named fields such as `W_q` and `output_projection` are views into those buffers.
 `token_embeddings` transposed, both gradient paths accumulate into the same embedding slice, and
 the parameter count falls by `vocab_size × embedding_dim`. The output bias remains independent.
 
+With `--rope`, token inputs do not receive the fixed additive sinusoidal table. Instead, every
+attention layer rotates adjacent query/key channel pairs independently within each head using
+`position × 10000^(-2i/head_dim)`. Full-prefix rows use positions starting at zero; cached decode
+uses the cache's monotonic absolute position, including beyond the retained window. Backward applies
+the transpose rotation to Q/K gradients before projection gradients are formed. RoPE therefore
+requires an even per-head dimension; model construction rejects incompatible shapes.
+
 Forward matmuls normally use the CPU dispatch path (or opt-in GPU path), which picks a kernel from
 the shape of the call and the instruction set the running CPU supports - see
 [CPU matmul kernels](matmul.md). Setting `model.use_scalar_matmul`

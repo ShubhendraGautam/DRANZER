@@ -57,6 +57,7 @@ typedef struct {
     size_t train_stride;
     size_t eval_window;    // 0 = loaded model's max_seq_len
     int tie_embeddings;    // share token embeddings with the output projection
+    int use_rope;           // rotary Q/K positions instead of additive sinusoids
 
     /* Training hyperparameters */
     int epochs;

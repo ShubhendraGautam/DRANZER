@@ -46,7 +46,8 @@ int main(void) {
     if (!encoder || bpe_train(encoder, "banana banana", 13) != BPE_SUCCESS ||
         bpe_encoder_freeze(encoder) != BPE_SUCCESS ||
         model_new_seeded_architecture(&original, 264, 8, 2, 1, 8, 101,
-                                      MODEL_ARCH_TIED_EMBEDDINGS) != MODEL_SUCCESS) {
+                                      MODEL_ARCH_TIED_EMBEDDINGS |
+                                          MODEL_ARCH_ROPE) != MODEL_SUCCESS) {
         fprintf(stderr, "checkpoint fixture initialization failed\n");
         failed = 1;
         goto cleanup;

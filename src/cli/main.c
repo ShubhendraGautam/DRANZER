@@ -92,6 +92,7 @@ static int reject_resume_override(const cli_args_t *requested,
     REJECT_DIFFERENT("--max-seq-len", requested->max_seq_len != model->max_seq_len);
     REJECT_DIFFERENT("--tie-embeddings",
                      requested->tie_embeddings != model_uses_tied_embeddings(model));
+    REJECT_DIFFERENT("--rope", requested->use_rope != model_uses_rope(model));
     REJECT_DIFFERENT("--train-window", requested->train_window != state->train_window);
     /* state->train_stride is the resolved value (never 0), so compare the
      * resolved request against it rather than the raw flag. */
@@ -659,6 +660,7 @@ int mode_train(const cli_args_t *args) {
         effective_args.num_layers = model.num_layers;
         effective_args.max_seq_len = model.max_seq_len;
         effective_args.tie_embeddings = model_uses_tied_embeddings(&model);
+        effective_args.use_rope = model_uses_rope(&model);
         effective_args.train_window = checkpoint_state.train_window;
         effective_args.train_stride = checkpoint_state.train_stride;
         effective_args.batch_size = checkpoint_state.batch_size;
@@ -767,6 +769,7 @@ int mode_train(const cli_args_t *args) {
     printf("[2] Initializing neural model...\n");
     uint32_t architecture_flags = args->tie_embeddings
                                     ? MODEL_ARCH_TIED_EMBEDDINGS : 0;
+    if (args->use_rope) architecture_flags |= MODEL_ARCH_ROPE;
     model_errors_t init_rc = resumed ? MODEL_SUCCESS :
         model_new_seeded_architecture(
             &model, args->vocab_size, args->embedding_dim,

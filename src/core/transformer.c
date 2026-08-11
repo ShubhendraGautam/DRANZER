@@ -21,6 +21,52 @@
  * became a third caller needing the same policy; call sites below use
  * model_dispatch_matmul() directly. */
 
+static model_errors_t rope_rotate(float *values, size_t rows,
+                                  size_t embedding_dim, size_t num_heads,
+                                  size_t start_position, int inverse) {
+    if (!values || rows == 0 || embedding_dim == 0 || num_heads == 0 ||
+        embedding_dim % num_heads != 0 ||
+        (embedding_dim / num_heads) % 2 != 0 ||
+        rows - 1 > SIZE_MAX - start_position) return MODEL_INVALID_INPUT;
+    const size_t head_dim = embedding_dim / num_heads;
+    for (size_t row = 0; row < rows; row++) {
+        const double position = (double)(start_position + row);
+        for (size_t head = 0; head < num_heads; head++) {
+            float *head_values = &values[row * embedding_dim + head * head_dim];
+            for (size_t pair = 0; pair < head_dim / 2; pair++) {
+                const double exponent = -(double)(2 * pair) / (double)head_dim;
+                const double angle = position * pow(10000.0, exponent);
+                const float cosine = (float)cos(angle);
+                const float sine = (float)sin(angle);
+                const float first = head_values[2 * pair];
+                const float second = head_values[2 * pair + 1];
+                if (inverse) {
+                    head_values[2 * pair] = first * cosine + second * sine;
+                    head_values[2 * pair + 1] = -first * sine + second * cosine;
+                } else {
+                    head_values[2 * pair] = first * cosine - second * sine;
+                    head_values[2 * pair + 1] = first * sine + second * cosine;
+                }
+            }
+        }
+    }
+    return MODEL_SUCCESS;
+}
+
+model_errors_t model_rope_forward(float *values, size_t rows,
+                                  size_t embedding_dim, size_t num_heads,
+                                  size_t start_position) {
+    return rope_rotate(values, rows, embedding_dim, num_heads,
+                       start_position, 0);
+}
+
+model_errors_t model_rope_backward(float *gradients, size_t rows,
+                                   size_t embedding_dim, size_t num_heads,
+                                   size_t start_position) {
+    return rope_rotate(gradients, rows, embedding_dim, num_heads,
+                       start_position, 1);
+}
+
 /* One head of the forward pass, lifted out of the loop below so the loop body
  * is a single call and DRANZER_PARALLEL_FOR can guard it without duplicating
  * fifty lines - see core/parallel.h. */
@@ -158,6 +204,10 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
     model_dispatch_matmul(model, sequence, layer->W_q, Q, seq_len, embedding_dim, embedding_dim);
     model_dispatch_matmul(model, sequence, layer->W_k, K, seq_len, embedding_dim, embedding_dim);
     model_dispatch_matmul(model, sequence, layer->W_v, V, seq_len, embedding_dim, embedding_dim);
+    if (model_uses_rope(model)) {
+        (void)model_rope_forward(Q, seq_len, embedding_dim, num_heads, 0);
+        (void)model_rope_forward(K, seq_len, embedding_dim, num_heads, 0);
+    }
 
     memset(concat, 0, seq_len * embedding_dim * sizeof(float));
 
@@ -289,6 +339,11 @@ void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_le
                                 dQ, dK, dV);
     );
 
+    if (model_uses_rope(model)) {
+        (void)model_rope_backward(dQ, seq_len, embedding_dim, num_heads, 0);
+        (void)model_rope_backward(dK, seq_len, embedding_dim, num_heads, 0);
+    }
+
     matmul_backward_weight(sequence, dQ, layer->W_q_grad, seq_len, embedding_dim, embedding_dim);
     matmul_backward_weight(sequence, dK, layer->W_k_grad, seq_len, embedding_dim, embedding_dim);
     matmul_backward_weight(sequence, dV, layer->W_v_grad, seq_len, embedding_dim, embedding_dim);
@@ -355,7 +410,8 @@ model_errors_t model_forward_hidden_masked(
     DEBUG_PRINT("Model forward pass: seq_len=%zu, embedding_dim=%zu, num_layers=%zu\n",
                 seq_len, embedding_dim, model->num_layers);
 
-    /* 1. Embed tokens + positional encoding -> cache_hidden[0] */
+    /* 1. Embed tokens. The default adds fixed sinusoidal positions here;
+     * RoPE instead rotates Q/K inside every attention layer. */
     float *h0 = model->cache_hidden[0];
     for (size_t i = 0; i < seq_len; i++) {
         if (model->cache_padding_mask_active &&
@@ -370,7 +426,8 @@ model_errors_t model_forward_hidden_masked(
         for (size_t d = 0; d < embedding_dim; d++) {
             h0[i * embedding_dim + d] =
                 model->token_embeddings[token_id * embedding_dim + d] +
-                model->position_embeddings[i * embedding_dim + d];
+                (model_uses_rope(model)
+                     ? 0.0f : model->position_embeddings[i * embedding_dim + d]);
         }
     }
 
@@ -616,7 +673,8 @@ static void attention_head_forward_token(size_t head, model_kv_cache_t *cache,
 
 static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cache,
                                     size_t layer_index, size_t slot,
-                                    size_t context_len) {
+                                    size_t context_len,
+                                    size_t absolute_position) {
     transformer_layer_t *layer = &model->layers[layer_index];
     size_t embedding_dim = model->embedding_dim;
     size_t num_heads = model->num_heads;
@@ -627,6 +685,12 @@ static void attention_forward_token(neural_model_t *model, model_kv_cache_t *cac
     model_dispatch_matmul(model, cache->hidden, layer->W_q, cache->query, 1, embedding_dim, embedding_dim);
     model_dispatch_matmul(model, cache->hidden, layer->W_k, key, 1, embedding_dim, embedding_dim);
     model_dispatch_matmul(model, cache->hidden, layer->W_v, value, 1, embedding_dim, embedding_dim);
+    if (model_uses_rope(model)) {
+        (void)model_rope_forward(cache->query, 1, embedding_dim, num_heads,
+                                 absolute_position);
+        (void)model_rope_forward(key, 1, embedding_dim, num_heads,
+                                 absolute_position);
+    }
 
     memset(cache->attn_concat, 0, embedding_dim * sizeof(float));
 
@@ -673,27 +737,30 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
     const float epsilon = 1e-6f;
 
     const float *position_embedding = NULL;
-    if (absolute_position < model->max_seq_len) {
-        position_embedding =
-            &model->position_embeddings[absolute_position * embedding_dim];
-    } else {
-        if (compute_positional_encoding_at(cache->position_embedding,
-                                           absolute_position,
-                                           embedding_dim) != 0) {
-            return MODEL_INVALID_INPUT;
+    if (!model_uses_rope(model)) {
+        if (absolute_position < model->max_seq_len) {
+            position_embedding =
+                &model->position_embeddings[absolute_position * embedding_dim];
+        } else {
+            if (compute_positional_encoding_at(cache->position_embedding,
+                                               absolute_position,
+                                               embedding_dim) != 0) {
+                return MODEL_INVALID_INPUT;
+            }
+            position_embedding = cache->position_embedding;
         }
-        position_embedding = cache->position_embedding;
     }
 
     if (token_id >= model->vocab_size) token_id = 0;
     for (size_t d = 0; d < embedding_dim; d++) {
         cache->hidden[d] = model->token_embeddings[token_id * embedding_dim + d] +
-                           position_embedding[d];
+                           (position_embedding ? position_embedding[d] : 0.0f);
     }
 
     for (size_t l = 0; l < model->num_layers; l++) {
         transformer_layer_t *layer = &model->layers[l];
-        attention_forward_token(model, cache, l, slot, context_len);
+        attention_forward_token(model, cache, l, slot, context_len,
+                                absolute_position);
 
         for (size_t d = 0; d < embedding_dim; d++) {
             cache->attn_raw[d] += cache->hidden[d];

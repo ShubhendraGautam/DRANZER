@@ -7,7 +7,8 @@
  * backpropagation through every layer (attention, FFN, layer norms,
  * dropout) and the token embeddings, then an optimizer step (SGD or
  * AdamW, per model->optimizer_type) over every parameter that received a
- * gradient. position_embeddings are fixed and never trained.
+ * gradient. Additive position embeddings are fixed and never trained; RoPE
+ * has no trainable position parameters.
  * @param model: The neural model
  * @param token_ids: Input token IDs (context window)
  * @param target_id: Target next token ID
