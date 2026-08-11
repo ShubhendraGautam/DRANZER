@@ -183,8 +183,9 @@ int main(void) {
     static const uint32_t architecture_flags[] = {
         0,
         MODEL_ARCH_TIED_EMBEDDINGS,
+        MODEL_ARCH_GELU,
         MODEL_ARCH_RMSNORM,
-        MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_RMSNORM,
+        MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_RMSNORM | MODEL_ARCH_GELU,
     };
     for (size_t c = 0; c < CONFIG_COUNT; c++) {
         for (size_t variant = 0;

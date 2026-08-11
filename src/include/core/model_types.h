@@ -27,10 +27,12 @@ typedef enum {
     MODEL_ARCH_TIED_EMBEDDINGS = UINT32_C(1) << 0,
     MODEL_ARCH_ROPE = UINT32_C(1) << 1,
     MODEL_ARCH_RMSNORM = UINT32_C(1) << 2,
+    MODEL_ARCH_GELU = UINT32_C(1) << 3,
 } model_architecture_flag_t;
 
 #define MODEL_ARCHITECTURE_SUPPORTED_MASK \
-    (MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_ROPE | MODEL_ARCH_RMSNORM)
+    (MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_ROPE | MODEL_ARCH_RMSNORM | \
+     MODEL_ARCH_GELU)
 
 /* Learning metrics tracking for Phase 2 stability improvements */
 typedef struct {
@@ -178,7 +180,8 @@ typedef struct {
     float **cache_attn_ln_out;  // [num_layers], each max_seq_len*embedding_dim (post attn-residual-LN, i.e. FFN input)
     float **cache_attn_xhat;    // [num_layers], each max_seq_len*embedding_dim (attn-LN normalized values)
     float **cache_attn_std;     // [num_layers], each max_seq_len (attn-LN std-dev per position)
-    float **cache_ff_hidden;    // [num_layers], each max_seq_len*ffn_dim (post-ReLU)
+    float **cache_ff_hidden;    // [num_layers], each max_seq_len*ffn_dim (post-activation)
+    float **cache_ff_pre_activation; // GELU only, each max_seq_len*ffn_dim
     float **cache_ffn_xhat;     // [num_layers], each max_seq_len*embedding_dim (FFN-LN normalized values)
     float **cache_ffn_std;      // [num_layers], each max_seq_len (FFN-LN std-dev per position)
     float **cache_attn_dropout_mask;  // [num_layers], each max_seq_len*embedding_dim (1.0 keep / 0.0 drop)
@@ -236,6 +239,10 @@ static inline int model_uses_rope(const neural_model_t *model) {
 
 static inline int model_uses_rmsnorm(const neural_model_t *model) {
     return model && (model->architecture_flags & MODEL_ARCH_RMSNORM) != 0;
+}
+
+static inline int model_uses_gelu(const neural_model_t *model) {
+    return model && (model->architecture_flags & MODEL_ARCH_GELU) != 0;
 }
 
 #endif // MODEL_TYPES_H

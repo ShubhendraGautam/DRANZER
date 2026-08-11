@@ -14,6 +14,18 @@
 #include <omp.h>
 #endif
 
+float gelu(float x) {
+    const float inverse_sqrt_two = 0.70710678118654752440f;
+    return 0.5f * x * (1.0f + erff(x * inverse_sqrt_two));
+}
+
+float gelu_derivative(float x) {
+    const float inverse_sqrt_two = 0.70710678118654752440f;
+    const float inverse_sqrt_two_pi = 0.39894228040143267794f;
+    return 0.5f * (1.0f + erff(x * inverse_sqrt_two)) +
+           x * inverse_sqrt_two_pi * expf(-0.5f * x * x);
+}
+
 void xavier_init(float *weights, size_t size, size_t fan_in, size_t fan_out,
                  uint64_t *rng_state) {
     float limit = sqrtf(6.0f / (fan_in + fan_out));

@@ -270,6 +270,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     model->cache_attn_xhat = malloc(num_layers * sizeof(float *));
     model->cache_attn_std = malloc(num_layers * sizeof(float *));
     model->cache_ff_hidden = malloc(num_layers * sizeof(float *));
+    model->cache_ff_pre_activation = calloc(num_layers, sizeof(float *));
     model->cache_ffn_xhat = malloc(num_layers * sizeof(float *));
     model->cache_ffn_std = malloc(num_layers * sizeof(float *));
     model->cache_attn_dropout_mask = malloc(num_layers * sizeof(float *));
@@ -278,6 +279,7 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     if (!model->cache_hidden || !model->cache_Q || !model->cache_K || !model->cache_V ||
         !model->cache_probs || !model->cache_attn_concat || !model->cache_attn_ln_out ||
         !model->cache_attn_xhat || !model->cache_attn_std || !model->cache_ff_hidden ||
+        !model->cache_ff_pre_activation ||
         !model->cache_ffn_xhat || !model->cache_ffn_std ||
         !model->cache_attn_dropout_mask || !model->cache_ffn_dropout_mask) {
         model_free(model);
@@ -318,6 +320,8 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
         model->cache_attn_xhat[l] = malloc(seq_emb * sizeof(float));
         model->cache_attn_std[l] = malloc(max_seq_len * sizeof(float));
         model->cache_ff_hidden[l] = malloc(ffn_cache * sizeof(float));
+        if (model_uses_gelu(model))
+            model->cache_ff_pre_activation[l] = malloc(ffn_cache * sizeof(float));
         model->cache_ffn_xhat[l] = malloc(seq_emb * sizeof(float));
         model->cache_ffn_std[l] = malloc(max_seq_len * sizeof(float));
         model->cache_attn_dropout_mask[l] = malloc(seq_emb * sizeof(float));
@@ -325,7 +329,9 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
 
         if (!model->cache_Q[l] || !model->cache_K[l] || !model->cache_V[l] || !model->cache_probs[l] ||
             !model->cache_attn_concat[l] || !model->cache_attn_ln_out[l] || !model->cache_attn_xhat[l] ||
-            !model->cache_attn_std[l] || !model->cache_ff_hidden[l] || !model->cache_ffn_xhat[l] ||
+            !model->cache_attn_std[l] || !model->cache_ff_hidden[l] ||
+            (model_uses_gelu(model) && !model->cache_ff_pre_activation[l]) ||
+            !model->cache_ffn_xhat[l] ||
             !model->cache_ffn_std[l] || !model->cache_attn_dropout_mask[l] || !model->cache_ffn_dropout_mask[l]) {
             model_free(model);
             return MODEL_ALLOCATION_FAILURE;
@@ -498,6 +504,7 @@ void model_free(neural_model_t *model) {
     FREE_LAYER_CACHE(cache_attn_xhat)
     FREE_LAYER_CACHE(cache_attn_std)
     FREE_LAYER_CACHE(cache_ff_hidden)
+    FREE_LAYER_CACHE(cache_ff_pre_activation)
     FREE_LAYER_CACHE(cache_ffn_xhat)
     FREE_LAYER_CACHE(cache_ffn_std)
     FREE_LAYER_CACHE(cache_attn_dropout_mask)

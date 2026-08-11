@@ -77,7 +77,7 @@ all version-1/version-2 fields at the same offsets and appends:
 
 | Offset | Size | Field |
 |---:|---:|---|
-| 184 | 4 | Architecture flags (`bit 0`: tied embeddings; `bit 1`: RoPE; `bit 2`: RMSNorm without beta tensors) |
+| 184 | 4 | Architecture flags (`bit 0`: tied embeddings; `bit 1`: RoPE; `bit 2`: RMSNorm without beta tensors; `bit 3`: GELU feed-forward activation) |
 | 188 | 4 | Reserved zero |
 
 A version-3 bundle may use numeric type `1` for lossless float32 parameters or type `2` for the

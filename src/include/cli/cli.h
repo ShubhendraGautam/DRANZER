@@ -59,6 +59,7 @@ typedef struct {
     int tie_embeddings;    // share token embeddings with the output projection
     int use_rope;           // rotary Q/K positions instead of additive sinusoids
     int use_rmsnorm;        // RMSNorm without beta instead of LayerNorm
+    int use_gelu;           // GELU instead of ReLU in the FFN
 
     /* Training hyperparameters */
     int epochs;

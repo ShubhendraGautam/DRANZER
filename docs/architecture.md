@@ -178,6 +178,11 @@ With `--rmsnorm`, both post-attention and post-FFN normalization sites use
 the flat parameter layout omits two embedding-width beta vectors per layer. Cached decode uses the
 same equation; training caches normalized rows and row RMS values for the closed-form backward.
 
+With `--gelu`, feed-forward hidden units use the exact erf-based GELU equation in both full-prefix
+and cached decoding. Training retains the pre-activation values required by GELU's derivative;
+ordinary ReLU models do not allocate that activation buffer. GELU changes no parameter tensors or
+bundle payload sizes.
+
 Forward matmuls normally use the CPU dispatch path (or opt-in GPU path), which picks a kernel from
 the shape of the call and the instruction set the running CPU supports - see
 [CPU matmul kernels](matmul.md). Setting `model.use_scalar_matmul`
@@ -261,9 +266,9 @@ Headers live under `src/include/` and mirror the source hierarchy. External call
 
 ## Current design boundaries
 
-- Fixed sinusoidal positional encodings
-- ReLU feed-forward network with width `4 × embedding_dim`
-- Ring-KV-cached generation with a fixed retained window and absolute sinusoidal positions
+- Fixed sinusoidal positional encodings by default, with optional RoPE
+- ReLU feed-forward network with width `4 × embedding_dim` by default, with optional GELU
+- Ring-KV-cached generation with a fixed retained window and absolute position tracking
 - Last-position next-token prediction
 - Linux-focused runtime and hardware probing
 - Optional NVIDIA-only GPU acceleration for forward matmuls

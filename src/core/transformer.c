@@ -459,13 +459,20 @@ model_errors_t model_forward_hidden_masked(
         zero_padded_rows(model, model->cache_attn_ln_out[l], seq_len,
                          embedding_dim);
 
-        /* FFN sub-block: matmul -> bias -> ReLU -> matmul -> bias -> dropout -> residual -> LN */
+        /* FFN sub-block: matmul -> bias -> activation -> matmul -> bias -> dropout -> residual -> LN */
         float *x1 = model->cache_attn_ln_out[l];
         model_dispatch_matmul(model, x1, layer->W_ff1, model->cache_ff_hidden[l], seq_len, embedding_dim, ffn_dim);
         for (size_t i = 0; i < seq_len; i++) {
             for (size_t d = 0; d < ffn_dim; d++) {
                 float *v = &model->cache_ff_hidden[l][i * ffn_dim + d];
-                *v = relu(*v + layer->b_ff1[d]);
+                float pre_activation = *v + layer->b_ff1[d];
+                if (model_uses_gelu(model)) {
+                    model->cache_ff_pre_activation[l][i * ffn_dim + d] =
+                        pre_activation;
+                    *v = gelu(pre_activation);
+                } else {
+                    *v = relu(pre_activation);
+                }
             }
         }
         model_dispatch_matmul(model, model->cache_ff_hidden[l], layer->W_ff2, model->ws_fwd_ff_raw,
@@ -794,7 +801,10 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
         model_dispatch_matmul(model, cache->attn_norm, layer->W_ff1, cache->ff_hidden,
                         1, embedding_dim, ffn_dim);
         for (size_t d = 0; d < ffn_dim; d++) {
-            cache->ff_hidden[d] = relu(cache->ff_hidden[d] + layer->b_ff1[d]);
+            float pre_activation = cache->ff_hidden[d] + layer->b_ff1[d];
+            cache->ff_hidden[d] = model_uses_gelu(model)
+                                      ? gelu(pre_activation)
+                                      : relu(pre_activation);
         }
         model_dispatch_matmul(model, cache->ff_hidden, layer->W_ff2, cache->ff_raw,
                         1, ffn_dim, embedding_dim);

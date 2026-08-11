@@ -71,7 +71,7 @@ static void backward_layer_stack(neural_model_t *model,
          * path, not the skip connection), so it is ALSO the residual
          * branch's contribution to dL/dx1 as-is. The FFN path itself needs
          * dropout backward applied first, on a separate copy, before
-         * continuing through b_ff2/W_ff2/ReLU/W_ff1. */
+         * continuing through b_ff2/W_ff2/activation/W_ff1. */
         memcpy(model->ws_d_ffn_dropout, model->ws_d_s2, seq_len * embedding_dim * sizeof(float));
         dropout_backward(model->ws_d_ffn_dropout, model->cache_ffn_dropout_mask[l],
                           seq_len * embedding_dim, model->dropout_rate);
@@ -88,9 +88,13 @@ static void backward_layer_stack(neural_model_t *model,
         model_dispatch_backward_input(model, model->ws_d_ffn_dropout, layer->W_ff2, model->ws_d_ff_hidden,
                                seq_len, ffn_dim, embedding_dim);
 
-        /* ReLU backward, in place, using the cached post-ReLU activations as the indicator */
+        /* Activation backward. ReLU can use its cached output as the sign
+         * indicator; GELU needs the pre-activation cached by forward. */
         for (size_t idx = 0; idx < seq_len * ffn_dim; idx++) {
-            model->ws_d_ff_hidden[idx] *= relu_derivative(model->cache_ff_hidden[l][idx]);
+            float derivative = model_uses_gelu(model)
+                ? gelu_derivative(model->cache_ff_pre_activation[l][idx])
+                : relu_derivative(model->cache_ff_hidden[l][idx]);
+            model->ws_d_ff_hidden[idx] *= derivative;
         }
 
         for (size_t d = 0; d < ffn_dim; d++) {

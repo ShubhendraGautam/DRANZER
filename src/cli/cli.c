@@ -40,6 +40,7 @@ void cli_get_defaults(cli_args_t *out_args) {
     out_args->tie_embeddings = 0;
     out_args->use_rope = 0;
     out_args->use_rmsnorm = 0;
+    out_args->use_gelu = 0;
 
     /* Training defaults */
     out_args->epochs = 1;
@@ -120,7 +121,8 @@ void cli_print_help(const char *program_name) {
     printf("                            more context at a proportional cost in compute.\n");
     printf("  --tie-embeddings          Share token embeddings with the output projection, reducing parameters\n");
     printf("  --rope                    Rotate attention queries/keys by position instead of adding sinusoidal embeddings\n");
-    printf("  --rmsnorm                 Use RMSNorm without beta instead of LayerNorm\n\n");
+    printf("  --rmsnorm                 Use RMSNorm without beta instead of LayerNorm\n");
+    printf("  --gelu                    Use GELU instead of ReLU in feed-forward layers\n\n");
 
     printf("EVALUATION OPTIONS:\n");
     printf("  --input FILE              Explicit held-out corpus (required by eval mode)\n");
@@ -337,6 +339,9 @@ int cli_parse(int argc, char *argv[], cli_args_t *out_args) {
         } else if (strcmp(arg, "--rmsnorm") == 0) {
             out_args->use_rmsnorm = 1;
             ok = 1;
+        } else if (strcmp(arg, "--gelu") == 0) {
+            out_args->use_gelu = 1;
+            ok = 1;
         } else if (strcmp(arg, "--debug") == 0) {
             out_args->debug = 1;
             ok = 1;
@@ -520,13 +525,14 @@ void cli_print_args(const cli_args_t *args) {
             printf("  Model: %s\n", args->model_path);
             printf("  Tokenizer: %s\n", args->tokenizer_path[0] ? args->tokenizer_path : "<model>.tokenizer");
             printf("  Checkpoints: %s\n", args->checkpoint_dir);
-            printf("  Architecture: vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu train_window=%zu train_stride=%zu tied_embeddings=%s rope=%s rmsnorm=%s\n",
+            printf("  Architecture: vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu train_window=%zu train_stride=%zu tied_embeddings=%s rope=%s rmsnorm=%s gelu=%s\n",
                    args->vocab_size, args->embedding_dim, args->num_heads, args->num_layers,
                    args->max_seq_len, args->train_window,
                    args->train_stride ? args->train_stride : args->train_window,
                    args->tie_embeddings ? "yes" : "no",
                    args->use_rope ? "yes" : "no",
-                   args->use_rmsnorm ? "yes" : "no");
+                   args->use_rmsnorm ? "yes" : "no",
+                   args->use_gelu ? "yes" : "no");
             printf("  Epochs: %d\n", args->epochs);
             printf("  Batch size: %d\n", args->batch_size);
             printf("  Gradient accumulation: %d minibatch(es) per optimizer step\n",
