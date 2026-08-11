@@ -154,4 +154,46 @@ const char *stat_verdict_name(stat_verdict_t verdict);
  * asks, and answering it with a number beats answering it with a shrug. */
 size_t stat_pairs_needed(const stat_paired_t *comparison);
 
+/* Adaptive estimate of the between-seed quality floor.
+ *
+ * The floor is the sample standard deviation of one fixed configuration's
+ * held-out cross-entropy across seeds. It is deliberately not the observed
+ * min/max range (which grows as seeds are added) or the confidence interval of
+ * the mean (which answers how precisely the mean is known, not how much seeds
+ * move an individual run). Architecture deltas narrower than this value must
+ * be passed to stat_paired_compare() as its noise_floor.
+ *
+ * N is selected from the observed sample rather than fixed in advance. After
+ * minimum_samples, collection is ready when the 95% bootstrap interval's
+ * half-width for the mean is at most target_precision_ratio times the observed
+ * standard deviation. Otherwise recommended_total estimates the N needed under
+ * the ordinary 1/sqrt(N) interval-width scaling, capped at maximum_samples.
+ */
+typedef enum {
+    STAT_SEED_FLOOR_READY = 0,
+    STAT_SEED_FLOOR_COLLECT_MORE,
+    STAT_SEED_FLOOR_LIMIT_REACHED,
+    STAT_SEED_FLOOR_INVALID
+} stat_seed_floor_status_t;
+
+typedef struct {
+    stat_summary_t losses;
+    stat_interval_t mean_interval;
+    double noise_floor;
+    double precision_ratio;
+    double target_precision_ratio;
+    size_t minimum_samples;
+    size_t maximum_samples;
+    size_t recommended_total;
+    stat_seed_floor_status_t status;
+} stat_seed_floor_t;
+
+stat_seed_floor_t stat_seed_floor(const double *losses, size_t count,
+                                  size_t minimum_samples,
+                                  size_t maximum_samples,
+                                  double target_precision_ratio,
+                                  size_t resamples, uint64_t seed);
+
+const char *stat_seed_floor_status_name(stat_seed_floor_status_t status);
+
 #endif /* STATISTICS_H */

@@ -730,14 +730,15 @@ speed/memory improvement is reproducible on identified hardware.
   at this project's model sizes the floor may well be larger than the effects being chased. Finding
   that out first is cheap; finding it out after publishing a ranking is not.
 
-  **Now blocked on the corpus, not on compute.** The 178 MB corpus this project trains on has
-  unverified provenance (`data/corpora/simple-wikipedia-178mb.manifest`), so a floor measured on it
-  would be a number no reader could reproduce, and `scripts/corpus.sh verify --require-verified`
-  refuses it by design. Establishing where that corpus came from — or replacing it with one that can
-  be cited — is the prerequisite. The harness the floor feeds into is built and tested:
-  `src/include/tools/statistics.h` returns "unresolvable at this N" as a verdict and treats an
-  interval that clears zero but sits inside the noise floor as unresolved
-  (`tests/core/test_statistics.c`).
+  **Implementation is ready; measurement is deferred to the bundled run.** The earlier corpus
+  blocker is removed by the verified Project Gutenberg ebook 100 manifest. The pre-registered
+  `experiments/seed-floor-small/recipe.env` varies only the seed, requires 8–20 samples, and chooses
+  N from a deterministic bootstrap precision criterion instead of fixing it after seeing a result.
+  `seed_floor.out` emits the machine-readable sample standard deviation used as the comparison floor,
+  and `scripts/research/measure_seed_floor.sh` preserves every seed/loss/model hash plus the recipe,
+  corpus, compiler, and source identities. The shared comparison API still returns "unresolvable at
+  this N" when an interval clears zero but sits inside that floor. No floor number is claimed until
+  the reviewed source is built and the sweep runs in the final validation pass.
 - [ ] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
 - [~] Add padding and general attention masks before variable-length batching.

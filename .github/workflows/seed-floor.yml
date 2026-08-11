@@ -1,0 +1,35 @@
+name: Seed variance floor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seed-floor-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the pre-registered adaptive seed sweep
+        run: >-
+          scripts/research/measure_seed_floor.sh
+          --output dist/research/seed-floor-small-v1
+
+      - name: Upload raw cells and the machine-readable floor
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: seed-floor-small-v1-${{ github.run_number }}
+          path: dist/research/seed-floor-small-v1/
+          if-no-files-found: error
+          retention-days: 90

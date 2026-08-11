@@ -222,3 +222,76 @@ size_t stat_pairs_needed(const stat_paired_t *comparison) {
     if (!(needed > 0.0) || needed > 1e9) return SIZE_MAX;
     return (size_t)ceil(needed);
 }
+
+stat_seed_floor_t stat_seed_floor(const double *losses, size_t count,
+                                  size_t minimum_samples,
+                                  size_t maximum_samples,
+                                  double target_precision_ratio,
+                                  size_t resamples, uint64_t seed) {
+    stat_seed_floor_t floor;
+    memset(&floor, 0, sizeof(floor));
+    floor.status = STAT_SEED_FLOOR_INVALID;
+    floor.minimum_samples = minimum_samples;
+    floor.maximum_samples = maximum_samples;
+    floor.target_precision_ratio = target_precision_ratio;
+
+    if (!losses || count == 0 || minimum_samples < 2 ||
+        maximum_samples < minimum_samples || count > maximum_samples ||
+        !(target_precision_ratio > 0.0) || resamples == 0) {
+        return floor;
+    }
+
+    floor.losses = stat_summarize(losses, count);
+    floor.mean_interval = stat_bootstrap_mean(losses, count, resamples, 0.95, seed);
+    floor.noise_floor = floor.losses.stddev;
+
+    if (count < minimum_samples) {
+        floor.status = STAT_SEED_FLOOR_COLLECT_MORE;
+        floor.recommended_total = minimum_samples;
+        return floor;
+    }
+
+    if (floor.noise_floor == 0.0) {
+        /* Identical losses across the minimum sample are a real measured zero,
+         * not a divide-by-zero failure. Additional seeds may falsify it later,
+         * but the same is true of any finite sample. */
+        floor.precision_ratio = 0.0;
+        floor.recommended_total = count;
+        floor.status = STAT_SEED_FLOOR_READY;
+        return floor;
+    }
+
+    double half_width = 0.5 * (floor.mean_interval.high - floor.mean_interval.low);
+    floor.precision_ratio = half_width / floor.noise_floor;
+    if (floor.precision_ratio <= target_precision_ratio) {
+        floor.recommended_total = count;
+        floor.status = STAT_SEED_FLOOR_READY;
+        return floor;
+    }
+
+    if (count >= maximum_samples) {
+        floor.recommended_total = maximum_samples;
+        floor.status = STAT_SEED_FLOOR_LIMIT_REACHED;
+        return floor;
+    }
+
+    double scale = floor.precision_ratio / target_precision_ratio;
+    double estimated = ceil((double)count * scale * scale);
+    size_t recommended = estimated >= (double)SIZE_MAX ? maximum_samples
+                                                        : (size_t)estimated;
+    if (recommended <= count) recommended = count + 1;
+    if (recommended > maximum_samples) recommended = maximum_samples;
+    floor.recommended_total = recommended;
+    floor.status = STAT_SEED_FLOOR_COLLECT_MORE;
+    return floor;
+}
+
+const char *stat_seed_floor_status_name(stat_seed_floor_status_t status) {
+    switch (status) {
+        case STAT_SEED_FLOOR_READY:         return "ready";
+        case STAT_SEED_FLOOR_COLLECT_MORE:  return "collect_more";
+        case STAT_SEED_FLOOR_LIMIT_REACHED: return "limit_reached";
+        case STAT_SEED_FLOOR_INVALID:       return "invalid";
+        default:                            return "unknown";
+    }
+}

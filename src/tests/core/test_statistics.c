@@ -43,6 +43,19 @@ static void expect_verdict(const char *what, stat_verdict_t got,
     }
 }
 
+static void expect_floor_status(const char *what, stat_seed_floor_status_t got,
+                                stat_seed_floor_status_t want) {
+    int ok = got == want;
+    printf("  %-46s %-24s  %s\n", what, stat_seed_floor_status_name(got),
+           ok ? "ok" : "FAIL");
+    if (!ok) {
+        fprintf(stderr, "FAIL: %s gave \"%s\", expected \"%s\"\n", what,
+                stat_seed_floor_status_name(got),
+                stat_seed_floor_status_name(want));
+        failures++;
+    }
+}
+
 int main(void) {
     /* ---- 1. Summary statistics ----
      *
@@ -227,6 +240,42 @@ int main(void) {
     expect_close("ratio pairs (one denominator was zero)",
                  (double)skipped.ratio_pairs, 3.0, 0.0);
     expect_close("ratio point over the usable pairs", skipped.ratio.point, 2.0, 1e-12);
+
+    /* ---- 7. Adaptive seed-floor collection ----
+     * Three observations cannot satisfy a four-seed minimum, independent of
+     * how narrow they look. The recommended total must therefore be four. */
+    const double early_losses[] = {2.0, 2.1, 1.9};
+    stat_seed_floor_t early = stat_seed_floor(early_losses, 3, 4, 12,
+                                              0.5, 2000, 17);
+    expect_floor_status("three samples do not clear a four-seed minimum",
+                        early.status, STAT_SEED_FLOOR_COLLECT_MORE);
+    expect_close("minimum is the next requested total",
+                 (double)early.recommended_total, 4.0, 0.0);
+
+    /* A measured zero spread after the minimum is ready and is represented as
+     * zero, not NaN or infinity from the precision-ratio division. */
+    const double identical_losses[] = {2.5, 2.5, 2.5, 2.5};
+    stat_seed_floor_t identical = stat_seed_floor(identical_losses, 4, 4, 12,
+                                                  0.25, 2000, 17);
+    expect_floor_status("identical minimum sample is a measured zero floor",
+                        identical.status, STAT_SEED_FLOOR_READY);
+    expect_close("zero-spread noise floor", identical.noise_floor, 0.0, 0.0);
+    expect_close("zero-spread precision ratio", identical.precision_ratio, 0.0, 0.0);
+
+    /* At the declared maximum an imprecise estimate is explicit instead of
+     * silently being promoted to ready. {1,2,3,4} has sample variance 5/3. */
+    const double limited_losses[] = {1.0, 2.0, 3.0, 4.0};
+    stat_seed_floor_t limited = stat_seed_floor(limited_losses, 4, 4, 4,
+                                                0.01, 2000, 17);
+    expect_floor_status("maximum reached without target precision",
+                        limited.status, STAT_SEED_FLOOR_LIMIT_REACHED);
+    expect_close("floor is sample standard deviation",
+                 limited.noise_floor, sqrt(5.0 / 3.0), 1e-12);
+
+    stat_seed_floor_t invalid = stat_seed_floor(limited_losses, 4, 1, 4,
+                                                0.25, 2000, 17);
+    expect_floor_status("a one-seed minimum is invalid", invalid.status,
+                        STAT_SEED_FLOOR_INVALID);
 
     printf("\n%s\n", failures == 0 ? "STATISTICS CHECK PASSED"
                                    : "STATISTICS CHECK FAILED");

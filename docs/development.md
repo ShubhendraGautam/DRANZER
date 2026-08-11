@@ -58,6 +58,7 @@ fails.
 | `test_perf_invariants.c` | Ratio-only CPU timing gates: backward matmuls within reach of a forward matmul of equal FLOP count, tuned kernel beats the scalar reference, and each AVX-512 path beats its portable counterpart |
 | `test_gpu_latency_invariants.c` | Ratio-only GPU timing gates: fixed per-call cost is amortized by larger work, the weight cache removes a per-call upload, and the tiled kernel is not a regression on the naive one |
 | `test_gpu_training_backward.c` | CPU/GPU agreement on a model large enough that the dispatched backward kernels are actually used |
+| `test_statistics.c` | Shared summaries, bootstrap intervals, paired verdicts, and adaptive seed-floor stopping |
 
 GPU tests return success with a clear `SKIP` message when CUDA hardware is unavailable.
 
@@ -70,7 +71,7 @@ and verifies that `libdranzer.so` exports exactly the checked-in
 `tests/compat/public-api-v1.symbols` baseline under the documented `DRANZER_1.0` ABI. This gate is
 also a prerequisite of `make test`.
 
-The suite also runs two shell-level integration gates:
+The suite also runs shell-level integration gates:
 
 - `test_eval_cli.sh` exercises train-time validation and standalone evaluation, deletes the
   tokenizer sidecar to prove the bundle is self-contained, rejects tokenizer overrides, and
@@ -79,6 +80,13 @@ The suite also runs two shell-level integration gates:
   dropout-and-scheduled-AdamW run at a real periodic checkpoint, removes the model and tokenizer
   sidecar, resumes, and requires byte-identical final model and checkpoint files. It also covers
   terminal `--resume latest` and rejects trajectory-changing overrides.
+- `test_determinism.sh` runs the same stochastic training recipe twice and
+  requires byte-identical models, tokenizers, checkpoints, and loss logs.
+- `test_libc_independence.sh` pins the model fingerprint path against libc RNG
+  state so a platform implementation cannot silently rename a seed.
+- `test_seed_floor_cli.sh` pins ready/collect-more states and rejects duplicate
+  seeds, non-finite losses, and malformed model hashes before a floor artifact
+  can be reported.
 
 ## Build variants
 

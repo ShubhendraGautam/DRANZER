@@ -449,6 +449,14 @@ experiment re-implements it, and the one that forgets is the one that gets publi
   than picked in advance, and the harness refusing to report a comparison narrower than it without
   labelling it unresolvable.
 
+  **Implementation ready, measurement deferred.** The small tier now has a verified public corpus
+  and pre-registered 8–20-seed recipe. `seed_floor.out` uses the shared statistics module to stop
+  when the bootstrap precision is small relative to the observed sample standard deviation, emits
+  that standard deviation as `noise_floor`, and reports `limit_reached` rather than relaxing the
+  criterion. The runner records each seed, held-out loss, model hash, corpus/recipe hash, compiler,
+  and source revision. Tests cover the adaptive states and reject duplicate seeds, non-finite loss,
+  and malformed hashes. This stays unchecked until the final bundle actually records a ready floor.
+
 - [x] **P1. A shared statistics module, used by every experiment.**
   Paired comparisons where the design is paired (same seeds, both arms), bootstrap confidence
   intervals, effect size with its interval rather than a bare mean, and an explicit "unresolvable at
