@@ -64,6 +64,8 @@ void clip_gradients(neural_model_t *model, float max_norm) {
 }
 
 model_errors_t model_optimizer_step(neural_model_t *model) {
+    if (!model || model->params_read_only) return MODEL_INVALID_INPUT;
+
     if (model->grad_clip_norm > 0.0f) {
         clip_gradients(model, model->grad_clip_norm);
     }

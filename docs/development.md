@@ -229,6 +229,19 @@ compiler, OS/kernel/architecture, CPU model, detected SIMD instruction set, onli
 OpenMP version, and maximum thread
 count alongside its measurements.
 
+Bundle startup and resident memory have a focused two-process comparison. It accepts version-1
+float bundles because those can be mapped without representation conversion:
+
+```bash
+make bench-bundle-load
+./bench_bundle_load.out path/to/model.bin --mode copy --repeats 7
+./bench_bundle_load.out path/to/model.bin --mode mmap --repeats 7
+```
+
+Both rows land in `bundle_load_results_v1.csv` with the same build and host provenance as the other
+benchmarks. Keep the modes in separate invocations: peak RSS is process-wide and cannot be reset
+after the copy loader has established a higher watermark.
+
 To isolate the matrix-multiplication kernels from the rest of the model, compare them on the decode,
 prefill, and training shapes the model actually issues:
 

@@ -84,6 +84,34 @@ Saving writes a process-specific temporary file beside the destination, flushes 
 publishes it with one atomic rename. A failed save removes the temporary file and leaves an existing
 destination untouched.
 
+## Read-only memory-mapped loading
+
+`model_bundle_load_mmap()` maps a version-1 bundle with `MAP_PRIVATE`/`PROT_READ` and lays every
+named parameter view directly over the canonical weight payload. It still validates the header,
+exact file size, footer, weight checksum, tokenizer checksum, model shape, and tokenizer vocabulary
+before publishing the model. It avoids allocating, randomly initializing, and then overwriting a
+second parameter buffer. `model_free()` owns and releases the mapping after a successful load.
+
+A mapped model is explicitly inference-only. Training accumulation, optimizer steps, and direct
+weight decay return `MODEL_INVALID_INPUT` before writing. Version-2 bundles return
+`BUNDLE_UNSUPPORTED` from this entry point because their packed codes and scales must be unpacked;
+use `model_bundle_load()` when a writable float model is required. Direct mapping also requires a
+little-endian host with IEEE-754 binary32, matching the bytes in version 1.
+
+Build the focused measurement tool and run each mode in a separate process so peak RSS is not
+contaminated by the other allocator strategy:
+
+```bash
+make -C src bench-bundle-load
+./src/bench_bundle_load.out model.bin --mode copy --repeats 7
+./src/bench_bundle_load.out model.bin --mode mmap --repeats 7
+```
+
+Each invocation reports median checked-load startup time and process peak RSS, then appends the
+artifact size, parameter count, and full compiler/host provenance to
+`bundle_load_results_v1.csv`. The implementation and measurement path are present, but their final
+numbers are intentionally deferred to the project's bundled validation run.
+
 ## Compatibility policy
 
 - Version 1 and version 2 bundles are read exactly as specified above. Unknown bundle versions fail explicitly;
@@ -100,7 +128,8 @@ destination untouched.
 - Checkpoint compatibility is independent of bundle compatibility. A checkpoint is tied to exact
   resume state; a bundle is the smaller inference/evaluation artifact.
 
-`test_model_bundle.c` protects exact version-1 round trips, version-2 reconstruction against the
+`test_model_bundle.c` protects exact copied and memory-mapped version-1 round trips, mapped-model
+ownership and training rejection, version-2 reconstruction against the
 simulated quantizer, artifact-size accounting, both payload checksums, tensor-shape validation,
 truncation, unsupported versions, unsafe shapes, malformed tokenizer bounds, a deterministic
 mutation sweep, and legacy loading. CLI integration also deletes the sidecar before evaluation to

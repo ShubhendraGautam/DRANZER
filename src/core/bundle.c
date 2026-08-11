@@ -2,10 +2,12 @@
 #include "core/model.h"
 #include "core/fingerprint.h"
 #include "core/model_params.h"
+#include <fcntl.h>
 #include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -28,6 +30,11 @@
 static int float32_supported(void) {
     return sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 &&
            FLT_MAX_EXP == 128;
+}
+
+static int host_is_little_endian(void) {
+    const uint32_t value = UINT32_C(1);
+    return *(const uint8_t *)&value == 1;
 }
 
 static void encode_u32(uint8_t bytes[4], uint32_t value) {
@@ -768,6 +775,170 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
         encoder, tokenizer_data, (size_t)tokenizer_bytes);
     free(tokenizer_data);
     if (tokenizer_rc != BPE_SUCCESS || encoder->max_vocab_size != loaded.vocab_size) {
+        bpe_encoder_free(encoder);
+        free(encoder);
+        model_free(&loaded);
+        return tokenizer_rc == BPE_ALLOCATION_FAILURE
+                   ? BUNDLE_ALLOCATION_FAILURE : BUNDLE_FORMAT_ERROR;
+    }
+
+    loaded.training_steps = training_steps;
+    memcpy(&loaded.current_loss, &loss_bits, sizeof(loss_bits));
+    out_metadata->train_window = (size_t)train_window;
+    out_metadata->seed = seed;
+    out_metadata->input_fingerprint = input_fingerprint;
+    out_metadata->input_bytes = input_bytes;
+    *model = loaded;
+    *out_encoder = encoder;
+    return BUNDLE_SUCCESS;
+}
+
+bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
+                                       bpe_encoder_t **out_encoder,
+                                       model_bundle_metadata_t *out_metadata,
+                                       const char *filename) {
+    if (!model || !out_encoder || !out_metadata || !filename) {
+        return BUNDLE_FORMAT_ERROR;
+    }
+    *out_encoder = NULL;
+    memset(out_metadata, 0, sizeof(*out_metadata));
+
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) return BUNDLE_IO_ERROR;
+    struct stat status;
+    if (fstat(fd, &status) != 0 || status.st_size < 0) {
+        close(fd);
+        return BUNDLE_IO_ERROR;
+    }
+    uint64_t file_size_u64 = (uint64_t)status.st_size;
+    if (file_size_u64 < 8) {
+        close(fd);
+        return BUNDLE_NOT_BUNDLE;
+    }
+    if (file_size_u64 > SIZE_MAX) {
+        close(fd);
+        return BUNDLE_UNSUPPORTED;
+    }
+    size_t file_size = (size_t)file_size_u64;
+    uint8_t *mapping = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapping == MAP_FAILED) return BUNDLE_IO_ERROR;
+
+    if (memcmp(mapping, BUNDLE_MAGIC, 8) != 0) {
+        munmap(mapping, file_size);
+        return BUNDLE_NOT_BUNDLE;
+    }
+    if (file_size < BUNDLE_HEADER_V1_SIZE + 8) {
+        munmap(mapping, file_size);
+        return BUNDLE_FORMAT_ERROR;
+    }
+    uint32_t version = decode_u32(mapping + 8);
+    uint32_t numeric = decode_u32(mapping + 16);
+    uint32_t header_size = decode_u32(mapping + 20);
+    if (version != BUNDLE_VERSION_FLOAT32 ||
+        numeric != BUNDLE_NUMERIC_FLOAT32 ||
+        header_size != BUNDLE_HEADER_V1_SIZE ||
+        !float32_supported() || !host_is_little_endian()) {
+        munmap(mapping, file_size);
+        return BUNDLE_UNSUPPORTED;
+    }
+    if (decode_u32(mapping + 12) != BUNDLE_MARKER) {
+        munmap(mapping, file_size);
+        return BUNDLE_UNSUPPORTED;
+    }
+
+    uint8_t header[BUNDLE_HEADER_V1_SIZE];
+    memcpy(header, mapping, sizeof(header));
+    uint64_t stored_header_checksum =
+        (uint64_t)decode_u32(header + 76) |
+        ((uint64_t)decode_u32(header + 84) << 32);
+    memset(header + 76, 0, 4);
+    memset(header + 84, 0, 4);
+    if (checksum_buffer(header, sizeof(header)) != stored_header_checksum) {
+        munmap(mapping, file_size);
+        return BUNDLE_CHECKSUM_ERROR;
+    }
+
+    uint64_t dims[6];
+    for (size_t i = 0; i < 6; i++) {
+        dims[i] = decode_u64(mapping + 24 + i * 8);
+        if (dims[i] > SIZE_MAX) {
+            munmap(mapping, file_size);
+            return BUNDLE_FORMAT_ERROR;
+        }
+    }
+    uint32_t training_steps = decode_u32(mapping + 72);
+    uint32_t loss_bits = decode_u32(mapping + 80);
+    uint64_t train_window = decode_u64(mapping + 88);
+    uint64_t seed = decode_u64(mapping + 96);
+    uint64_t input_fingerprint = decode_u64(mapping + 104);
+    uint64_t input_bytes = decode_u64(mapping + 112);
+    uint64_t weight_bytes = decode_u64(mapping + 120);
+    uint64_t tokenizer_bytes = decode_u64(mapping + 128);
+    uint64_t expected_weight_checksum = decode_u64(mapping + 136);
+    uint64_t expected_tokenizer_checksum = decode_u64(mapping + 144);
+    if (!bundle_shape_valid(dims) || dims[5] > UINT64_MAX / 4 ||
+        weight_bytes != dims[5] * 4 || tokenizer_bytes < 24 ||
+        tokenizer_bytes > SIZE_MAX || train_window == 0 ||
+        train_window > dims[4] || train_window > SIZE_MAX) {
+        munmap(mapping, file_size);
+        return BUNDLE_FORMAT_ERROR;
+    }
+    uint64_t expected_file_size = 0;
+    if (!checked_file_size(BUNDLE_HEADER_V1_SIZE, weight_bytes,
+                           tokenizer_bytes, &expected_file_size) ||
+        expected_file_size != file_size_u64) {
+        munmap(mapping, file_size);
+        return BUNDLE_FORMAT_ERROR;
+    }
+
+    const uint8_t *weight_data = mapping + BUNDLE_HEADER_V1_SIZE;
+    const uint8_t *tokenizer_data = weight_data + (size_t)weight_bytes;
+    if (checksum_buffer(weight_data, (size_t)weight_bytes) !=
+        expected_weight_checksum ||
+        checksum_buffer(tokenizer_data, (size_t)tokenizer_bytes) !=
+        expected_tokenizer_checksum) {
+        munmap(mapping, file_size);
+        return BUNDLE_CHECKSUM_ERROR;
+    }
+    if (memcmp(mapping + file_size - 8, BUNDLE_FOOTER, 8) != 0) {
+        munmap(mapping, file_size);
+        return BUNDLE_FORMAT_ERROR;
+    }
+    uint64_t tokenizer_max_vocab = 0;
+    if (bpe_encoder_portable_max_vocab(tokenizer_data,
+                                       (size_t)tokenizer_bytes,
+                                       &tokenizer_max_vocab) != BPE_SUCCESS ||
+        tokenizer_max_vocab != dims[0]) {
+        munmap(mapping, file_size);
+        return BUNDLE_FORMAT_ERROR;
+    }
+
+    neural_model_t loaded = {0};
+    model_errors_t model_rc = model_new_external_parameters(
+        &loaded, (size_t)dims[0], (size_t)dims[1], (size_t)dims[2],
+        (size_t)dims[3], (size_t)dims[4],
+        (float *)(void *)weight_data);
+    if (model_rc != MODEL_SUCCESS ||
+        loaded.total_param_count != (size_t)dims[5]) {
+        model_free(&loaded);
+        munmap(mapping, file_size);
+        return model_rc == MODEL_ALLOCATION_FAILURE
+                   ? BUNDLE_ALLOCATION_FAILURE : BUNDLE_FORMAT_ERROR;
+    }
+    /* From this point model_free owns the mapping on every exit path. */
+    loaded.params_mapping = mapping;
+    loaded.params_mapping_size = file_size;
+
+    bpe_encoder_t *encoder = calloc(1, sizeof(*encoder));
+    if (!encoder) {
+        model_free(&loaded);
+        return BUNDLE_ALLOCATION_FAILURE;
+    }
+    bpe_errors_t tokenizer_rc = bpe_encoder_deserialize_portable(
+        encoder, tokenizer_data, (size_t)tokenizer_bytes);
+    if (tokenizer_rc != BPE_SUCCESS ||
+        encoder->max_vocab_size != loaded.vocab_size) {
         bpe_encoder_free(encoder);
         free(encoder);
         model_free(&loaded);

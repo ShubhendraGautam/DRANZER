@@ -62,4 +62,15 @@ bundle_errors_t model_bundle_load(neural_model_t *model,
                                   model_bundle_metadata_t *out_metadata,
                                   const char *filename);
 
+/* Map a version-1 float32 bundle and make every parameter view point directly
+ * into its read-only weight payload. This avoids the parameter allocation,
+ * initialization, and copy performed by model_bundle_load(); model_free()
+ * releases the mapping. The resulting model is inference-only. Quantized
+ * version-2 bundles require unpacking and therefore return BUNDLE_UNSUPPORTED.
+ * As above, model must be zero-initialized. */
+bundle_errors_t model_bundle_load_mmap(neural_model_t *model,
+                                       bpe_encoder_t **out_encoder,
+                                       model_bundle_metadata_t *out_metadata,
+                                       const char *filename);
+
 #endif /* MODEL_BUNDLE_H */

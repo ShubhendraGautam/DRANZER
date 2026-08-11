@@ -3,6 +3,7 @@
 #include "byte_pair_encoding.h"
 #include "core/bundle.h"
 #include "core/model.h"
+#include "core/weight_decay.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,6 +99,20 @@ static bundle_errors_t load_and_release(const char *path) {
     return rc;
 }
 
+static bundle_errors_t mmap_load_and_release(const char *path) {
+    neural_model_t loaded = {0};
+    bpe_encoder_t *encoder = NULL;
+    model_bundle_metadata_t metadata = {0};
+    bundle_errors_t rc = model_bundle_load_mmap(
+        &loaded, &encoder, &metadata, path);
+    if (rc == BUNDLE_SUCCESS) {
+        model_free(&loaded);
+        bpe_encoder_free(encoder);
+        free(encoder);
+    }
+    return rc;
+}
+
 int main(void) {
     char bundle_path[160], quantized_path[160], corrupt_path[160], legacy_path[160];
     snprintf(bundle_path, sizeof(bundle_path), "/tmp/dranzer-bundle-%ld.bin", (long)getpid());
@@ -175,6 +190,58 @@ int main(void) {
     }
     if (failed) goto cleanup;
 
+    /* The mmap path preserves the exact version-1 representation while
+     * borrowing its parameter bytes directly from a read-only file mapping.
+     * Inference remains available; every training entry point must reject the
+     * model before attempting to update those bytes. */
+    neural_model_t mapped = {0};
+    bpe_encoder_t *mapped_encoder = NULL;
+    model_bundle_metadata_t mapped_metadata = {0};
+    if (model_bundle_load_mmap(&mapped, &mapped_encoder, &mapped_metadata,
+                               bundle_path) != BUNDLE_SUCCESS ||
+        !mapped_encoder || !mapped.params_mapping ||
+        mapped.params_mapping_size == 0 || mapped.params_owned ||
+        !mapped.params_read_only ||
+        mapped.params != (float *)((uint8_t *)mapped.params_mapping +
+                                   BUNDLE_HEADER_SIZE) ||
+        mapped.total_param_count != model.total_param_count ||
+        memcmp(mapped.params, model.params,
+               model.total_param_count * sizeof(float)) != 0 ||
+        mapped.training_steps != model.training_steps ||
+        memcmp(&mapped.current_loss, &model.current_loss, sizeof(float)) != 0 ||
+        mapped_metadata.train_window != metadata.train_window ||
+        mapped_metadata.seed != metadata.seed ||
+        mapped_metadata.input_fingerprint != metadata.input_fingerprint ||
+        mapped_metadata.input_bytes != metadata.input_bytes ||
+        mapped_encoder->vocab_size != encoder.vocab_size ||
+        model_predict_next_token(&mapped, context, 4) !=
+            model_predict_next_token(&model, context, 4)) {
+        fprintf(stderr, "mmap bundle load changed model, tokenizer, or metadata\n");
+        failed = 1;
+    } else {
+        uint32_t target = 5;
+        model_quant_config_t rejected_quantization;
+        model_quantize_default_config(&rejected_quantization);
+        rejected_quantization.bits = 8;
+        if (model_train_step(&mapped, context, target, 4) !=
+                MODEL_INVALID_INPUT ||
+            model_optimizer_step(&mapped) != MODEL_INVALID_INPUT ||
+            model_apply_weight_decay(&mapped, 0.001f, 0.01f) !=
+                MODEL_INVALID_INPUT ||
+            model_quantize_weights(&mapped, &rejected_quantization, NULL) != -1 ||
+            memcmp(mapped.params, model.params,
+                   model.total_param_count * sizeof(float)) != 0) {
+            fprintf(stderr, "mmap model was not enforced as inference-only\n");
+            failed = 1;
+        }
+    }
+    model_free(&mapped);
+    if (mapped_encoder) {
+        bpe_encoder_free(mapped_encoder);
+        free(mapped_encoder);
+    }
+    if (failed) goto cleanup;
+
     baseline = read_blob(bundle_path, &baseline_size);
     size_t weights_size = model.total_param_count * sizeof(float);
     if (!baseline || baseline_size <= BUNDLE_HEADER_SIZE + weights_size + 8) {
@@ -230,6 +297,10 @@ int main(void) {
         fprintf(stderr, "quantized bundle roundtrip or size accounting failed\n");
         failed = 1;
     }
+    if (mmap_load_and_release(quantized_path) != BUNDLE_UNSUPPORTED) {
+        fprintf(stderr, "mmap loader did not reject unpacking-required v2 bundle\n");
+        failed = 1;
+    }
     model_free(&expected_quantized);
     model_free(&quantized_loaded);
     if (quantized_encoder) {
@@ -267,7 +338,8 @@ int main(void) {
     /* Weight and tokenizer payloads have independent checksums. */
     baseline[BUNDLE_HEADER_SIZE + 3] ^= UINT8_C(0x40);
     if (!write_blob(corrupt_path, baseline, baseline_size) ||
-        load_and_release(corrupt_path) != BUNDLE_CHECKSUM_ERROR) {
+        load_and_release(corrupt_path) != BUNDLE_CHECKSUM_ERROR ||
+        mmap_load_and_release(corrupt_path) != BUNDLE_CHECKSUM_ERROR) {
         fprintf(stderr, "corrupt weight payload was not rejected by checksum\n");
         failed = 1;
         goto cleanup;
@@ -323,7 +395,9 @@ int main(void) {
             break;
         }
         bundle_errors_t rc = load_and_release(corrupt_path);
-        if (rc <= BUNDLE_SUCCESS || rc > BUNDLE_UNSUPPORTED) {
+        bundle_errors_t mmap_rc = mmap_load_and_release(corrupt_path);
+        if (rc <= BUNDLE_SUCCESS || rc > BUNDLE_UNSUPPORTED ||
+            mmap_rc <= BUNDLE_SUCCESS || mmap_rc > BUNDLE_UNSUPPORTED) {
             fprintf(stderr, "mutated bundle was accepted or produced invalid status\n");
             failed = 1;
             break;
@@ -350,7 +424,8 @@ int main(void) {
     /* Compatibility fixture: old host-native weight files are detected as
      * non-bundles and remain readable by the legacy loader. */
     if (model_save(&model, legacy_path) != MODEL_SUCCESS ||
-        load_and_release(legacy_path) != BUNDLE_NOT_BUNDLE) {
+        load_and_release(legacy_path) != BUNDLE_NOT_BUNDLE ||
+        mmap_load_and_release(legacy_path) != BUNDLE_NOT_BUNDLE) {
         fprintf(stderr, "legacy artifact detection failed\n");
         failed = 1;
         goto cleanup;

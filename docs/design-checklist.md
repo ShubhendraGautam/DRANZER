@@ -699,7 +699,14 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   narrow kernels are not wired into `core/transformer.c`; bundle v2 deliberately dequantizes on
   load, and the backward pass is untouched. The existing bf16 bound says INT8/INT4 must beat
   1.21–1.24x while unpacking more expensively; that comparison is now executable but not yet run.
-- [ ] Support memory-mapped weights and measure startup time and resident memory.
+- [~] Support memory-mapped weights and measure startup time and resident memory.
+  Version-1 float bundles now have a checked, read-only `model_bundle_load_mmap()` path whose model
+  views point directly into the mapped payload; ownership, teardown, inference parity, corruption,
+  legacy detection, version-2 rejection, and training rejection are covered in
+  `test_model_bundle.c`. `bench_bundle_load.out` compares median checked-load startup and peak RSS
+  in separate copy/mmap processes with artifact and host provenance. Per the bundled-validation
+  workflow, the test and measurement have been authored but not executed yet; record those final
+  numbers before changing this item to `[x]`.
 - [x] Run the full benchmark nightly on hosted runners and gate on same-run performance invariants
   (`.github/workflows/performance.yml`, `src/tools/perf_check.py`): kernel versus scalar reference,
   shipped kernel versus the fastest candidate beside it, KV-cache benefit, and numerical tolerance.

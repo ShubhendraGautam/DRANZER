@@ -116,6 +116,17 @@ typedef struct {
     float *adam_m, *adam_v;   // Adam moment buffers, same layout as params/grads - lazily allocated (NULL until the first Adam step; see optimizer.c), so plain-SGD deployments never pay for them
     size_t total_param_count;
 
+    /* Parameter-buffer ownership. Ordinary constructors allocate params and
+     * set params_owned. The bundle mmap loader instead points params into a
+     * read-only file mapping, records the mapping base/length, and leaves
+     * params_owned clear. model_free() follows exactly one ownership path.
+     * params_read_only makes training fail with MODEL_INVALID_INPUT before an
+     * optimizer can write into a PROT_READ mapping. */
+    int params_owned;
+    int params_read_only;
+    void *params_mapping;
+    size_t params_mapping_size;
+
     // Embeddings
     float *token_embeddings, *token_embeddings_grad;   // views into params/grads
     float *position_embeddings;   // max_seq_len x embedding_dim (fixed sinusoidal, separately owned, not trained)

@@ -376,6 +376,17 @@ $(GPU_PROBE_TARGET): $(GPU_PROBE_OBJ)
 # model code, hence tools/ - see include/tools/statistics.h.
 TEST_MODEL_OBJ = tools/statistics.o core/model.o core/model_params.o core/model_quantize.o core/quantize.o core/quantized_matmul.o core/parallel.o core/matmul.o core/matmul_x86.o core/matmul_arm.o core/cpu_features.o core/tensor_ops.o core/rng.o core/fingerprint.o core/bf16.o core/transformer.o core/matmul_dispatch.o core/lm_head.o core/weight_decay.o core/optimizer.o core/training.o core/evaluation.o core/bundle.o core/serialization.o core/metrics.o \
                  backends/gpu/gpu_cuda.o backends/gpu/gpu_matmul.o cli/batch.o cli/checkpoint.o cli/cli.o cli/config.o cli/evaluation.o cli/generation.o cli/sampling.o cli/stream.o cli/tokenizer.o
+
+# Compare version-1 bundle allocation/copy loading with the read-only mmap
+# path. Run each mode as its own process so peak RSS remains comparable.
+BENCH_BUNDLE_LOAD_OBJ = tools/bench_bundle_load.o tools/bench_support.o $(TEST_MODEL_OBJ)
+BENCH_BUNDLE_LOAD_TARGET = bench_bundle_load.out
+
+bench-bundle-load: $(BENCH_BUNDLE_LOAD_TARGET)
+
+$(BENCH_BUNDLE_LOAD_TARGET): $(LIB) $(BENCH_BUNDLE_LOAD_OBJ)
+	$(CC) $(BENCH_BUNDLE_LOAD_OBJ) -L$(LIB_DIR) -l$(LIB_NAME) $(CFLAGS) $(LDFLAGS) -ldl -o $(BENCH_BUNDLE_LOAD_TARGET)
+
 # tests/perf/ holds timing tests. They assert ratios between measurements
 # taken in the same process, never absolute times, so a slow or busy machine
 # scales both sides and the assertion holds - see the file header for why
@@ -415,10 +426,11 @@ DEPS = $(OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(BENCH_PARALLEL_OBJ:.o=.d) \
        $(BENCH_QUANT_OBJ:.o=.d) $(BENCH_QUANT_MATMUL_OBJ:.o=.d) \
        $(GPU_PROBE_OBJ:.o=.d) $(GPU_LATENCY_OBJ:.o=.d) \
        $(FINGERPRINT_OBJ:.o=.d) $(BENCH_ATTENTION_OBJ:.o=.d) \
+       $(BENCH_BUNDLE_LOAD_OBJ:.o=.d) \
        $(TEST_MODEL_OBJ:.o=.d)
 
 clean:
-	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS)
+	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(BENCH_BUNDLE_LOAD_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(BENCH_BUNDLE_LOAD_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS)
 	rm -f $(DEPS)
 	$(MAKE) -C $(LIB_DIR) clean
 
@@ -426,4 +438,4 @@ clean:
 # .d (first build, or straight after clean) from being an error.
 -include $(DEPS)
 
-.PHONY: all clean bench bench-parallel bench-quant bench-quantized-matmul profile test gpu-probe gpu-latency arm-check finite-math-check fingerprint bench-attention
+.PHONY: all clean bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check fingerprint bench-attention

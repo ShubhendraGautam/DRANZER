@@ -70,6 +70,19 @@ model_errors_t model_new(neural_model_t *model,
                          size_t num_layers,
                          size_t max_seq_len);
 
+/* Construct the ordinary model views/workspace over caller-supplied parameter
+ * storage, without initializing or taking ownership of that storage. This is
+ * the bundle mmap loader's lifecycle boundary: on success it attaches the
+ * mapping to params_mapping so model_free() releases it; on failure the caller
+ * still owns the storage. The resulting model is inference-only. */
+model_errors_t model_new_external_parameters(neural_model_t *model,
+                                              size_t vocab_size,
+                                              size_t embedding_dim,
+                                              size_t num_heads,
+                                              size_t num_layers,
+                                              size_t max_seq_len,
+                                              float *parameters);
+
 /* Reseed the model-owned dropout stream, without touching the weights.
  *
  * model_new_seeded() already does this from the same seed, so this is only for

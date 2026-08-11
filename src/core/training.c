@@ -128,7 +128,9 @@ model_errors_t model_accumulate_gradients_all(neural_model_t *model,
                                               size_t seq_len,
                                               float *out_loss,
                                               size_t *out_supervised) {
-    if (!model || !token_ids || !targets) return MODEL_INVALID_INPUT;
+    if (!model || model->params_read_only || !token_ids || !targets) {
+        return MODEL_INVALID_INPUT;
+    }
     if (seq_len == 0 || seq_len > model->max_seq_len) return MODEL_INVALID_INPUT;
 
     /* ---- Forward: layer stack, then the head over every position ---- */
@@ -170,7 +172,8 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
                                           size_t seq_len,
                                           float *out_loss) {
 
-    if (!model || !token_ids || target_id >= model->vocab_size) {
+    if (!model || model->params_read_only || !token_ids ||
+        target_id >= model->vocab_size) {
         return MODEL_INVALID_INPUT;
     }
     if (seq_len == 0 || seq_len > model->max_seq_len) {
@@ -225,7 +228,9 @@ model_errors_t model_accumulate_gradients(neural_model_t *model,
 model_errors_t model_apply_accumulated_gradients(neural_model_t *model,
                                                   size_t sample_count,
                                                   float average_loss) {
-    if (!model || sample_count == 0) return MODEL_INVALID_INPUT;
+    if (!model || model->params_read_only || sample_count == 0) {
+        return MODEL_INVALID_INPUT;
+    }
 
     float inverse_count = 1.0f / (float)sample_count;
     for (size_t i = 0; i < model->total_param_count; i++) {

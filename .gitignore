@@ -39,6 +39,7 @@ bench_results*.csv
 matmul_results*.csv
 parallel_results*.csv
 quant_results*.csv
+bundle_load_results*.csv
 perf.data*
 
 # Generated files

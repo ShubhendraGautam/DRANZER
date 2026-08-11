@@ -55,7 +55,7 @@ static int config_valid(const model_quant_config_t *config) {
 int model_quantize_weights(neural_model_t *model,
                            const model_quant_config_t *config,
                            model_quant_report_t *report) {
-    if (!model || !config_valid(config)) return -1;
+    if (!model || model->params_read_only || !config_valid(config)) return -1;
 
     const size_t total = model_param_tensor_count(model);
     if (total == 0) return -1;

@@ -28,7 +28,7 @@ int weight_decay_applies_to(param_kind_t kind) {
 
 model_errors_t model_apply_weight_decay(neural_model_t *model, float lr,
                                         float weight_decay) {
-    if (!model) return MODEL_INVALID_INPUT;
+    if (!model || model->params_read_only) return MODEL_INVALID_INPUT;
     if (weight_decay <= 0.0f) return MODEL_SUCCESS;
 
     /* One allocation per optimizer step, of a few dozen descriptors. That is
