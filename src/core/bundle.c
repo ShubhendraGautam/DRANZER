@@ -150,7 +150,10 @@ static int bundle_shape_valid(const uint64_t dims[6], uint32_t architecture_flag
             &global) ||
         !checked_u64_add(global, vocab, &global) ||
         !checked_u64_multiply(emb2, 12, &layer_square) ||
-        !checked_u64_multiply(embedding, 9, &layer_linear) ||
+        !checked_u64_multiply(
+            embedding,
+            (architecture_flags & MODEL_ARCH_RMSNORM) ? 7 : 9,
+            &layer_linear) ||
         !checked_u64_add(layer_square, layer_linear, &layer_params) ||
         !checked_u64_multiply(layers, layer_params, &all_layers) ||
         !checked_u64_add(global, all_layers, &computed_total) ||

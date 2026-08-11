@@ -58,6 +58,7 @@ typedef struct {
     size_t eval_window;    // 0 = loaded model's max_seq_len
     int tie_embeddings;    // share token embeddings with the output projection
     int use_rope;           // rotary Q/K positions instead of additive sinusoids
+    int use_rmsnorm;        // RMSNorm without beta instead of LayerNorm
 
     /* Training hyperparameters */
     int epochs;

@@ -75,6 +75,23 @@ void layer_norm_backward(float *dL_dout, float *restrict xhat, float *restrict s
                           float *restrict gamma, float *restrict gamma_grad, float *restrict beta_grad,
                           float *dL_dinput, size_t seq_len, size_t size);
 
+/* RMSNorm variants: y = gamma*x/sqrt(mean(x^2)+epsilon). There is no beta
+ * parameter. The cached normalized rows and RMS feed the matching backward. */
+void rms_normalize(const float *input, float *output, size_t size,
+                   const float *gamma, float epsilon);
+void rms_norm_forward_cached(const float *restrict input,
+                             float *restrict xhat_out,
+                             float *restrict rms_out,
+                             float *restrict output,
+                             const float *restrict gamma,
+                             size_t seq_len, size_t size, float epsilon);
+void rms_norm_backward(const float *dL_dout,
+                       const float *restrict xhat,
+                       const float *restrict rms,
+                       const float *restrict gamma,
+                       float *restrict gamma_grad,
+                       float *dL_dinput, size_t seq_len, size_t size);
+
 /* Positional encoding: PE(pos, 2i) = sin(pos / 10000^(2i/d)), PE(pos, 2i+1)
  * = cos(...). Returns 0 on success, -1 on allocation failure (caller must
  * treat pos_embed as uninitialized in that case - it is not touched). */

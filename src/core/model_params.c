@@ -71,8 +71,10 @@ size_t model_param_tensors(const neural_model_t *model,
 
         emit(out, capacity, &count, "ln_gamma_attn", l, layer->ln_gamma_attn,
              1, embedding_dim, PARAM_KIND_NORM);
-        emit(out, capacity, &count, "ln_beta_attn", l, layer->ln_beta_attn,
-             1, embedding_dim, PARAM_KIND_NORM);
+        if (!model_uses_rmsnorm(model)) {
+            emit(out, capacity, &count, "ln_beta_attn", l, layer->ln_beta_attn,
+                 1, embedding_dim, PARAM_KIND_NORM);
+        }
 
         emit(out, capacity, &count, "W_ff1", l, layer->W_ff1,
              embedding_dim, ffn_dim, PARAM_KIND_PROJECTION);
@@ -85,8 +87,10 @@ size_t model_param_tensors(const neural_model_t *model,
 
         emit(out, capacity, &count, "ln_gamma_ffn", l, layer->ln_gamma_ffn,
              1, embedding_dim, PARAM_KIND_NORM);
-        emit(out, capacity, &count, "ln_beta_ffn", l, layer->ln_beta_ffn,
-             1, embedding_dim, PARAM_KIND_NORM);
+        if (!model_uses_rmsnorm(model)) {
+            emit(out, capacity, &count, "ln_beta_ffn", l, layer->ln_beta_ffn,
+                 1, embedding_dim, PARAM_KIND_NORM);
+        }
     }
 
     return count;

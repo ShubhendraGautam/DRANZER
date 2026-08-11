@@ -444,9 +444,18 @@ model_errors_t model_forward_hidden_masked(
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {
             model->ws_fwd_attn_raw[i] += x_in[i];
         }
-        layer_norm_forward_cached(model->ws_fwd_attn_raw, model->cache_attn_xhat[l], model->cache_attn_std[l],
-                                   model->cache_attn_ln_out[l], layer->ln_gamma_attn, layer->ln_beta_attn,
-                                   seq_len, embedding_dim, epsilon);
+        if (model_uses_rmsnorm(model)) {
+            rms_norm_forward_cached(
+                model->ws_fwd_attn_raw, model->cache_attn_xhat[l],
+                model->cache_attn_std[l], model->cache_attn_ln_out[l],
+                layer->ln_gamma_attn, seq_len, embedding_dim, epsilon);
+        } else {
+            layer_norm_forward_cached(
+                model->ws_fwd_attn_raw, model->cache_attn_xhat[l],
+                model->cache_attn_std[l], model->cache_attn_ln_out[l],
+                layer->ln_gamma_attn, layer->ln_beta_attn,
+                seq_len, embedding_dim, epsilon);
+        }
         zero_padded_rows(model, model->cache_attn_ln_out[l], seq_len,
                          embedding_dim);
 
@@ -472,9 +481,18 @@ model_errors_t model_forward_hidden_masked(
         for (size_t i = 0; i < seq_len * embedding_dim; i++) {
             model->ws_fwd_ff_raw[i] += x1[i];
         }
-        layer_norm_forward_cached(model->ws_fwd_ff_raw, model->cache_ffn_xhat[l], model->cache_ffn_std[l],
-                                   model->cache_hidden[l + 1], layer->ln_gamma_ffn, layer->ln_beta_ffn,
-                                   seq_len, embedding_dim, epsilon);
+        if (model_uses_rmsnorm(model)) {
+            rms_norm_forward_cached(
+                model->ws_fwd_ff_raw, model->cache_ffn_xhat[l],
+                model->cache_ffn_std[l], model->cache_hidden[l + 1],
+                layer->ln_gamma_ffn, seq_len, embedding_dim, epsilon);
+        } else {
+            layer_norm_forward_cached(
+                model->ws_fwd_ff_raw, model->cache_ffn_xhat[l],
+                model->cache_ffn_std[l], model->cache_hidden[l + 1],
+                layer->ln_gamma_ffn, layer->ln_beta_ffn,
+                seq_len, embedding_dim, epsilon);
+        }
         zero_padded_rows(model, model->cache_hidden[l + 1], seq_len,
                          embedding_dim);
     }
@@ -765,8 +783,13 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
         for (size_t d = 0; d < embedding_dim; d++) {
             cache->attn_raw[d] += cache->hidden[d];
         }
-        layer_normalize(cache->attn_raw, cache->attn_norm, embedding_dim,
-                        layer->ln_gamma_attn, layer->ln_beta_attn, epsilon);
+        if (model_uses_rmsnorm(model)) {
+            rms_normalize(cache->attn_raw, cache->attn_norm, embedding_dim,
+                          layer->ln_gamma_attn, epsilon);
+        } else {
+            layer_normalize(cache->attn_raw, cache->attn_norm, embedding_dim,
+                            layer->ln_gamma_attn, layer->ln_beta_attn, epsilon);
+        }
 
         model_dispatch_matmul(model, cache->attn_norm, layer->W_ff1, cache->ff_hidden,
                         1, embedding_dim, ffn_dim);
@@ -778,8 +801,13 @@ model_errors_t model_forward_token(neural_model_t *model, model_kv_cache_t *cach
         for (size_t d = 0; d < embedding_dim; d++) {
             cache->ff_raw[d] += layer->b_ff2[d] + cache->attn_norm[d];
         }
-        layer_normalize(cache->ff_raw, cache->hidden, embedding_dim,
-                        layer->ln_gamma_ffn, layer->ln_beta_ffn, epsilon);
+        if (model_uses_rmsnorm(model)) {
+            rms_normalize(cache->ff_raw, cache->hidden, embedding_dim,
+                          layer->ln_gamma_ffn, epsilon);
+        } else {
+            layer_normalize(cache->ff_raw, cache->hidden, embedding_dim,
+                            layer->ln_gamma_ffn, layer->ln_beta_ffn, epsilon);
+        }
     }
 
     model_errors_t head_rc = lm_head_project(model, cache->hidden,

@@ -180,9 +180,16 @@ static void check_model(const config_t *config, uint32_t architecture_flags) {
 }
 
 int main(void) {
+    static const uint32_t architecture_flags[] = {
+        0,
+        MODEL_ARCH_TIED_EMBEDDINGS,
+        MODEL_ARCH_RMSNORM,
+        MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_RMSNORM,
+    };
     for (size_t c = 0; c < CONFIG_COUNT; c++) {
-        check_model(&configs[c], 0);
-        check_model(&configs[c], MODEL_ARCH_TIED_EMBEDDINGS);
+        for (size_t variant = 0;
+             variant < sizeof(architecture_flags) / sizeof(architecture_flags[0]);
+             variant++) check_model(&configs[c], architecture_flags[variant]);
     }
 
     /* A model that was never constructed must produce nothing rather than
@@ -195,7 +202,8 @@ int main(void) {
         fail("a null model produced descriptors");
     }
 
-    printf("configurations=%zu\n", CONFIG_COUNT * 2);
+    printf("configurations=%zu\n",
+           CONFIG_COUNT * sizeof(architecture_flags) / sizeof(architecture_flags[0]));
     if (failures != 0) {
         printf("\nPARAMETER INVENTORY CHECK FAILED (%d problem%s)\n",
                failures, failures == 1 ? "" : "s");

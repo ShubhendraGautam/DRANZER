@@ -36,6 +36,7 @@ int main(void) {
     char *explicit_stride[] = {"app", "train", "--train-stride", "3"};
     char *tied[] = {"app", "train", "--tie-embeddings"};
     char *rope[] = {"app", "train", "--rope"};
+    char *rmsnorm[] = {"app", "train", "--rmsnorm"};
     char *valid[] = {"app", "train", "--batch-size", "4",
                      "--gradient-accumulation", "3", "--shuffle",
                      "--checkpoint-interval", "0", "--dropout", "0.2"};
@@ -63,6 +64,8 @@ int main(void) {
                  !cli_option_was_explicit(&parsed, "--tie-embeddings") ||
                  cli_parse(3, rope, &parsed) != 0 || !parsed.use_rope ||
                  !cli_option_was_explicit(&parsed, "--rope") ||
+                 cli_parse(3, rmsnorm, &parsed) != 0 || !parsed.use_rmsnorm ||
+                 !cli_option_was_explicit(&parsed, "--rmsnorm") ||
                  cli_parse(11, valid, &parsed) != 0 || parsed.batch_size != 4 ||
                  parsed.gradient_accumulation_steps != 3 || !parsed.shuffle ||
                  parsed.checkpoint_interval != 0 || parsed.dropout_rate != 0.2f ||

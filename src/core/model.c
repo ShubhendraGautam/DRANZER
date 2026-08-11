@@ -36,7 +36,7 @@ static int checked_add(size_t left, size_t right, size_t *out) {
 /* Carves one transformer_layer_t's worth of views out of the params/grads
  * cursors. model_new validates the complete count before calling this. */
 static void layout_layer(transformer_layer_t *layer, float **pc, float **gc,
-                          size_t embedding_dim) {
+                         size_t embedding_dim, int use_rmsnorm) {
     size_t ffn_dim = embedding_dim * 4;
     size_t emb2 = embedding_dim * embedding_dim;
 
@@ -46,7 +46,9 @@ static void layout_layer(transformer_layer_t *layer, float **pc, float **gc,
     layer->W_o = *pc; layer->W_o_grad = *gc; *pc += emb2; *gc += emb2;
 
     layer->ln_gamma_attn = *pc; layer->ln_gamma_attn_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
-    layer->ln_beta_attn = *pc; layer->ln_beta_attn_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
+    if (!use_rmsnorm) {
+        layer->ln_beta_attn = *pc; layer->ln_beta_attn_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
+    }
 
     layer->W_ff1 = *pc; layer->W_ff1_grad = *gc; *pc += embedding_dim * ffn_dim; *gc += embedding_dim * ffn_dim;
     layer->b_ff1 = *pc; layer->b_ff1_grad = *gc; *pc += ffn_dim; *gc += ffn_dim;
@@ -54,7 +56,9 @@ static void layout_layer(transformer_layer_t *layer, float **pc, float **gc,
     layer->b_ff2 = *pc; layer->b_ff2_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
 
     layer->ln_gamma_ffn = *pc; layer->ln_gamma_ffn_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
-    layer->ln_beta_ffn = *pc; layer->ln_beta_ffn_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
+    if (!use_rmsnorm) {
+        layer->ln_beta_ffn = *pc; layer->ln_beta_ffn_grad = *gc; *pc += embedding_dim; *gc += embedding_dim;
+    }
 }
 
 /* Initialize a new model: allocate every weight/gradient/cache/scratch
@@ -97,7 +101,9 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     if (!checked_multiply(embedding_dim, 4, &ffn_dim) ||
         !checked_multiply(embedding_dim, embedding_dim, &emb2) ||
         !checked_multiply(emb2, 12, &layer_square_term) ||
-        !checked_multiply(embedding_dim, 9, &layer_linear_term) ||
+        !checked_multiply(embedding_dim,
+                          (architecture_flags & MODEL_ARCH_RMSNORM) ? 7 : 9,
+                          &layer_linear_term) ||
         !checked_add(layer_square_term, layer_linear_term, &layer_params) ||
         !checked_multiply(vocab_size, embedding_dim, &vocab_emb) ||
         !checked_multiply(vocab_emb,
@@ -206,7 +212,8 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     pc += vocab_size; gc += vocab_size;
 
     for (size_t l = 0; l < num_layers; l++) {
-        layout_layer(&model->layers[l], &pc, &gc, embedding_dim);
+        layout_layer(&model->layers[l], &pc, &gc, embedding_dim,
+                     model_uses_rmsnorm(model));
     }
 
     if (external_parameters == NULL) {
@@ -229,9 +236,11 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
             memset(layer->b_ff2, 0, embedding_dim * sizeof(float));
             for (size_t d = 0; d < embedding_dim; d++) {
                 layer->ln_gamma_attn[d] = 1.0f;
-                layer->ln_beta_attn[d] = 0.0f;
                 layer->ln_gamma_ffn[d] = 1.0f;
-                layer->ln_beta_ffn[d] = 0.0f;
+                if (!model_uses_rmsnorm(model)) {
+                    layer->ln_beta_attn[d] = 0.0f;
+                    layer->ln_beta_ffn[d] = 0.0f;
+                }
             }
         }
 

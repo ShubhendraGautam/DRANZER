@@ -26,10 +26,11 @@ typedef enum {
 typedef enum {
     MODEL_ARCH_TIED_EMBEDDINGS = UINT32_C(1) << 0,
     MODEL_ARCH_ROPE = UINT32_C(1) << 1,
+    MODEL_ARCH_RMSNORM = UINT32_C(1) << 2,
 } model_architecture_flag_t;
 
 #define MODEL_ARCHITECTURE_SUPPORTED_MASK \
-    (MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_ROPE)
+    (MODEL_ARCH_TIED_EMBEDDINGS | MODEL_ARCH_ROPE | MODEL_ARCH_RMSNORM)
 
 /* Learning metrics tracking for Phase 2 stability improvements */
 typedef struct {
@@ -61,7 +62,7 @@ typedef struct {
     float *W_q, *W_k, *W_v, *W_o;
     float *W_q_grad, *W_k_grad, *W_v_grad, *W_o_grad;
 
-    // Post-attention layer norm (embedding_dim)
+    // Post-attention normalization (embedding_dim); beta is NULL for RMSNorm
     float *ln_gamma_attn, *ln_beta_attn;
     float *ln_gamma_attn_grad, *ln_beta_attn_grad;
 
@@ -69,7 +70,7 @@ typedef struct {
     float *W_ff1, *b_ff1, *W_ff2, *b_ff2;
     float *W_ff1_grad, *b_ff1_grad, *W_ff2_grad, *b_ff2_grad;
 
-    // Post-FFN layer norm (embedding_dim)
+    // Post-FFN normalization (embedding_dim); beta is NULL for RMSNorm
     float *ln_gamma_ffn, *ln_beta_ffn;
     float *ln_gamma_ffn_grad, *ln_beta_ffn_grad;
 } transformer_layer_t;
@@ -231,6 +232,10 @@ static inline int model_uses_tied_embeddings(const neural_model_t *model) {
 
 static inline int model_uses_rope(const neural_model_t *model) {
     return model && (model->architecture_flags & MODEL_ARCH_ROPE) != 0;
+}
+
+static inline int model_uses_rmsnorm(const neural_model_t *model) {
+    return model && (model->architecture_flags & MODEL_ARCH_RMSNORM) != 0;
 }
 
 #endif // MODEL_TYPES_H

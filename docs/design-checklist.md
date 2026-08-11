@@ -742,7 +742,7 @@ speed/memory improvement is reproducible on identified hardware.
 - [~] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
 
-  **Tied-embedding and RoPE implementations are ready; review and measurement are deferred.**
+  **Tied-embedding, RoPE, and RMSNorm implementations are ready; review and measurement are deferred.**
   `--tie-embeddings` removes the duplicate output matrix and uses the token table transposed in
   full-prefix, cached-decode, and all-position training paths. Both gradient contributions land in
   the one shared parameter slice. Architecture flags persist through exact checkpoints, immutable
@@ -753,8 +753,11 @@ speed/memory improvement is reproducible on identified hardware.
   Q/K per head in full and cached attention, inverse-rotates gradients, and rejects odd head widths.
   Its focused source test covers rotation/inversion, pair-norm preservation, no-additive-position
   input, cached/full equivalence, a numerical Q-gradient, and pure-RoPE copy/mmap bundle persistence.
-  RMSNorm and GELU/SwiGLU remain
-  unimplemented.
+  RMSNorm is independently enabled by `--rmsnorm`; it replaces both LayerNorm sites, removes their
+  beta tensors from the flat layout, and supplies cached full-sequence and decode math plus a
+  closed-form backward. Its test covers the equation, numerical input gradients, gamma gradients,
+  layout reduction, parameter tiling, cached/full equivalence, training accumulation, and pure
+  RMSNorm copy/mmap persistence. GELU/SwiGLU remain unimplemented.
 - [~] Add padding and general attention masks before variable-length batching.
   `model_attention_mask_t` now combines a per-position padding mask with an optional general
   row-major edge mask, always intersected with causality. Mask-aware forward and all-position

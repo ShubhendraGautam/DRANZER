@@ -18,6 +18,7 @@ their bundle-format version.
 - Lossless mmap bundle loading and opt-in version-2 quantized bundle storage.
 - Optional tied input/output embeddings with version-3 architecture-aware bundles and checkpoints.
 - Optional rotary query/key position embeddings across training and cached decode.
+- Optional RMSNorm with beta-free parameter layouts and matched backward propagation.
 - INT8 and packed-INT4 weight matmul primitives with correctness/performance coverage.
 - Padding/general attention masks across inference and training.
 - Structured library diagnostics and silent embedding-runtime behavior.

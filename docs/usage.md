@@ -159,6 +159,7 @@ honest bounded streaming shuffle, not a global whole-corpus permutation.
 | `--train-stride N` | `0` | Tokens the window advances between examples; `0` means a whole window |
 | `--tie-embeddings` | off | Share the token embedding table with the output projection |
 | `--rope` | off | Rotate per-head attention Q/K pairs by absolute position instead of adding sinusoidal vectors |
+| `--rmsnorm` | off | Use RMSNorm scales without LayerNorm mean subtraction or beta tensors |
 | `--optimizer NAME` | `adam` | `adam` or `sgd` |
 | `--dropout RATE` | `0.0` | Sublayer-output dropout rate |
 | `--grad-clip NORM` | `1.0` | Global gradient norm limit; `0` disables it |

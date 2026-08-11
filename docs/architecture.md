@@ -173,6 +173,11 @@ uses the cache's monotonic absolute position, including beyond the retained wind
 the transpose rotation to Q/K gradients before projection gradients are formed. RoPE therefore
 requires an even per-head dimension; model construction rejects incompatible shapes.
 
+With `--rmsnorm`, both post-attention and post-FFN normalization sites use
+`gamma × x / sqrt(mean(x²) + epsilon)`. RMSNorm does not subtract the row mean and has no beta, so
+the flat parameter layout omits two embedding-width beta vectors per layer. Cached decode uses the
+same equation; training caches normalized rows and row RMS values for the closed-form backward.
+
 Forward matmuls normally use the CPU dispatch path (or opt-in GPU path), which picks a kernel from
 the shape of the call and the instruction set the running CPU supports - see
 [CPU matmul kernels](matmul.md). Setting `model.use_scalar_matmul`

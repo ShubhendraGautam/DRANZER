@@ -140,6 +140,60 @@ void layer_norm_backward(float *dL_dout, float *restrict xhat, float *restrict s
     }
 }
 
+void rms_normalize(const float *input, float *output, size_t size,
+                   const float *gamma, float epsilon) {
+    float mean_square = 0.0f;
+    for (size_t d = 0; d < size; d++) mean_square += input[d] * input[d];
+    float rms = sqrtf(mean_square / (float)size + epsilon);
+    for (size_t d = 0; d < size; d++) output[d] = gamma[d] * input[d] / rms;
+}
+
+void rms_norm_forward_cached(const float *restrict input,
+                             float *restrict xhat_out,
+                             float *restrict rms_out,
+                             float *restrict output,
+                             const float *restrict gamma,
+                             size_t seq_len, size_t size, float epsilon) {
+    for (size_t row = 0; row < seq_len; row++) {
+        const float *row_input = &input[row * size];
+        float *row_xhat = &xhat_out[row * size];
+        float *row_output = &output[row * size];
+        float mean_square = 0.0f;
+        for (size_t d = 0; d < size; d++)
+            mean_square += row_input[d] * row_input[d];
+        float rms = sqrtf(mean_square / (float)size + epsilon);
+        rms_out[row] = rms;
+        for (size_t d = 0; d < size; d++) {
+            row_xhat[d] = row_input[d] / rms;
+            row_output[d] = gamma[d] * row_xhat[d];
+        }
+    }
+}
+
+void rms_norm_backward(const float *dL_dout,
+                       const float *restrict xhat,
+                       const float *restrict rms,
+                       const float *restrict gamma,
+                       float *restrict gamma_grad,
+                       float *dL_dinput, size_t seq_len, size_t size) {
+    for (size_t row = 0; row < seq_len; row++) {
+        const float *row_dout = &dL_dout[row * size];
+        const float *row_xhat = &xhat[row * size];
+        float *row_dinput = &dL_dinput[row * size];
+        float mean_scaled_dot = 0.0f;
+        for (size_t d = 0; d < size; d++) {
+            gamma_grad[d] += row_dout[d] * row_xhat[d];
+            mean_scaled_dot += row_dout[d] * gamma[d] * row_xhat[d];
+        }
+        mean_scaled_dot /= (float)size;
+        for (size_t d = 0; d < size; d++) {
+            row_dinput[d] =
+                (row_dout[d] * gamma[d] - row_xhat[d] * mean_scaled_dot) /
+                rms[row];
+        }
+    }
+}
+
 int compute_positional_encoding(float *pos_embed, size_t seq_len, size_t embedding_dim) {
     float *dim_scales = malloc(embedding_dim * sizeof(float));
     if (dim_scales == NULL) return -1;

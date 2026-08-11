@@ -52,9 +52,19 @@ static void backward_layer_stack(neural_model_t *model,
         }
 
         /* FFN-LN backward: dL/dx2 (ws_dhidden_in) -> dL/d(post-dropout ffn raw) (ws_d_s2) */
-        layer_norm_backward(model->ws_dhidden_in, model->cache_ffn_xhat[l], model->cache_ffn_std[l],
-                             layer->ln_gamma_ffn, layer->ln_gamma_ffn_grad, layer->ln_beta_ffn_grad,
-                             model->ws_d_s2, seq_len, embedding_dim);
+        if (model_uses_rmsnorm(model)) {
+            rms_norm_backward(
+                model->ws_dhidden_in, model->cache_ffn_xhat[l],
+                model->cache_ffn_std[l], layer->ln_gamma_ffn,
+                layer->ln_gamma_ffn_grad, model->ws_d_s2,
+                seq_len, embedding_dim);
+        } else {
+            layer_norm_backward(
+                model->ws_dhidden_in, model->cache_ffn_xhat[l],
+                model->cache_ffn_std[l], layer->ln_gamma_ffn,
+                layer->ln_gamma_ffn_grad, layer->ln_beta_ffn_grad,
+                model->ws_d_s2, seq_len, embedding_dim);
+        }
 
         /* ws_d_s2 is dL/d(post-dropout ffn_raw) - the value that was added
          * to the residual branch directly (dropout only sits on the FFN
@@ -99,9 +109,19 @@ static void backward_layer_stack(neural_model_t *model,
         }
 
         /* Attn-LN backward: dL/dx1 (ws_d_x1_total) -> dL/d(post-dropout attn raw) (ws_d_s1) */
-        layer_norm_backward(model->ws_d_x1_total, model->cache_attn_xhat[l], model->cache_attn_std[l],
-                             layer->ln_gamma_attn, layer->ln_gamma_attn_grad, layer->ln_beta_attn_grad,
-                             model->ws_d_s1, seq_len, embedding_dim);
+        if (model_uses_rmsnorm(model)) {
+            rms_norm_backward(
+                model->ws_d_x1_total, model->cache_attn_xhat[l],
+                model->cache_attn_std[l], layer->ln_gamma_attn,
+                layer->ln_gamma_attn_grad, model->ws_d_s1,
+                seq_len, embedding_dim);
+        } else {
+            layer_norm_backward(
+                model->ws_d_x1_total, model->cache_attn_xhat[l],
+                model->cache_attn_std[l], layer->ln_gamma_attn,
+                layer->ln_gamma_attn_grad, layer->ln_beta_attn_grad,
+                model->ws_d_s1, seq_len, embedding_dim);
+        }
 
         /* ws_d_s1 is dL/d(post-dropout attn_raw) AND (dropout bypassed) the
          * residual branch's contribution to dL/dhidden[l]. The attention
