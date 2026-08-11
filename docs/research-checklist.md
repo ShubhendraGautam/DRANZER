@@ -280,6 +280,11 @@ that looks fine and is not.
   and backward-input floors remain 1.20x. A ratio test can remove scheduler noise and still need its
   threshold falsified by a new microarchitecture — both layers matter.
 
+  The next push supplied matching GCC evidence for the total-cost guard on the same hosted class:
+  `matmul_backward_weight / matrix_multiply` was a stable **3.06x [2.93x, 3.10x]**, just over the
+  old 3.00x ceiling. Its ceiling is now 3.50x; the known-bad loop order remains unambiguously caught
+  at 24.7x, and the backward-input ceiling remains 3.00x.
+
   The same defect was found and fixed in `tests/gpu/test_gpu_latency_invariants.c`, which had a 1.00x
   floor against readings of 0.83x once and 1.01–1.42x on the eight runs after — it failed during this
   work, which is how it was noticed. Its median now reads 1.19–1.29x across five runs. The

@@ -45,7 +45,7 @@
  * machine gave:
  *
  *   matmul_backward_input / matrix_multiply     2.02 - 2.21   (limit 3.00)
- *   matmul_backward_weight / matrix_multiply    1.56 - 1.79   (limit 3.00)
+ *   matmul_backward_weight / matrix_multiply    1.56 - 1.79   (limit 3.50)
  *   matrix_multiply vs matrix_multiply_scalar  35.39 - 37.97  (min   1.50)
  *   AVX-512 forward matmul                      3.76 - 3.82   (min   1.20)
  *   AVX-512 matmul_backward_input              16.51 - 17.63  (min   1.20)
@@ -61,10 +61,12 @@
  * different cache hierarchy changes how much the vector paths win. A hosted
  * AMD EPYC 9V74 later measured the AVX-512 backward-weight path at a stable
  * 1.18x (1.17x-1.19x) and falsified the original 1.20x floor without showing a
- * dispatch collapse. The printed spread is what makes drift visible; the 1.10x
- * backward-weight floor below still rejects a no-op dispatch near 1.0 while
- * admitting that measured hardware variation. The other two paths retain the
- * original 1.20x floor because no runner has falsified it.
+ * dispatch collapse. GCC on that runner also measured backward-weight's total
+ * cost at a stable 3.06x (2.93x-3.10x) versus forward and falsified the 3.00x
+ * ceiling. The printed spreads make both kinds of hardware drift visible. The
+ * 1.10x speedup floor still rejects a no-op dispatch near 1.0, while the 3.50x
+ * cost ceiling remains far below the known-bad loop order's 24.7x. Other paths
+ * retain their original thresholds because no runner has falsified them.
  */
 
 #include "core/cpu_features.h"
@@ -203,11 +205,11 @@ static void check_backward_within_reach_of_forward(void) {
                  "Both do 2*m*k*n FLOPs. A ratio this high means the traversal "
                  "is fighting the cache, not that the work is harder.");
     expect_cost_ratio("matmul_backward_weight / matrix_multiply",
-                      op_backward_weight, op_forward, 3.0,
+                      op_backward_weight, op_forward, 3.5,
                  "Both do 2*m*k*n FLOPs. This is exactly the shape of the "
                  "l/j/i loop-order defect fixed in core/matmul.c. Rebuilding "
                  "this test against that old kernel reports 24.7x at this "
-                 "shape, so the 3.0x limit has ample margin either way.");
+                 "shape, so the 3.5x limit retains ample defect margin.");
 }
 
 /* The tuned forward kernel must beat the portable scalar reference. If this

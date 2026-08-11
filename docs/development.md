@@ -112,7 +112,8 @@ Thresholds are deliberately loose, because the defects worth catching are order-
 
 | Invariant | Limit | What it catches |
 |---|---|---|
-| backward matmul vs forward of equal FLOP count | ≤ 3.0x | A traversal fighting the cache. The pre-fix `matmul_backward_weight` reports **24.7x** here. |
+| backward-input vs forward of equal FLOP count | ≤ 3.0x | A traversal fighting the cache |
+| backward-weight vs forward of equal FLOP count | ≤ 3.5x | The same defect, with room for the 3.06x [2.93x, 3.10x] measured by hosted GCC. The pre-fix kernel reports **24.7x** here. |
 | tuned forward kernel vs scalar reference | ≥ 1.5x | Kernel selection silently stopping |
 | AVX-512 forward/input paths vs portable | ≥ 1.2x | A dispatch that stopped firing — invisible to correctness tests, which still pass |
 | AVX-512 backward-weight path vs portable | ≥ 1.1x | The same collapse, with room for the 1.18x [1.17x, 1.19x] measured on EPYC 9V74 |
@@ -121,7 +122,7 @@ Thresholds are deliberately loose, because the defects worth catching are order-
 | tiled GPU kernel vs the naive baseline | ≥ 1.0x | The shared-memory path regressing |
 
 The backward-vs-forward gate was verified to have teeth by rebuilding the suite against the
-pre-fix kernel: it fails at 24.7x against a 3.0x limit, and also catches the AVX-512 dispatch ratio
+pre-fix kernel: it fails at 24.7x against a 3.5x limit, and also catches the AVX-512 dispatch ratio
 collapsing to 0.95x. A performance test that has never been seen to fail is not evidence of
 anything.
 

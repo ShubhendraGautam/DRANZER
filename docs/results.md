@@ -222,7 +222,7 @@ machine:
 | invariant | median across runs | threshold |
 |---|---|---|
 | `matmul_backward_input` / `matrix_multiply` | 2.02–2.21 | ≤ 3.00 |
-| `matmul_backward_weight` / `matrix_multiply` | 1.56–1.79 | ≤ 3.00 |
+| `matmul_backward_weight` / `matrix_multiply` | 1.56–1.79 | ≤ 3.50 |
 | `matrix_multiply` vs scalar reference | 35.39–37.97 | ≥ 1.50 |
 | AVX-512 forward matmul | 3.76–3.82 | ≥ 1.20 |
 | AVX-512 `matmul_backward_input` | 16.51–17.63 | ≥ 1.20 |
@@ -237,6 +237,9 @@ The backward-weight threshold was later falsified, rather than the measurement:
 an AMD EPYC 9V74 runner produced a tight 1.18x [1.17x, 1.19x] distribution. Its
 floor is therefore 1.10x; the other AVX-512 paths retain 1.20x. The revised guard
 still separates a working dispatch from the near-1.0 collapse it exists to catch.
+The same hosted GCC job measured backward-weight's total cost at 3.06x
+[2.93x, 3.10x] versus forward, just beyond its old 3.00x ceiling. That ceiling is
+now 3.50x, still far below the known-bad loop order's 24.7x result.
 
 **This is a research-integrity item, not an annoyance.** A suite that cries wolf
 teaches its maintainer to re-run until green, which is the same habit that turns a
