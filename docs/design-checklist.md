@@ -763,7 +763,12 @@ speed/memory improvement is reproducible on identified hardware.
   diagnostics at its own boundary. `check_library_silence.sh` rejects terminal calls across the
   embeddable source set, while `test_library_diagnostics.c` captures both descriptors around invalid
   settings and requires zero bytes. Execution is deferred to the bundled validation pass.
-- [ ] Produce static/shared library targets and small embedding examples.
+- [~] Produce static/shared library targets and small embedding examples.
+  `make public-libs` now creates self-contained `libdranzer.a` and `libdranzer.so` artifacts from
+  isolated PIC objects. The shared artifact exposes only the explicit `DRANZER_1.0` symbol map.
+  Public-header-only examples cover static full inference and shared incremental generation, while
+  `public-api-check` verifies both link modes and the exact exported ABI. Execution is deferred to
+  the final bundled validation pass before this changes to `[x]`.
 
 Acceptance gate: architectural changes have quality, correctness, speed, and memory comparisons;
 the CLI is a client of the same supported API available to external programs.

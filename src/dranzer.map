@@ -1,0 +1,22 @@
+DRANZER_1.0 {
+    global:
+        dranzer_bundle_load;
+        dranzer_model_free;
+        dranzer_tokenizer_free;
+        dranzer_model_vocab_size;
+        dranzer_model_max_sequence;
+        dranzer_tokenize;
+        dranzer_detokenize;
+        dranzer_model_forward;
+        dranzer_cache_create;
+        dranzer_cache_reset;
+        dranzer_cache_free;
+        dranzer_cache_forward;
+        dranzer_generation_create;
+        dranzer_generation_free;
+        dranzer_generation_reset;
+        dranzer_generation_next_greedy;
+        dranzer_status_string;
+    local:
+        *;
+};

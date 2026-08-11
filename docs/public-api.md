@@ -72,3 +72,26 @@ without consuming the token, so the caller can resize and retry.
 The initial stable surface deliberately exposes deterministic greedy stepping first. Sampling,
 callbacks, and stop-sequence orchestration remain available to the repository CLI but are not yet
 promised as public ABI.
+
+## Building and linking
+
+From the repository root, build the self-contained static and shared libraries plus both examples:
+
+```bash
+make -C src public-libs examples
+```
+
+Both libraries contain the model runtime, runtime-selected CPU kernels, optional dynamically loaded
+CUDA path, and tokenizer; an embedding application does not link the internal `libattention.a`.
+The only system link dependencies are the math and dynamic-loader libraries:
+
+```bash
+cc -Isrc/include app.c src/libdranzer.a -lm -ldl -o app-static
+cc -Isrc/include app.c -Lsrc -ldranzer -lm -ldl -o app-shared
+```
+
+The shared object exports only the documented version-1 functions under the `DRANZER_1.0` symbol
+version. Internal model, tokenizer, and backend symbols remain local. An application using the
+shared form must install `libdranzer.so` on its loader path or provide an application-relative
+rpath. See [`src/examples`](../src/examples/README.md) for a static full-forward example and a
+shared incremental-generation example.

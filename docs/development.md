@@ -64,6 +64,10 @@ GPU tests return success with a clear `SKIP` message when CUDA hardware is unava
 calls in embeddable core, API, tokenizer, CUDA, and GPU-matmul modules. File-format writers may use
 `snprintf` and stream writes; executable CLI/probe/report modules remain free to print.
 
+`make public-api-check` builds both self-contained library forms, links one example against each,
+and verifies that `libdranzer.so` exports exactly the documented `DRANZER_1.0` ABI. This gate is
+also a prerequisite of `make test`.
+
 The suite also runs two shell-level integration gates:
 
 - `test_eval_cli.sh` exercises train-time validation and standalone evaluation, deletes the
@@ -89,6 +93,9 @@ make -C src clean all test CC=gcc OMP=1
 
 # Size-optimized build and tools
 make -C src clean all test bench gpu-probe CC=clang SIZE=1
+
+# Embedding libraries and public-header-only examples
+make -C src public-api-check CC=clang
 ```
 
 Always clean when switching compiler or instrumentation flags because object filenames are shared

@@ -1,4 +1,5 @@
 CC = clang
+AR = ar
 # -ffast-math is portable (no special CPU features required). It was carried
 # for years on the claim that it "helps on weak FPUs", with no number beside
 # it; the number now exists. Built twice from identical sources with only this
@@ -138,6 +139,27 @@ OBJ = $(SRC:.c=.o)
 
 TARGET = app.out
 
+# Self-contained embedding libraries. Keep their objects separate from the
+# CLI/test objects: shared-library objects must be position-independent, and a
+# dedicated tree prevents a prior `make all` from silently supplying non-PIC
+# objects to `make public-libs`.
+PUBLIC_BUILD_DIR = .public-build
+PUBLIC_SRC = api/dranzer.c \
+             $(filter core/% backends/gpu/gpu_cuda.c backends/gpu/gpu_matmul.c,$(SRC))
+PUBLIC_TOKENIZER_SRC = ../libs/src/hashmap.c ../libs/src/byte_pair_encoding.c
+PUBLIC_OBJ = $(addprefix $(PUBLIC_BUILD_DIR)/,$(PUBLIC_SRC:.c=.o))
+PUBLIC_TOKENIZER_OBJ = $(patsubst ../libs/src/%.c,$(PUBLIC_BUILD_DIR)/libs/%.o,$(PUBLIC_TOKENIZER_SRC))
+PUBLIC_ALL_OBJ = $(PUBLIC_OBJ) $(PUBLIC_TOKENIZER_OBJ)
+PUBLIC_STATIC = libdranzer.a
+PUBLIC_SHARED = libdranzer.so
+PUBLIC_VERSION_SCRIPT = dranzer.map
+
+EXAMPLE_SRC = examples/embed_infer.c examples/embed_generate.c
+EXAMPLE_OBJ = $(addprefix $(PUBLIC_BUILD_DIR)/,$(EXAMPLE_SRC:.c=.o))
+EXAMPLE_STATIC = examples/embed_infer.out
+EXAMPLE_SHARED = examples/embed_generate.out
+EXAMPLE_BINS = $(EXAMPLE_STATIC) $(EXAMPLE_SHARED)
+
 # Standalone memory/throughput benchmark (tools/bench.c) - links only the
 # model modules it actually needs, not cli/*.o. A separate binary on
 # purpose: it has nothing to do with training-run orchestration.
@@ -170,6 +192,45 @@ LIB_NAME = attention
 LIB = $(LIB_DIR)/lib$(LIB_NAME).a
 
 all: $(LIB) $(TARGET)
+
+public-libs: $(PUBLIC_STATIC) $(PUBLIC_SHARED)
+
+$(PUBLIC_STATIC): $(PUBLIC_ALL_OBJ)
+	$(AR) rcs $@ $^
+
+$(PUBLIC_SHARED): $(PUBLIC_ALL_OBJ) $(PUBLIC_VERSION_SCRIPT)
+	$(CC) -shared $(PUBLIC_ALL_OBJ) $(CFLAGS) $(LDFLAGS) -ldl \
+		-Wl,--version-script=$(PUBLIC_VERSION_SCRIPT) \
+		-Wl,-soname,$(PUBLIC_SHARED) -Wl,-z,defs -o $@
+
+# Every public-library source, including the tokenizer implementation normally
+# owned by ../libs, is compiled as PIC into the isolated public build tree.
+$(PUBLIC_BUILD_DIR)/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -fPIC -c $< -o $@
+
+$(PUBLIC_BUILD_DIR)/libs/%.o: ../libs/src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -fPIC -c $< -o $@
+
+# Match the ordinary quantize.o floating-point contract documented below.
+$(PUBLIC_BUILD_DIR)/core/quantize.o: core/quantize.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -ffp-contract=off -fPIC -c $< -o $@
+
+examples: $(EXAMPLE_BINS)
+
+$(EXAMPLE_STATIC): $(PUBLIC_BUILD_DIR)/examples/embed_infer.o $(PUBLIC_STATIC)
+	$(CC) $< ./$(PUBLIC_STATIC) $(CFLAGS) $(LDFLAGS) -ldl -o $@
+
+$(EXAMPLE_SHARED): $(PUBLIC_BUILD_DIR)/examples/embed_generate.o $(PUBLIC_SHARED)
+	$(CC) $< -L. -ldranzer $(CFLAGS) $(LDFLAGS) -ldl \
+		-Wl,-rpath,'$$ORIGIN/..' -o $@
+
+# Build/link both consumption modes and verify that the shared ABI exports
+# exactly the documented version-1 surface.
+public-api-check: public-libs examples
+	@bash tools/check_public_artifacts.sh
 
 # Step 1: Build library first
 $(LIB):
@@ -407,7 +468,7 @@ TEST_BINS = $(TEST_SRCS:.c=.out)
 # reports ~49 KB of driver state on every GPU test. Suppressing by library
 # name only caught half of it. This is scoped to tests/gpu/ so every other
 # test still gets full leak detection.
-test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
+test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ) public-api-check
 	@failed=0; \
 	for src in $(TEST_SRCS); do \
 		bin=$${src%.c}.out; \
@@ -434,15 +495,17 @@ DEPS = $(OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(BENCH_PARALLEL_OBJ:.o=.d) \
        $(GPU_PROBE_OBJ:.o=.d) $(GPU_LATENCY_OBJ:.o=.d) \
        $(FINGERPRINT_OBJ:.o=.d) $(BENCH_ATTENTION_OBJ:.o=.d) \
        $(BENCH_BUNDLE_LOAD_OBJ:.o=.d) \
-       $(TEST_MODEL_OBJ:.o=.d)
+       $(TEST_MODEL_OBJ:.o=.d) \
+       $(PUBLIC_ALL_OBJ:.o=.d) $(EXAMPLE_OBJ:.o=.d)
 
 clean:
-	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(BENCH_BUNDLE_LOAD_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(BENCH_BUNDLE_LOAD_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS)
+	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(BENCH_BUNDLE_LOAD_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(BENCH_BUNDLE_LOAD_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS) $(PUBLIC_STATIC) $(PUBLIC_SHARED) $(EXAMPLE_BINS)
 	rm -f $(DEPS)
+	rm -rf $(PUBLIC_BUILD_DIR)
 	$(MAKE) -C $(LIB_DIR) clean
 
 # Header dependencies discovered by -MMD. The leading dash keeps a missing
 # .d (first build, or straight after clean) from being an error.
 -include $(DEPS)
 
-.PHONY: all clean bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention
+.PHONY: all clean public-libs examples public-api-check bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention
