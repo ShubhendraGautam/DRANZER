@@ -337,6 +337,11 @@ $(BENCH_ATTENTION_TARGET): $(BENCH_ATTENTION_OBJ)
 finite-math-check:
 	@bash tools/check_finite_math.sh
 
+# Embeddable code returns diagnostics; only executable frontends choose a
+# terminal. Keep that boundary mechanical as new modules are added.
+library-silence-check:
+	@bash tools/check_library_silence.sh
+
 # What a seed and an architecture produce, as one number: the primitive the
 # reproducibility contract (docs/reproducibility.md) is checked with. Links the
 # model modules and nothing else - no CLI, no GPU, no timing.
@@ -419,6 +424,7 @@ test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ)
 	@bash tests/integration/test_eval_cli.sh ./$(TARGET)
 	@bash tests/integration/test_resume_cli.sh ./$(TARGET)
 	@bash tests/integration/test_determinism.sh ./$(TARGET)
+	@bash tools/check_library_silence.sh
 	@$(MAKE) --no-print-directory $(FINGERPRINT_TARGET)
 	@bash tests/integration/test_libc_independence.sh
 
@@ -439,4 +445,4 @@ clean:
 # .d (first build, or straight after clean) from being an error.
 -include $(DEPS)
 
-.PHONY: all clean bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check fingerprint bench-attention
+.PHONY: all clean bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention

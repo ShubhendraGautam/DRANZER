@@ -22,7 +22,6 @@
 #include "backends/gpu/gpu_matmul.h"
 #include "backends/gpu/gpu_cuda.h"
 #include <stddef.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -375,6 +374,10 @@ static gpu_cuda_kernel_t *g_k_forward_naive = NULL;
 static gpu_cuda_kernel_t *g_k_forward_tiled = NULL;
 static gpu_cuda_kernel_t *g_k_backward_input = NULL;
 static gpu_cuda_kernel_t *g_k_backward_weight = NULL;
+static int g_environment_checked = 0;
+static int g_environment_requests_naive = 0;
+static gpu_matmul_config_status_t g_config_status = GPU_MATMUL_CONFIG_OK;
+static char g_invalid_environment_value[64];
 
 /* Which forward kernel gpu_matmul() launches. Resolved once, from
  * DRANZER_GPU_MATMUL, so the two can be compared in the same session the way
@@ -382,21 +385,26 @@ static gpu_cuda_kernel_t *g_k_backward_weight = NULL;
  * measured rather than assumed. Unset means the measured default. */
 static gpu_cuda_kernel_t *g_k_forward = NULL;
 
-static void select_forward_kernel(void) {
+static void parse_forward_environment(void) {
+    if (g_environment_checked) return;
+    g_environment_checked = 1;
     const char *requested = getenv("DRANZER_GPU_MATMUL");
     if (requested && strcmp(requested, "naive") == 0) {
-        g_k_forward = g_k_forward_naive;
+        g_environment_requests_naive = 1;
         return;
     }
-    if (requested && strcmp(requested, "tiled") == 0) {
-        g_k_forward = g_k_forward_tiled;
-        return;
+    if (requested && strcmp(requested, "tiled") != 0 && requested[0] != '\0') {
+        g_config_status = GPU_MATMUL_CONFIG_INVALID_ENV;
+        strncpy(g_invalid_environment_value, requested,
+                sizeof(g_invalid_environment_value) - 1);
+        g_invalid_environment_value[sizeof(g_invalid_environment_value) - 1] = '\0';
     }
-    if (requested && requested[0] != '\0') {
-        fprintf(stderr, "Warning: ignoring DRANZER_GPU_MATMUL=\"%s\" "
-                        "(expected \"naive\" or \"tiled\")\n", requested);
-    }
-    g_k_forward = g_k_forward_tiled;
+}
+
+static void select_forward_kernel(void) {
+    parse_forward_environment();
+    g_k_forward = g_environment_requests_naive
+                      ? g_k_forward_naive : g_k_forward_tiled;
 }
 
 /* Weight buffer cache: keyed by host pointer, revalidated by generation
@@ -528,6 +536,17 @@ const char *gpu_matmul_forward_kernel_name(void) {
     return g_k_forward == g_k_forward_naive ? "naive" : "tiled";
 }
 
+gpu_matmul_config_status_t gpu_matmul_config_status(void) {
+    parse_forward_environment();
+    return g_config_status;
+}
+
+const char *gpu_matmul_invalid_environment_value(void) {
+    parse_forward_environment();
+    return g_config_status == GPU_MATMUL_CONFIG_INVALID_ENV
+               ? g_invalid_environment_value : NULL;
+}
+
 void gpu_matmul_invalidate_weights(void) {
     g_weight_generation++;
 }
@@ -642,6 +661,10 @@ void gpu_matmul_shutdown(void) {
     g_ctx = NULL;
     g_init_attempted = 0;
     g_kernel_loaded = 0;
+    g_environment_checked = 0;
+    g_environment_requests_naive = 0;
+    g_config_status = GPU_MATMUL_CONFIG_OK;
+    g_invalid_environment_value[0] = '\0';
 
     memset(g_weight_cache, 0, sizeof(g_weight_cache));
     g_weight_cache_count = 0;

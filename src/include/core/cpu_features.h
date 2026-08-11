@@ -34,6 +34,11 @@ typedef enum {
     CPU_ISA_COUNT
 } cpu_isa_t;
 
+typedef enum {
+    CPU_FEATURES_CONFIG_OK = 0,
+    CPU_FEATURES_CONFIG_INVALID_ENV,
+} cpu_features_config_status_t;
+
 /* Whether this CPU can execute code compiled for `isa`. CPU_ISA_BASELINE is
  * always 1; an ISA belonging to another architecture is always 0. */
 int cpu_isa_available(cpu_isa_t isa);
@@ -54,6 +59,12 @@ int cpu_isa_from_name(const char *name, cpu_isa_t *isa_out);
  * "baseline (capped by DRANZER_CPU_ISA=baseline)". Points into static storage;
  * valid until the next cpu_features_set_max_isa() call. */
 const char *cpu_features_summary(void);
+
+/* Structured result of parsing DRANZER_CPU_ISA during detection. Invalid
+ * input is ignored (the hardware-selected path remains active) and is
+ * available here for the application to report through its own logger. */
+cpu_features_config_status_t cpu_features_config_status(void);
+const char *cpu_features_invalid_environment_value(void);
 
 /* Force detection now rather than on first query. Optional: every query
  * detects on demand. Worth calling during startup so the one-time CPUID cost

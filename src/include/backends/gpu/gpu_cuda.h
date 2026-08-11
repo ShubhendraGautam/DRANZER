@@ -20,6 +20,19 @@
 
 typedef struct gpu_cuda_ctx gpu_cuda_ctx_t; /* opaque */
 
+typedef enum {
+    GPU_CUDA_ERROR_NONE = 0,
+    GPU_CUDA_ERROR_DRIVER,
+    GPU_CUDA_ERROR_KERNEL_CAPACITY,
+} gpu_cuda_error_kind_t;
+
+typedef struct {
+    gpu_cuda_error_kind_t kind;
+    int driver_code;
+    char operation[48];
+    char message[128];
+} gpu_cuda_error_t;
+
 /* Loads libcuda.so.1, initializes the driver, creates a context on device
  * 0. Returns NULL if the driver library isn't present or isn't functional
  * (e.g. no NVIDIA GPU) - callers should treat that as "GPU path
@@ -27,6 +40,12 @@ typedef struct gpu_cuda_ctx gpu_cuda_ctx_t; /* opaque */
 gpu_cuda_ctx_t *gpu_cuda_init(void);
 
 void gpu_cuda_shutdown(gpu_cuda_ctx_t *ctx);
+
+/* Copy the most recent structured error. Returns 1 when an error is present,
+ * 0 when the context has none. Successful calls do not erase an earlier
+ * diagnostic; gpu_cuda_clear_error() does so explicitly. */
+int gpu_cuda_last_error(const gpu_cuda_ctx_t *ctx, gpu_cuda_error_t *out_error);
+void gpu_cuda_clear_error(gpu_cuda_ctx_t *ctx);
 
 /* Loads PTX source (a NUL-terminated string, JIT-compiled by the driver on
  * the spot) as a module and resolves `kernel_name` from it. Returns 0 on

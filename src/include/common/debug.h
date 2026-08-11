@@ -1,23 +1,20 @@
 #ifndef DEBUG_H
 #define DEBUG_H
 
-#include <stdio.h>
-
 /**
  * Debug logging macro
- * Usage: DEBUG_PRINT("message: %d\n", value);
+ * Usage: DEBUG_PRINT("message: %d\n", value).
  * 
- * Compile with DEBUG=1 to enable debug output:
- *   make DEBUG=1
+ * Library code never chooses a terminal. A DEBUG build routes messages only
+ * when the embedding application defines DRANZER_DEBUG_SINK(fmt, ...)
+ * (typically to its own callback/logger) in the compile flags. Without an
+ * application-provided sink, DEBUG_PRINT remains silent.
  */
 
-#ifdef DEBUG
+#if defined(DEBUG) && defined(DRANZER_DEBUG_SINK)
     #define DEBUG_PRINT(fmt, ...) \
-        do { \
-            fprintf(stderr, "[DEBUG] %s:%d in %s(): " fmt, \
-                    __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
-            fflush(stderr); \
-        } while (0)
+        DRANZER_DEBUG_SINK("[DEBUG] %s:%d in %s(): " fmt, \
+                           __FILE__, __LINE__, __func__, ##__VA_ARGS__)
 #else
     #define DEBUG_PRINT(fmt, ...) ((void)0)
 #endif

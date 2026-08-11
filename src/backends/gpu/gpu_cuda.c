@@ -8,7 +8,6 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 
 typedef int CUresult;
 typedef int CUdevice;
@@ -67,12 +66,20 @@ struct gpu_cuda_ctx {
     fn_cuLaunchKernel cuLaunchKernel;
     fn_cuCtxSynchronize cuCtxSynchronize;
     fn_cuGetErrorString cuGetErrorString;
+    gpu_cuda_error_t last_error;
 };
 
-static void log_cuda_error(gpu_cuda_ctx_t *ctx, const char *label, CUresult rc) {
+static void record_cuda_error(gpu_cuda_ctx_t *ctx, const char *label,
+                              CUresult rc) {
     const char *msg = "unknown";
     if (ctx->cuGetErrorString) ctx->cuGetErrorString(rc, &msg);
-    fprintf(stderr, "gpu_cuda: %s failed: CUresult=%d (%s)\n", label, rc, msg);
+    memset(&ctx->last_error, 0, sizeof(ctx->last_error));
+    ctx->last_error.kind = GPU_CUDA_ERROR_DRIVER;
+    ctx->last_error.driver_code = rc;
+    strncpy(ctx->last_error.operation, label,
+            sizeof(ctx->last_error.operation) - 1);
+    strncpy(ctx->last_error.message, msg ? msg : "unknown",
+            sizeof(ctx->last_error.message) - 1);
 }
 
 gpu_cuda_ctx_t *gpu_cuda_init(void) {
@@ -144,10 +151,23 @@ void gpu_cuda_shutdown(gpu_cuda_ctx_t *ctx) {
     free(ctx);
 }
 
+int gpu_cuda_last_error(const gpu_cuda_ctx_t *ctx,
+                        gpu_cuda_error_t *out_error) {
+    if (!ctx || !out_error || ctx->last_error.kind == GPU_CUDA_ERROR_NONE) {
+        return 0;
+    }
+    *out_error = ctx->last_error;
+    return 1;
+}
+
+void gpu_cuda_clear_error(gpu_cuda_ctx_t *ctx) {
+    if (ctx) memset(&ctx->last_error, 0, sizeof(ctx->last_error));
+}
+
 int gpu_cuda_load_module(gpu_cuda_ctx_t *ctx, const char *ptx_src) {
     CUresult rc = ctx->cuModuleLoadData(&ctx->module, ptx_src);
     if (rc != 0) {
-        log_cuda_error(ctx, "cuModuleLoadData", rc);
+        record_cuda_error(ctx, "cuModuleLoadData", rc);
         return -1;
     }
     /* Any handle previously handed out referred to the module just replaced. */
@@ -158,15 +178,19 @@ int gpu_cuda_load_module(gpu_cuda_ctx_t *ctx, const char *ptx_src) {
 
 gpu_cuda_kernel_t *gpu_cuda_resolve_kernel(gpu_cuda_ctx_t *ctx, const char *kernel_name) {
     if (ctx->kernel_count >= GPU_CUDA_MAX_KERNELS) {
-        fprintf(stderr, "gpu_cuda: no kernel slot left for \"%s\" (max %d)\n",
-                kernel_name, GPU_CUDA_MAX_KERNELS);
+        memset(&ctx->last_error, 0, sizeof(ctx->last_error));
+        ctx->last_error.kind = GPU_CUDA_ERROR_KERNEL_CAPACITY;
+        strncpy(ctx->last_error.operation, "cuModuleGetFunction",
+                sizeof(ctx->last_error.operation) - 1);
+        strncpy(ctx->last_error.message, "CUDA kernel handle capacity exhausted",
+                sizeof(ctx->last_error.message) - 1);
         return NULL;
     }
 
     CUfunction fn = NULL;
     CUresult rc = ctx->cuModuleGetFunction(&fn, ctx->module, kernel_name);
     if (rc != 0) {
-        log_cuda_error(ctx, "cuModuleGetFunction", rc);
+        record_cuda_error(ctx, "cuModuleGetFunction", rc);
         return NULL;
     }
 
@@ -191,7 +215,7 @@ uint64_t gpu_cuda_alloc(gpu_cuda_ctx_t *ctx, size_t bytes) {
     uint64_t dptr = 0;
     CUresult rc = ctx->cuMemAlloc(&dptr, bytes);
     if (rc != 0) {
-        log_cuda_error(ctx, "cuMemAlloc", rc);
+        record_cuda_error(ctx, "cuMemAlloc", rc);
         return 0;
     }
     return dptr;
@@ -204,7 +228,7 @@ void gpu_cuda_free(gpu_cuda_ctx_t *ctx, uint64_t dptr) {
 int gpu_cuda_upload(gpu_cuda_ctx_t *ctx, uint64_t dptr, const void *host, size_t bytes) {
     CUresult rc = ctx->cuMemcpyHtoD(dptr, host, bytes);
     if (rc != 0) {
-        log_cuda_error(ctx, "cuMemcpyHtoD", rc);
+        record_cuda_error(ctx, "cuMemcpyHtoD", rc);
         return -1;
     }
     return 0;
@@ -213,7 +237,7 @@ int gpu_cuda_upload(gpu_cuda_ctx_t *ctx, uint64_t dptr, const void *host, size_t
 int gpu_cuda_download(gpu_cuda_ctx_t *ctx, void *host, uint64_t dptr, size_t bytes) {
     CUresult rc = ctx->cuMemcpyDtoH(host, dptr, bytes);
     if (rc != 0) {
-        log_cuda_error(ctx, "cuMemcpyDtoH", rc);
+        record_cuda_error(ctx, "cuMemcpyDtoH", rc);
         return -1;
     }
     return 0;
@@ -226,7 +250,7 @@ static int launch_2d_async_fn(gpu_cuda_ctx_t *ctx, CUfunction fn,
     CUresult rc = ctx->cuLaunchKernel(fn, grid_x, grid_y, 1, block_x, block_y, 1,
                                        0, NULL, args, NULL);
     if (rc != 0) {
-        log_cuda_error(ctx, "cuLaunchKernel", rc);
+        record_cuda_error(ctx, "cuLaunchKernel", rc);
         return -1;
     }
     return 0;
@@ -257,7 +281,7 @@ int gpu_cuda_launch_2d(gpu_cuda_ctx_t *ctx,
 
     CUresult rc = ctx->cuCtxSynchronize();
     if (rc != 0) {
-        log_cuda_error(ctx, "cuCtxSynchronize", rc);
+        record_cuda_error(ctx, "cuCtxSynchronize", rc);
         return -1;
     }
 

@@ -756,7 +756,13 @@ speed/memory improvement is reproducible on identified hardware.
   their model/tokenizer dependencies. `test_public_api.c` covers the public ownership and data-path
   contract, including release-order safety. Source review is complete; execution is deferred to the
   final bundled validation before this changes to `[x]`.
-- [ ] Remove terminal output from library code and return structured errors to callers.
+- [~] Remove terminal output from library code and return structured errors to callers.
+  Metrics are data-only, DEBUG output requires an application-provided sink, invalid CPU/GPU
+  environment overrides are queryable configuration statuses, and CUDA failures retain a
+  structured kind/operation/driver-code/message record. The CLI consumes and renders configuration
+  diagnostics at its own boundary. `check_library_silence.sh` rejects terminal calls across the
+  embeddable source set, while `test_library_diagnostics.c` captures both descriptors around invalid
+  settings and requires zero bytes. Execution is deferred to the bundled validation pass.
 - [ ] Produce static/shared library targets and small embedding examples.
 
 Acceptance gate: architectural changes have quality, correctness, speed, and memory comparisons;

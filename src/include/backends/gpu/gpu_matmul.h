@@ -3,6 +3,11 @@
 
 #include <stddef.h>
 
+typedef enum {
+    GPU_MATMUL_CONFIG_OK = 0,
+    GPU_MATMUL_CONFIG_INVALID_ENV,
+} gpu_matmul_config_status_t;
+
 /* GPU matrix multiply: C (m x n) = A (m x k) @ B (k x n), matching
  * tensor_ops.h's matrix_multiply() signature/semantics exactly so the two
  * are drop-in comparable (see tests/test_gpu_matmul.c). Backed by a
@@ -69,6 +74,11 @@ int gpu_matmul_backward_weight(const float *A, const float *dC, float *dB,
  * it before compute starts. */
 int gpu_matmul_set_forward_kernel(const char *name);
 const char *gpu_matmul_forward_kernel_name(void);
+
+/* Structured DRANZER_GPU_MATMUL parse result. Invalid input is ignored in
+ * favour of the measured default and never printed by the library. */
+gpu_matmul_config_status_t gpu_matmul_config_status(void);
+const char *gpu_matmul_invalid_environment_value(void);
 
 /* Marks every cached GPU-resident weight buffer stale. Must be called
  * once after anything changes ANY model weight (training.c calls this

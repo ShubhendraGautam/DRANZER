@@ -35,6 +35,8 @@ static int detected;
 static int isa_supported[CPU_ISA_COUNT];
 static cpu_isa_t max_isa = CPU_ISA_COUNT; /* sentinel: no cap requested yet */
 static char summary[160];
+static cpu_features_config_status_t config_status = CPU_FEATURES_CONFIG_OK;
+static char invalid_environment_value[64];
 
 #ifdef DRANZER_ARCH_X86_64
 /* XCR0, the OS's declaration of which extended register state it preserves.
@@ -82,10 +84,9 @@ static void apply_environment_cap(const char **note) {
 
     cpu_isa_t parsed;
     if (cpu_isa_from_name(requested, &parsed) != 0) {
-        fprintf(stderr,
-                "Warning: ignoring DRANZER_CPU_ISA=\"%s\" (expected one of "
-                "baseline, avx2, avx512, neon)\n",
-                requested);
+        config_status = CPU_FEATURES_CONFIG_INVALID_ENV;
+        snprintf(invalid_environment_value, sizeof(invalid_environment_value),
+                 "%s", requested);
         return;
     }
     max_isa = parsed;
@@ -185,6 +186,17 @@ int cpu_isa_from_name(const char *name, cpu_isa_t *isa_out) {
 const char *cpu_features_summary(void) {
     detect_once();
     return summary;
+}
+
+cpu_features_config_status_t cpu_features_config_status(void) {
+    detect_once();
+    return config_status;
+}
+
+const char *cpu_features_invalid_environment_value(void) {
+    detect_once();
+    return config_status == CPU_FEATURES_CONFIG_INVALID_ENV
+               ? invalid_environment_value : NULL;
 }
 
 void cpu_features_detect(void) {

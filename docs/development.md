@@ -33,6 +33,7 @@ fails.
 | `test_model_bundle.c` | Canonical round-trip, corruption sweep, bounds, and legacy fixture |
 | `test_attention_mask.c` | Padding/general-mask inference parity, empty rows, causality, and masked backward |
 | `test_public_api.c` | Opaque handle loading, binary-safe buffers, cache parity, retained ownership, and greedy generation |
+| `test_library_diagnostics.c` | Invalid CPU/GPU environment settings are structured and produce no terminal output |
 | `test_scalar_reference.c` | Tiled/full-model/cached-decode agreement with portable scalar matmul |
 | `test_matmul_backward.c` | Vector backward kernels against the portable reference, accumulation into a non-zero destination, and proof that dispatch reaches the vector path |
 | `test_matmul_kernels.c` | Every available kernel (portable and dispatched SIMD) at every tile size versus the scalar reference, plus selection determinism, configuration validation, and correct fallback when the instruction set is unavailable |
@@ -58,6 +59,10 @@ fails.
 | `test_gpu_training_backward.c` | CPU/GPU agreement on a model large enough that the dispatched backward kernels are actually used |
 
 GPU tests return success with a clear `SKIP` message when CUDA hardware is unavailable.
+
+`make library-silence-check` mechanically rejects `printf`/`fprintf`/`puts`/`putchar`/`perror`
+calls in embeddable core, API, tokenizer, CUDA, and GPU-matmul modules. File-format writers may use
+`snprintf` and stream writes; executable CLI/probe/report modules remain free to print.
 
 The suite also runs two shell-level integration gates:
 

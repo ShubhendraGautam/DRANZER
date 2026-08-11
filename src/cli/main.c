@@ -11,6 +11,8 @@
 #include "common/debug.h"
 #include "common/fp_bits.h"
 #include "core/rng.h"
+#include "core/cpu_features.h"
+#include "backends/gpu/gpu_matmul.h"
 #include "cli/config.h"
 #include "cli/evaluation.h"
 #include "cli/generation.h"
@@ -499,6 +501,20 @@ int main(int argc, char *argv[]) {
     if (args.help) {
         cli_print_help(argv[0]);
         return 0;
+    }
+
+    /* Runtime libraries return configuration diagnostics without choosing a
+     * terminal. The CLI is the caller, so it decides to surface them here. */
+    cpu_features_detect();
+    if (cpu_features_config_status() == CPU_FEATURES_CONFIG_INVALID_ENV) {
+        fprintf(stderr,
+                "Warning: ignoring DRANZER_CPU_ISA=\"%s\" (expected baseline, avx2, avx512, or neon)\n",
+                cpu_features_invalid_environment_value());
+    }
+    if (gpu_matmul_config_status() == GPU_MATMUL_CONFIG_INVALID_ENV) {
+        fprintf(stderr,
+                "Warning: ignoring DRANZER_GPU_MATMUL=\"%s\" (expected naive or tiled)\n",
+                gpu_matmul_invalid_environment_value());
     }
 
     if ((args.mode == MODE_INFER || args.mode == MODE_GENERATE) &&

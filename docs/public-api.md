@@ -12,6 +12,12 @@ The first contract version is `DRANZER_API_VERSION == 1`. Every fallible call re
 from the wrapper. Handles are stateful and are not safe for concurrent calls. Separate handles may
 be used by separate threads when the underlying model is not being mutated.
 
+No embeddable runtime module writes to stdout or stderr. Model metrics are returned as structured
+fields internally, invalid CPU/GPU environment overrides have queryable configuration statuses,
+and the CUDA wrapper retains its last operation/driver-code/message tuple. The standalone CLI and
+GPU probe remain executable frontends and choose how to render those values. A DEBUG build is also
+silent unless the embedding application supplies `DRANZER_DEBUG_SINK` at compile time.
+
 ## Loading and ownership
 
 ```c
