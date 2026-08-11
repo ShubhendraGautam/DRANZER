@@ -29,6 +29,23 @@ typedef struct {
     float *position_embedding;
 } model_kv_cache_t;
 
+/* Optional restrictions layered on top of causal self-attention.
+ *
+ * padding_mask has seq_len entries: zero marks padding, nonzero marks a real
+ * token. Padded query rows are kept at zero and padded key/value columns are
+ * never attended to.
+ *
+ * attention_mask is a packed row-major seq_len x seq_len boolean matrix:
+ * zero removes an edge and nonzero permits it. It cannot override causality,
+ * so entries with key position j > query position i remain masked. Either
+ * pointer may be NULL. The arrays only need to remain valid for the call;
+ * the effective mask is copied into the model's activation cache for
+ * backward. */
+typedef struct {
+    const uint8_t *padding_mask;
+    const uint8_t *attention_mask;
+} model_attention_mask_t;
+
 /* Multi-head self-attention forward pass for layer l. Reads
  * model->cache_hidden[l] as input, writes Q/K/V/probs/concat into that
  * layer's cache entries (needed by backward), and writes the final
@@ -61,6 +78,13 @@ model_errors_t model_forward_hidden(neural_model_t *model,
                                     uint32_t *token_ids,
                                     size_t seq_len);
 
+/* Mask-aware form of model_forward_hidden(). A fully masked attention row is
+ * valid and produces a zero attention context, avoiding infinity sentinels
+ * under the project's finite-math build. */
+model_errors_t model_forward_hidden_masked(
+    neural_model_t *model, uint32_t *token_ids, size_t seq_len,
+    const model_attention_mask_t *mask);
+
 /* Forward pass through the full stack of transformer layers plus the
  * output head, projecting the LAST position only. Populates the activation
  * cache as a side effect (needed by model_train_step's backward pass) but
@@ -76,6 +100,14 @@ model_errors_t model_forward(neural_model_t *model,
                               uint32_t *token_ids,
                               size_t seq_len,
                               float *output_logits);
+
+/* Mask-aware full forward pass. With a padding mask, logits are projected
+ * from the last non-padding position; an all-padding input is invalid. */
+model_errors_t model_forward_masked(neural_model_t *model,
+                                    uint32_t *token_ids,
+                                    size_t seq_len,
+                                    const model_attention_mask_t *mask,
+                                    float *output_logits);
 
 /* Allocate/reset/free an incremental decoding cache. The cache is tied to
  * the model passed at initialization and must be reset before starting a

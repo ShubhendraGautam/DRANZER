@@ -42,6 +42,15 @@ static void backward_layer_stack(neural_model_t *model,
         size_t l = model->num_layers - 1 - li;
         transformer_layer_t *layer = &model->layers[l];
 
+        if (model->cache_padding_mask_active) {
+            for (size_t i = 0; i < seq_len; i++) {
+                if (!model->cache_padding_mask[i]) {
+                    memset(&model->ws_dhidden_in[i * embedding_dim], 0,
+                           embedding_dim * sizeof(float));
+                }
+            }
+        }
+
         /* FFN-LN backward: dL/dx2 (ws_dhidden_in) -> dL/d(post-dropout ffn raw) (ws_d_s2) */
         layer_norm_backward(model->ws_dhidden_in, model->cache_ffn_xhat[l], model->cache_ffn_std[l],
                              layer->ln_gamma_ffn, layer->ln_gamma_ffn_grad, layer->ln_beta_ffn_grad,
@@ -109,6 +118,8 @@ static void backward_layer_stack(neural_model_t *model,
             /* Scatter into the token embedding gradients (position
              * embeddings are fixed, so no gradient needed for them). */
             for (size_t i = 0; i < seq_len; i++) {
+                if (model->cache_padding_mask_active &&
+                    !model->cache_padding_mask[i]) continue;
                 uint32_t token_id = token_ids[i];
                 if (token_id >= model->vocab_size) token_id = 0;
                 for (size_t d = 0; d < embedding_dim; d++) {
@@ -122,12 +133,10 @@ static void backward_layer_stack(neural_model_t *model,
     }
 }
 
-model_errors_t model_accumulate_gradients_all(neural_model_t *model,
-                                              uint32_t *token_ids,
-                                              const uint32_t *targets,
-                                              size_t seq_len,
-                                              float *out_loss,
-                                              size_t *out_supervised) {
+model_errors_t model_accumulate_gradients_all_masked(
+    neural_model_t *model, uint32_t *token_ids, const uint32_t *targets,
+    size_t seq_len, const model_attention_mask_t *mask,
+    float *out_loss, size_t *out_supervised) {
     if (!model || model->params_read_only || !token_ids || !targets) {
         return MODEL_INVALID_INPUT;
     }
@@ -135,7 +144,8 @@ model_errors_t model_accumulate_gradients_all(neural_model_t *model,
 
     /* ---- Forward: layer stack, then the head over every position ---- */
     model->is_training = 1;
-    model_errors_t rc = model_forward_hidden(model, token_ids, seq_len);
+    model_errors_t rc = model_forward_hidden_masked(model, token_ids, seq_len,
+                                                    mask);
     if (rc != MODEL_SUCCESS) return rc;
 
     rc = lm_head_forward_all(model, seq_len);
@@ -143,7 +153,9 @@ model_errors_t model_accumulate_gradients_all(neural_model_t *model,
 
     float loss = 0.0f;
     size_t supervised = 0;
-    rc = lm_head_loss_and_grad_all(model, targets, seq_len, &loss, &supervised);
+    rc = lm_head_loss_and_grad_all_masked(
+        model, targets, mask ? mask->padding_mask : NULL, seq_len,
+        &loss, &supervised);
     if (rc != MODEL_SUCCESS) return rc;
 
     model->current_loss = loss;
@@ -164,6 +176,16 @@ model_errors_t model_accumulate_gradients_all(neural_model_t *model,
     backward_layer_stack(model, token_ids, seq_len);
 
     return MODEL_SUCCESS;
+}
+
+model_errors_t model_accumulate_gradients_all(neural_model_t *model,
+                                              uint32_t *token_ids,
+                                              const uint32_t *targets,
+                                              size_t seq_len,
+                                              float *out_loss,
+                                              size_t *out_supervised) {
+    return model_accumulate_gradients_all_masked(
+        model, token_ids, targets, seq_len, NULL, out_loss, out_supervised);
 }
 
 model_errors_t model_accumulate_gradients(neural_model_t *model,

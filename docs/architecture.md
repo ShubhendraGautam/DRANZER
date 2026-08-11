@@ -137,6 +137,26 @@ sequences, and callback cancellation. It emits safe decoded token pieces immedia
 only a possible stop-sequence prefix; control IDs and matching stop markers are never emitted. See
 [Generation runtime](generation.md) for the interface contract.
 
+## Padding and attention masks
+
+Full-sequence inference and training accept an optional `model_attention_mask_t`. Its
+`padding_mask` is one byte per position (zero for padding), and its `attention_mask` is an optional
+row-major `seq_len × seq_len` boolean edge matrix. Both restrictions are intersected with the
+causal triangle: a custom mask may remove an attention edge but cannot expose a future token.
+
+`model_forward_masked()` projects logits from the last non-padding position.
+`model_accumulate_gradients_all_masked()` also excludes padded positions from loss and gradient,
+even if the target array contains an ordinary vocabulary ID there. Padded queries and key/value
+columns cannot influence real tokens, and padded hidden rows are held at zero across layers. A
+general-mask row with no allowed key is valid: its attention probabilities and context are exact
+zero, so the residual path remains finite without an infinity sentinel under `-ffast-math`.
+
+The effective mask is copied into the model's existing activation cache for backward; caller-owned
+mask bytes therefore only need to live through the API call. Passing `NULL` uses the original
+causal fast path and preserves all existing call sites. Position encodings remain tied to physical
+indices, so callers that use left padding must account for that; the intended batching layout is
+right padding.
+
 ## Parameter and activation memory
 
 All trainable parameters live in one contiguous `params` allocation. Gradients use an identical

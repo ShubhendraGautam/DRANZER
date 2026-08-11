@@ -170,8 +170,11 @@ static model_errors_t model_new_seeded_impl(neural_model_t *model,
     model->params_read_only = external_parameters != NULL;
     model->grads = calloc(model->total_param_count, sizeof(float));
     model->position_embeddings = malloc(max_seq_len * embedding_dim * sizeof(float));
+    model->cache_attention_allowed = malloc(max_seq_squared);
+    model->cache_padding_mask = malloc(max_seq_len);
 
-    if (!model->params || !model->grads || !model->position_embeddings) {
+    if (!model->params || !model->grads || !model->position_embeddings ||
+        !model->cache_attention_allowed || !model->cache_padding_mask) {
         model_free(model);
         return MODEL_ALLOCATION_FAILURE;
     }
@@ -423,6 +426,8 @@ void model_free(neural_model_t *model) {
     free(model->adam_m);
     free(model->adam_v);
     free(model->position_embeddings);
+    free(model->cache_attention_allowed);
+    free(model->cache_padding_mask);
     free(model->layers); /* just the struct array - its float* fields are views into params/grads, not owners */
 
     if (model->cache_hidden) {

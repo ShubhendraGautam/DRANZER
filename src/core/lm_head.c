@@ -36,11 +36,10 @@ model_errors_t lm_head_forward_all(neural_model_t *model, size_t seq_len) {
     return MODEL_SUCCESS;
 }
 
-model_errors_t lm_head_loss_and_grad_all(neural_model_t *model,
-                                         const uint32_t *targets,
-                                         size_t seq_len,
-                                         float *out_loss,
-                                         size_t *out_supervised) {
+model_errors_t lm_head_loss_and_grad_all_masked(
+    neural_model_t *model, const uint32_t *targets,
+    const uint8_t *position_mask, size_t seq_len,
+    float *out_loss, size_t *out_supervised) {
     if (!model || !targets || !model->ws_logits_all || !model->ws_grad_logits_all) {
         return MODEL_INVALID_INPUT;
     }
@@ -58,7 +57,8 @@ model_errors_t lm_head_loss_and_grad_all(neural_model_t *model,
         float *grad_row = &grad[i * vocab_size];
         uint32_t target = targets[i];
 
-        if (target == LM_HEAD_IGNORE_TARGET || target >= vocab_size) {
+        if ((position_mask && !position_mask[i]) ||
+            target == LM_HEAD_IGNORE_TARGET || target >= vocab_size) {
             memset(grad_row, 0, vocab_size * sizeof(float));
             continue;
         }
@@ -115,6 +115,15 @@ model_errors_t lm_head_loss_and_grad_all(neural_model_t *model,
                 supervised, seq_len, total_loss / (double)supervised);
 
     return MODEL_SUCCESS;
+}
+
+model_errors_t lm_head_loss_and_grad_all(neural_model_t *model,
+                                         const uint32_t *targets,
+                                         size_t seq_len,
+                                         float *out_loss,
+                                         size_t *out_supervised) {
+    return lm_head_loss_and_grad_all_masked(model, targets, NULL, seq_len,
+                                            out_loss, out_supervised);
 }
 
 model_errors_t lm_head_backward_all(neural_model_t *model, size_t seq_len) {

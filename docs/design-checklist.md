@@ -740,7 +740,14 @@ speed/memory improvement is reproducible on identified hardware.
   (`tests/core/test_statistics.c`).
 - [ ] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
-- [ ] Add padding and general attention masks before variable-length batching.
+- [~] Add padding and general attention masks before variable-length batching.
+  `model_attention_mask_t` now combines a per-position padding mask with an optional general
+  row-major edge mask, always intersected with causality. Mask-aware forward and all-position
+  training APIs cache the effective mask for backward, select the last real inference position,
+  exclude padded loss/gradients, and define empty attention rows as exact-zero context.
+  `test_attention_mask.c` covers prefix equivalence, padding-token independence, future-edge
+  rejection, finite empty rows, all-padding rejection, and padded gradient equivalence. Execution
+  remains deferred to the final bundled validation pass before this changes to `[x]`.
 - [ ] Consider grouped-query attention only after quality and decode benchmarks exist.
 - [ ] Expose opaque model, tokenizer, cache, and generation handles through a stable public C API.
 - [ ] Remove terminal output from library code and return structured errors to callers.

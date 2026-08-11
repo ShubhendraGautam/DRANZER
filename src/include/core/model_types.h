@@ -171,6 +171,15 @@ typedef struct {
     float **cache_attn_dropout_mask;  // [num_layers], each max_seq_len*embedding_dim (1.0 keep / 0.0 drop)
     float **cache_ffn_dropout_mask;   // [num_layers], each max_seq_len*embedding_dim (1.0 keep / 0.0 drop)
 
+    /* Effective mask cached by model_forward_hidden_masked() for the matching
+     * backward pass. attention_allowed is packed [seq_len x seq_len] for the
+     * current call; padding is [seq_len]. The active flags keep the ordinary
+     * unmasked causal path on its original tight-prefix implementation. */
+    uint8_t *cache_attention_allowed; // max_seq_len*max_seq_len bytes
+    uint8_t *cache_padding_mask;      // max_seq_len bytes
+    int cache_attention_mask_active;
+    int cache_padding_mask_active;
+
     // --- Reusable scratch for forward and backward passes. Single instance
     // each, overwritten every layer iteration - never needs to persist
     // across layers, unlike the cache_* arrays above. Sized for max_seq_len.

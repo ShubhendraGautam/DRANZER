@@ -30,8 +30,8 @@
  * targets[i] is the token that should follow position i. For a contiguous
  * window the caller passes the input shifted left by one, with the token
  * after the window as the final target. Positions set to
- * LM_HEAD_IGNORE_TARGET contribute neither loss nor gradient, which is what
- * padding and (later) general attention masks will need.
+ * LM_HEAD_IGNORE_TARGET contribute neither loss nor gradient. The masked
+ * overload additionally ignores padding positions regardless of target.
  */
 
 /* Target sentinel: this position is not supervised. */
@@ -61,6 +61,13 @@ model_errors_t lm_head_loss_and_grad_all(neural_model_t *model,
                                          size_t seq_len,
                                          float *out_loss,
                                          size_t *out_supervised);
+
+/* As above, additionally ignoring every position whose position_mask entry
+ * is zero. Used by padded all-position training; position_mask may be NULL. */
+model_errors_t lm_head_loss_and_grad_all_masked(
+    neural_model_t *model, const uint32_t *targets,
+    const uint8_t *position_mask, size_t seq_len,
+    float *out_loss, size_t *out_supervised);
 
 /* Backprop the head: accumulate into output_projection_grad and
  * output_bias_grad, and seed model->ws_dhidden_in with dL/d(final hidden)

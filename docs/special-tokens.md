@@ -7,7 +7,7 @@ Current tokenizers use a `special-v1` ID layout that preserves every historical 
 | Role | ID | Text behavior |
 |---|---:|---|
 | byte values | 0–255 | Raw byte vocabulary; unchanged from legacy tokenizers |
-| PAD | 256 | Reserved for future padded batches; never emitted by text encoding or generation |
+| PAD | 256 | Padding sentinel; never emitted by text encoding or generation |
 | UNK | 257 | Fallback when an internal token lookup cannot be represented; never emitted for ordinary bytes |
 | BOS | 258 | Begins each corpus document and model-visible prompt |
 | EOS | 259 | Ends each corpus document and stops generation |
@@ -29,8 +29,10 @@ Current tokenizers use a `special-v1` ID layout that preserves every historical 
   minimum length, and the shared decode loop stops immediately after sampling it.
 - Decoding omits all four control IDs, so they never appear as literal marker strings in output.
 
-PAD is reserved but not yet an attention mask. The current CLI uses unpadded variable-length
-windows. Padding masks remain an explicit later architecture goal.
+The core mask-aware APIs accept PAD positions through a separate boolean padding mask; the token ID
+alone never changes attention semantics. This keeps legacy/plain tokenizers usable and lets callers
+pad with any storage value as long as the corresponding mask entry is zero. The current CLI still
+uses unpadded variable-length windows; variable-length batch collation is a separate later step.
 
 ## Compatibility
 

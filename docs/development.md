@@ -31,6 +31,7 @@ fails.
 | `test_minibatch_accumulation.c` | Averaged sample gradients and one true minibatch optimizer update |
 | `test_serialization_roundtrip.c` | Identical logits before and after save/load |
 | `test_model_bundle.c` | Canonical round-trip, corruption sweep, bounds, and legacy fixture |
+| `test_attention_mask.c` | Padding/general-mask inference parity, empty rows, causality, and masked backward |
 | `test_scalar_reference.c` | Tiled/full-model/cached-decode agreement with portable scalar matmul |
 | `test_matmul_backward.c` | Vector backward kernels against the portable reference, accumulation into a non-zero destination, and proof that dispatch reaches the vector path |
 | `test_matmul_kernels.c` | Every available kernel (portable and dispatched SIMD) at every tile size versus the scalar reference, plus selection determinism, configuration validation, and correct fallback when the instruction set is unavailable |

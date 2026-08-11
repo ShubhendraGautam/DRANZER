@@ -26,8 +26,63 @@
 static void attention_head_forward(size_t head, size_t seq_len,
                                    size_t embedding_dim, size_t head_dim,
                                    const float *Q, const float *K, const float *V,
+                                   const uint8_t *attention_allowed,
                                    float *probs, float *concat) {
     float *head_probs = probs + head * seq_len * seq_len;
+
+    if (attention_allowed != NULL) {
+        /* General sparse boolean mask. Scores exist only for allowed edges;
+         * fully masked rows deliberately stay all-zero. This is the finite
+         * equivalent of an all -infinity row, without the NaN softmax that
+         * representation would produce (or violating -ffinite-math-only). */
+        for (size_t i = 0; i < seq_len; i++) {
+            float *row = &head_probs[i * seq_len];
+            memset(row, 0, seq_len * sizeof(*row));
+            size_t allowed_count = 0;
+            float max_score = 0.0f;
+            for (size_t j = 0; j < seq_len; j++) {
+                if (!attention_allowed[i * seq_len + j]) continue;
+                float score = 0.0f;
+                for (size_t d = 0; d < head_dim; d++) {
+                    size_t q_idx = i * embedding_dim + head * head_dim + d;
+                    size_t k_idx = j * embedding_dim + head * head_dim + d;
+                    score += Q[q_idx] * K[k_idx];
+                }
+                row[j] = score / sqrtf((float)head_dim);
+                if (allowed_count == 0 || row[j] > max_score) {
+                    max_score = row[j];
+                }
+                allowed_count++;
+            }
+            if (allowed_count == 0) continue;
+
+            float sum = 0.0f;
+            for (size_t j = 0; j < seq_len; j++) {
+                if (!attention_allowed[i * seq_len + j]) continue;
+                row[j] = expf(row[j] - max_score);
+                sum += row[j];
+            }
+            if (sum > 0.0f) {
+                float inverse = 1.0f / sum;
+                for (size_t j = 0; j < seq_len; j++) {
+                    if (attention_allowed[i * seq_len + j]) row[j] *= inverse;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < seq_len; i++) {
+            for (size_t d = 0; d < head_dim; d++) {
+                float sum = 0.0f;
+                for (size_t j = 0; j < seq_len; j++) {
+                    if (!attention_allowed[i * seq_len + j]) continue;
+                    sum += head_probs[i * seq_len + j] *
+                           V[j * embedding_dim + head * head_dim + d];
+                }
+                concat[i * embedding_dim + head * head_dim + d] = sum;
+            }
+        }
+        return;
+    }
 
     /* Causal mask: position i may only attend to j <= i.
      *
@@ -119,7 +174,10 @@ void multihead_attention_forward(neural_model_t *model, size_t l, size_t seq_len
                              num_heads * seq_len * seq_len * DRANZER_PARALLEL_SOFTMAX_WORK,
                          head,
         attention_head_forward(head, seq_len, embedding_dim, head_dim,
-                               Q, K, V, probs, concat);
+                               Q, K, V,
+                               model->cache_attention_mask_active
+                                   ? model->cache_attention_allowed : NULL,
+                               probs, concat);
     );
 
     model_dispatch_matmul(model, concat, layer->W_o, model->ws_fwd_attn_raw, seq_len, embedding_dim, embedding_dim);
@@ -239,9 +297,45 @@ void multihead_attention_backward(neural_model_t *model, size_t l, size_t seq_le
     matmul_backward_input(dV, layer->W_v, dL_dhidden_accum, seq_len, embedding_dim, embedding_dim);
 }
 
-model_errors_t model_forward_hidden(neural_model_t *model,
-                                    uint32_t *token_ids,
-                                    size_t seq_len) {
+static void zero_padded_rows(const neural_model_t *model, float *values,
+                             size_t seq_len, size_t width) {
+    if (!model->cache_padding_mask_active) return;
+    for (size_t i = 0; i < seq_len; i++) {
+        if (!model->cache_padding_mask[i]) {
+            memset(&values[i * width], 0, width * sizeof(*values));
+        }
+    }
+}
+
+static void prepare_attention_mask(neural_model_t *model, size_t seq_len,
+                                   const model_attention_mask_t *mask) {
+    const uint8_t *padding = mask ? mask->padding_mask : NULL;
+    const uint8_t *attention = mask ? mask->attention_mask : NULL;
+    model->cache_padding_mask_active = padding != NULL;
+    model->cache_attention_mask_active = padding != NULL || attention != NULL;
+
+    if (padding != NULL) {
+        for (size_t i = 0; i < seq_len; i++) {
+            model->cache_padding_mask[i] = padding[i] != 0;
+        }
+    }
+    if (!model->cache_attention_mask_active) return;
+
+    for (size_t i = 0; i < seq_len; i++) {
+        const int query_valid = padding == NULL || padding[i] != 0;
+        for (size_t j = 0; j < seq_len; j++) {
+            const int key_valid = padding == NULL || padding[j] != 0;
+            const int custom_allowed =
+                attention == NULL || attention[i * seq_len + j] != 0;
+            model->cache_attention_allowed[i * seq_len + j] =
+                (uint8_t)(j <= i && query_valid && key_valid && custom_allowed);
+        }
+    }
+}
+
+model_errors_t model_forward_hidden_masked(
+    neural_model_t *model, uint32_t *token_ids, size_t seq_len,
+    const model_attention_mask_t *mask) {
 
     if (!model || !token_ids) {
         return MODEL_INVALID_INPUT;
@@ -250,6 +344,8 @@ model_errors_t model_forward_hidden(neural_model_t *model,
     if (seq_len == 0 || seq_len > model->max_seq_len) {
         return MODEL_INVALID_INPUT;
     }
+
+    prepare_attention_mask(model, seq_len, mask);
 
     size_t embedding_dim = model->embedding_dim;
     size_t ffn_dim = embedding_dim * 4;
@@ -261,6 +357,12 @@ model_errors_t model_forward_hidden(neural_model_t *model,
     /* 1. Embed tokens + positional encoding -> cache_hidden[0] */
     float *h0 = model->cache_hidden[0];
     for (size_t i = 0; i < seq_len; i++) {
+        if (model->cache_padding_mask_active &&
+            !model->cache_padding_mask[i]) {
+            memset(&h0[i * embedding_dim], 0,
+                   embedding_dim * sizeof(*h0));
+            continue;
+        }
         uint32_t token_id = token_ids[i];
         if (token_id >= model->vocab_size) token_id = 0; // OOV handling
 
@@ -287,6 +389,8 @@ model_errors_t model_forward_hidden(neural_model_t *model,
         layer_norm_forward_cached(model->ws_fwd_attn_raw, model->cache_attn_xhat[l], model->cache_attn_std[l],
                                    model->cache_attn_ln_out[l], layer->ln_gamma_attn, layer->ln_beta_attn,
                                    seq_len, embedding_dim, epsilon);
+        zero_padded_rows(model, model->cache_attn_ln_out[l], seq_len,
+                         embedding_dim);
 
         /* FFN sub-block: matmul -> bias -> ReLU -> matmul -> bias -> dropout -> residual -> LN */
         float *x1 = model->cache_attn_ln_out[l];
@@ -313,27 +417,51 @@ model_errors_t model_forward_hidden(neural_model_t *model,
         layer_norm_forward_cached(model->ws_fwd_ff_raw, model->cache_ffn_xhat[l], model->cache_ffn_std[l],
                                    model->cache_hidden[l + 1], layer->ln_gamma_ffn, layer->ln_beta_ffn,
                                    seq_len, embedding_dim, epsilon);
+        zero_padded_rows(model, model->cache_hidden[l + 1], seq_len,
+                         embedding_dim);
     }
 
     return MODEL_SUCCESS;
 }
 
-model_errors_t model_forward(neural_model_t *model,
-                              uint32_t *token_ids,
-                              size_t seq_len,
-                              float *output_logits) {
-    if (!output_logits) {
+model_errors_t model_forward_hidden(neural_model_t *model,
+                                    uint32_t *token_ids,
+                                    size_t seq_len) {
+    return model_forward_hidden_masked(model, token_ids, seq_len, NULL);
+}
+
+model_errors_t model_forward_masked(neural_model_t *model,
+                                    uint32_t *token_ids,
+                                    size_t seq_len,
+                                    const model_attention_mask_t *mask,
+                                    float *output_logits) {
+    if (!model || !token_ids || !output_logits || seq_len == 0 ||
+        seq_len > model->max_seq_len) {
         return MODEL_INVALID_INPUT;
     }
 
-    model_errors_t rc = model_forward_hidden(model, token_ids, seq_len);
+    size_t last_position = seq_len - 1;
+    if (mask && mask->padding_mask) {
+        size_t found = 0;
+        for (size_t i = 0; i < seq_len; i++) {
+            if (mask->padding_mask[i]) {
+                last_position = i;
+                found = 1;
+            }
+        }
+        if (!found) return MODEL_INVALID_INPUT;
+    }
+
+    model_errors_t rc = model_forward_hidden_masked(model, token_ids, seq_len,
+                                                    mask);
     if (rc != MODEL_SUCCESS) {
         return rc;
     }
 
-    /* Output projection to vocabulary, from the last layer's LAST position
-     * only. That is all inference ever needs: the causal mask means every
-     * earlier position's row predicts a token the caller already has.
+    /* Output projection to vocabulary, from the last layer's last real
+     * position only. In an unpadded call that is the physical last position.
+     * That is all inference ever needs: the causal mask means every earlier
+     * position's row predicts a token the caller already has.
      *
      * Training goes through lm_head.c instead, which projects every row -
      * the same arithmetic, seq_len times over, for seq_len times the
@@ -341,7 +469,8 @@ model_errors_t model_forward(neural_model_t *model,
      * matters: routing prefill through the all-positions head would multiply
      * its output-projection cost by seq_len for logits nothing reads. */
     size_t embedding_dim = model->embedding_dim;
-    float *last_hidden = &model->cache_hidden[model->num_layers][(seq_len - 1) * embedding_dim];
+    float *last_hidden = &model->cache_hidden[model->num_layers]
+                                      [last_position * embedding_dim];
     model_dispatch_matmul(model, last_hidden, model->output_projection, output_logits, 1, embedding_dim, model->vocab_size);
 
     for (size_t i = 0; i < model->vocab_size; i++) {
@@ -349,6 +478,14 @@ model_errors_t model_forward(neural_model_t *model,
     }
 
     return MODEL_SUCCESS;
+}
+
+model_errors_t model_forward(neural_model_t *model,
+                             uint32_t *token_ids,
+                             size_t seq_len,
+                             float *output_logits) {
+    return model_forward_masked(model, token_ids, seq_len, NULL,
+                                output_logits);
 }
 
 model_errors_t model_kv_cache_init(model_kv_cache_t *cache, const neural_model_t *model) {

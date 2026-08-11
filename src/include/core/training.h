@@ -1,7 +1,7 @@
 #ifndef TRAINING_H
 #define TRAINING_H
 
-#include "core/model_types.h"
+#include "core/transformer.h"
 
 /* Train the model on a sequence: forward pass, cross-entropy loss, full
  * backpropagation through every layer (attention, FFN, layer norms,
@@ -54,6 +54,14 @@ model_errors_t model_accumulate_gradients_all(neural_model_t *model,
                                               size_t seq_len,
                                               float *out_loss,
                                               size_t *out_supervised);
+
+/* Mask-aware all-position training. Padding positions are ignored even if
+ * their targets are otherwise valid; the general attention mask is applied
+ * in both the cached forward activations and attention backward pass. */
+model_errors_t model_accumulate_gradients_all_masked(
+    neural_model_t *model, uint32_t *token_ids, const uint32_t *targets,
+    size_t seq_len, const model_attention_mask_t *mask,
+    float *out_loss, size_t *out_supervised);
 
 /* Average the accumulated gradients over sample_count, perform one
  * optimizer update, and record average_loss as one optimizer-step metric. */
