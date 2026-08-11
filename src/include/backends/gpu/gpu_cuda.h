@@ -15,7 +15,9 @@
  * Driver API types/calls - gpu_matmul.c (and any future GPU kernel module)
  * goes through this, never dlopen's libcuda.so.1 itself.
  *
- * NVIDIA-only, Linux-only. Not built by default - opt in with `make GPU=1`.
+ * NVIDIA-only, Linux-only. Compiled into ordinary builds, but loaded and used
+ * only when the application requests GPU execution; CPU-only hosts retain no
+ * CUDA link-time or startup dependency.
  */
 
 typedef struct gpu_cuda_ctx gpu_cuda_ctx_t; /* opaque */

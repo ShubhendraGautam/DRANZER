@@ -32,7 +32,9 @@ toolkit required.
 
 ## Quick start
 
-DRANZER is currently Linux-focused. You need Clang or GCC and GNU Make.
+DRANZER's release-tested configuration is Ubuntu 24.04 on x86-64. You need Clang or GCC and GNU
+Make; see [Supported platforms](docs/platform-support.md) for other CPU, OS, OpenMP, mmap, and CUDA
+support levels.
 
 ```bash
 git clone https://github.com/ShubhendraGautam/DRANZER.git
@@ -101,6 +103,7 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 | [GPU backend](docs/gpu.md) | PTX execution, capability probing, caching, limitations, and measurements |
 | [Development](docs/development.md) | Tests, CI/nightly jobs, sanitizers, benchmarks, and contribution workflow |
 | [Public C API](docs/public-api.md) | Opaque model/tokenizer/cache/generation handles and ownership rules |
+| [Supported platforms](docs/platform-support.md) | Release-tested OS/toolchains, CPU dispatch, mmap, OpenMP, and optional CUDA boundaries |
 | [Migration notes](docs/migrations.md) | Moving legacy/internal integrations to the supported API and bundle contracts |
 | [Results](docs/results.md) | Every measured finding, with its method, its uncertainty, and what reproduces it |
 | [Reproducibility](docs/reproducibility.md) | What a seed guarantees, per axis, and how each cell was established |

@@ -61,6 +61,7 @@ install -m 0644 "$repo_root/src/examples/embed_infer.c" \
 install -m 0644 "$repo_root/README.md" "$repo_root/LICENSE" \
     "$repo_root/CHANGELOG.md" "$repo_root/docs/public-api.md" \
     "$repo_root/docs/model-bundle.md" "$repo_root/docs/migrations.md" \
+    "$repo_root/docs/platform-support.md" \
     "$work_dir/$sdk_root/share/doc/"
 
 commit="$(git -C "$repo_root" rev-parse HEAD)"

@@ -14,6 +14,10 @@ application compare its header with the loaded library. Every fallible call retu
 from the wrapper. Handles are stateful and are not safe for concurrent calls. Separate handles may
 be used by separate threads when the underlying model is not being mutated.
 
+API version 1 inference is CPU-only; it does not expose the CLI's optional `--gpu` request. This is
+an API-surface limit, not a link dependency—the packaged library remains usable on hosts with or
+without an NVIDIA driver.
+
 No embeddable runtime module writes to stdout or stderr. Model metrics are returned as structured
 fields internally, invalid CPU/GPU environment overrides have queryable configuration statuses,
 and the CUDA wrapper retains its last operation/driver-code/message tuple. The standalone CLI and

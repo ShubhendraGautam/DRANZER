@@ -794,7 +794,11 @@ the CLI is a client of the same supported API available to external programs.
   cover the pre-0.5 embedding changes. The release workflow normalizes and packages source plus a
   Linux C SDK twice, requires byte-identical archives/checksums, and uploads only after all release
   gates pass. Packaging execution remains deferred to the bundled validation pass.
-- [ ] Document supported operating systems, CPU features, and optional GPU behavior precisely.
+- [x] Document supported operating systems, CPU features, and optional GPU behavior precisely.
+  `docs/platform-support.md` now separates release-supported, feature-supported, experimental, and
+  unsupported configurations. It pins the actual Ubuntu/x86-64 CI contract; exact AVX2/AVX-512
+  plus OS-state checks; compile-only, unselected AArch64 NEON status; mmap constraints; OpenMP
+  dependencies; and the optional device-0 CUDA path's PTX 7.0/`sm_75` minimum and CPU fallback.
 
 Acceptance gate: a new user can reproduce a reference result, embed the library, upgrade within the
 compatibility window, and diagnose failures using only released artifacts and documentation.

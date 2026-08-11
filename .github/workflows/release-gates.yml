@@ -64,9 +64,23 @@ jobs:
       - name: Compare clean builds and same-seed artifacts
         run: bash src/tools/check_reproducible_builds.sh gcc clang
 
+  openmp:
+    name: GCC OpenMP runtime paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the complete parallel suite
+        run: make -C src clean all test CC=gcc OMP=1
+
   packages:
     name: Reproducible release packages
-    needs: [fuzz-and-leaks, undefined-behavior, reproducible-builds]
+    needs: [fuzz-and-leaks, undefined-behavior, reproducible-builds, openmp]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 

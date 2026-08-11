@@ -11,7 +11,7 @@ and two backward kernels.
 
 GPU acceleration is:
 
-- optional and disabled by default;
+- compiled into normal Linux builds but optional and disabled at runtime by default;
 - NVIDIA-only;
 - Linux-focused;
 - limited to matrix multiplications — all of them in the forward pass, and the two backward
@@ -33,6 +33,10 @@ make
 
 `--gpu` is a request, not a requirement. `dispatch_matmul()` checks availability and uses the CPU
 path if initialization fails.
+
+The embedded module declares PTX ISA 7.0 and target `sm_75`, so execution requires an NVIDIA device
+with compute capability 7.5 or newer and a driver able to JIT PTX 7.0. See
+[Supported platforms](platform-support.md) for the exact support level and fallback contract.
 
 ## Capability probe
 

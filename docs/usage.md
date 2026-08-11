@@ -11,6 +11,10 @@ This guide covers building DRANZER and using its `train`, `eval`, `infer`, and `
 - GNU Make
 - Standard C library, `libm`, and `libdl`
 
+The release-tested configuration is Ubuntu 24.04 on x86-64. Other operating systems,
+architectures, SIMD paths, OpenMP, mmap, and CUDA have deliberately different support levels; see
+[Supported platforms](platform-support.md) before distributing a binary.
+
 Ubuntu/Debian:
 
 ```bash

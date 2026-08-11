@@ -20,6 +20,7 @@ their bundle-format version.
 - Padding/general attention masks across inference and training.
 - Structured library diagnostics and silent embedding-runtime behavior.
 - Release compatibility, fuzz/leak, and reproducible GCC/Clang build gates.
+- Explicit release, experimental, CPU ISA, mmap, OpenMP, and CUDA platform-support matrix.
 
 ### Changed
 
