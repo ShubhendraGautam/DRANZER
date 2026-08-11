@@ -114,6 +114,31 @@ int quantize_dequantize_into(const float *src, float *dst,
                              int bits, quant_granularity_t granularity,
                              quant_error_t *error_out);
 
+/* Storage form of the same symmetric grid.
+ *
+ * Codes are biased by qmax and packed least-significant bit first, with no
+ * alignment between values. Scales are float32 in group order (tensor, rows,
+ * or columns). The helpers expose their exact buffer sizes so bundle code can
+ * bounds-check an artifact before allocating or decoding it.
+ *
+ * quantize_pack() rejects non-finite inputs; quantize_unpack() additionally
+ * rejects non-finite/negative scales, the unused all-ones code, and non-zero
+ * padding bits. This makes a packed payload canonical rather than merely
+ * decodable. All functions return 0 on success and -1 on invalid arguments or
+ * an overflowing size calculation. */
+int quantized_scale_count(size_t rows, size_t cols,
+                          quant_granularity_t granularity,
+                          size_t *out_count);
+int quantized_packed_size(size_t value_count, int bits, size_t *out_size);
+int quantize_pack(const float *src, size_t rows, size_t cols,
+                  int bits, quant_granularity_t granularity,
+                  float *scales, size_t scales_count,
+                  uint8_t *packed, size_t packed_size);
+int quantize_unpack(const float *scales, size_t scales_count,
+                    const uint8_t *packed, size_t packed_size,
+                    size_t rows, size_t cols, int bits,
+                    quant_granularity_t granularity, float *dst);
+
 /* Combine per-tensor errors into one figure for a whole model. RMS values
  * combine as a count-weighted quadratic mean, not an average of averages,
  * which would weight a bias vector the same as an embedding matrix. */

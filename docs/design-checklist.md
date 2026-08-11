@@ -625,13 +625,20 @@ expected cost of FMA contraction and is recorded in T9's evidence rather than le
   on a synthetic corpus has no reason to carry the outlier structure that motivates the real
   activation-outlier literature, and only the weight-space level is even scale-independent in
   principle.
-- [ ] **Weight-only quantization, part 2: storage.** Persist quantized weights and their scales in
-  a versioned bundle, with the existing checksum/shape/bounds validation extended to them, and
-  measure artifact size against the accuracy cost part 1 established. A dequantize-on-load path
-  keeps the runtime unchanged, so this goal is about the format alone.
+- [~] **Weight-only quantization, part 2: storage.** Implementation is ready for source review;
+  the requested end-of-bundle test has deliberately not run yet. Bundle version 2 stores tensors
+  selected by the part-1 policy as tightly bit-packed symmetric codes plus float32 scales, while
+  excluded tensors remain float32. Each tensor record repeats its stable inventory index, kind,
+  and shape; the loader validates those, the policy-derived representation and byte bounds before
+  dequantizing into the ordinary float model. Header, weight-payload, tokenizer, exact-size, and
+  footer validation all apply to the new version, while version 1 remains readable and is still
+  what the existing save API writes. `model_bundle_save_quantized()` is opt-in and reports actual
+  artifact/payload bytes beside the same policy's quantized tensor/value/scale counts. The bundle
+  fixture covers reconstruction against part 1, size accounting, compression, checksum rejection,
+  and a forged-but-checksummed tensor shape; completion awaits review and that single test gate.
 - [~] **Weight-only quantization, part 3: whether it is actually faster.** Kernel side answered for
-  **bf16** (`core/bf16.{c,h}`, `tests/core/test_bf16.c`); INT8/INT4 kernels and the storage path
-  are not built, so this stays open.
+  **bf16** (`core/bf16.{c,h}`, `tests/core/test_bf16.c`); the INT storage path is implemented above,
+  but INT8/INT4 runtime kernels are not built, so this stays open.
 
   bf16 was taken first because it is the sharpest possible test of the question, not because it is
   the most compressive. Its widening is a 16-bit left shift into the high half of a float — three

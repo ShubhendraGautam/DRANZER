@@ -3,7 +3,7 @@
 [← Back to README](../README.md)
 
 DRANZER writes one self-contained model bundle at the path selected by `--model`. A bundle carries
-the architecture, canonical float32 weights, frozen BPE merge order, and enough provenance to
+the architecture, weights, frozen BPE merge order, and enough provenance to
 identify the training run. `eval`, `infer`, and `generate` load the embedded tokenizer; they do not
 need a `.tokenizer` sidecar.
 
@@ -41,11 +41,42 @@ The header checksum is calculated with its two split fields zeroed. FNV-1a check
 accidental corruption; they are not cryptographic signatures. Do not use them to establish
 artifact authenticity.
 
+## Version 2 quantized weights
+
+`model_bundle_save_quantized()` writes an opt-in version 2 artifact. The existing
+`model_bundle_save()` continues to write version 1, so adding storage quantization does not change
+an existing caller's bytes or accuracy. The common header fields keep their offsets; version 2
+uses numeric type `2`, a 184-byte header, and appends:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 152 | 4 | Symmetric-grid bit width (`2..16`) |
+| 156 | 4 | Scale granularity (`0` tensor, `1` row, `2` column) |
+| 160 | 4 | Policy flags (embeddings; biases and norms) |
+| 164 | 4 | Tensor-record count |
+| 168 | 8 | Number of values stored quantized |
+| 176 | 8 | Number of float32 scales stored |
+
+The weight payload follows the stable `model_param_tensors()` inventory. Every tensor starts with a
+32-byte record containing its index, kind, row count, column count, representation, and a reserved
+zero field. An excluded tensor is followed by canonical little-endian float32 values. An included
+tensor is followed by its little-endian float32 scales and tightly packed codes, with each code
+biased by `qmax` and written least-significant bit first. The unused all-ones code and non-zero tail
+padding are invalid, making the encoding canonical.
+
+Loading validates the record against the model-created inventory and against the policy in the
+header, then dequantizes directly into the ordinary float parameter buffer. Runtime kernels and
+memory representation therefore remain unchanged. The save API reports total artifact bytes,
+weight-payload bytes, tokenizer bytes, and quantized tensor/value/scale counts so storage can be
+compared to the accuracy report produced by `model_quantize_weights()`.
+
 ## Loading and safety
 
 The loader rejects unsupported versions, endian/numeric markers, header corruption, shape or
 parameter-count inconsistencies, integer overflow, unexpected file sizes, missing footers,
-checksum failures, trailing bytes, malformed tokens, embedded NULs, and partial input. It validates
+checksum failures, trailing bytes, malformed lengths, embedded NULs in legacy tokenizer payloads,
+partial input, tensor-record drift, invalid quantization policy fields, non-finite/negative scales,
+unused packed codes, and non-zero packed padding. It validates
 the parameter formula and quadratic attention-cache bound before allocating the model. Portable
 tokenizer vocabularies are capped at 1,048,576 entries.
 
@@ -55,7 +86,7 @@ destination untouched.
 
 ## Compatibility policy
 
-- Version 1 bundles are read exactly as specified above. Unknown bundle versions fail explicitly;
+- Version 1 and version 2 bundles are read exactly as specified above. Unknown bundle versions fail explicitly;
   the loader does not guess.
 - Files without bundle magic are offered to the read-only legacy host-native weight loader. The CLI
   then loads `<model>.tokenizer`, an explicit `--tokenizer`, or the historical byte-vocabulary
@@ -69,7 +100,8 @@ destination untouched.
 - Checkpoint compatibility is independent of bundle compatibility. A checkpoint is tied to exact
   resume state; a bundle is the smaller inference/evaluation artifact.
 
-`test_model_bundle.c` protects exact round trips, both payload checksums, truncation, unsupported
-versions, unsafe shapes, malformed tokenizer bounds, a deterministic mutation sweep, and legacy
-loading. CLI integration also deletes the sidecar before evaluation to prove the bundle is
-self-contained.
+`test_model_bundle.c` protects exact version-1 round trips, version-2 reconstruction against the
+simulated quantizer, artifact-size accounting, both payload checksums, tensor-shape validation,
+truncation, unsupported versions, unsafe shapes, malformed tokenizer bounds, a deterministic
+mutation sweep, and legacy loading. CLI integration also deletes the sidecar before evaluation to
+prove the bundle is self-contained.

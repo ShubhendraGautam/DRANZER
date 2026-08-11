@@ -293,6 +293,67 @@ static void check_zero_group(void) {
     if (error.rms_error != 0.0) fail("an all-zero tensor reported error");
 }
 
+/* The storage representation must reconstruct the exact grid used by the
+ * accuracy-only path. A 3x5 tensor deliberately leaves tail padding at the
+ * widths below, so canonical padding and the unused all-ones code are covered
+ * alongside the ordinary round trip. */
+static void check_packed_storage(void) {
+    const size_t rows = 3, cols = 5, count = rows * cols;
+    float original[count], expected[count], reconstructed[count];
+    fill(original, count, 19);
+
+    for (size_t g = 0; g < GRANULARITY_COUNT; g++) {
+        for (int bits = 3; bits <= 8; bits++) {
+            size_t scale_count = 0, packed_size = 0;
+            if (quantized_scale_count(rows, cols, granularities[g],
+                                      &scale_count) != 0 ||
+                quantized_packed_size(count, bits, &packed_size) != 0) {
+                fail("packed storage size calculation failed");
+                return;
+            }
+            float *scales = malloc(scale_count * sizeof(*scales));
+            uint8_t *packed = malloc(packed_size);
+            if (!scales || !packed) {
+                free(scales); free(packed);
+                fail("allocation");
+                return;
+            }
+            if (quantize_dequantize_into(original, expected, rows, cols, bits,
+                                         granularities[g], NULL) != 0 ||
+                quantize_pack(original, rows, cols, bits, granularities[g],
+                              scales, scale_count, packed, packed_size) != 0 ||
+                quantize_unpack(scales, scale_count, packed, packed_size,
+                                rows, cols, bits, granularities[g],
+                                reconstructed) != 0 ||
+                !reconstructions_agree(expected, reconstructed, count)) {
+                fail("packed storage changed the quantization grid");
+            }
+
+            uint8_t saved_first = packed[0];
+            packed[0] = (uint8_t)((packed[0] & (uint8_t)~((1u << bits) - 1u)) |
+                                  ((1u << bits) - 1u));
+            if (quantize_unpack(scales, scale_count, packed, packed_size,
+                                rows, cols, bits, granularities[g],
+                                reconstructed) != -1) {
+                fail("the unused packed code was accepted");
+            }
+            packed[0] = saved_first;
+
+            size_t used_bits = count * (size_t)bits;
+            if (used_bits % 8 != 0) {
+                packed[packed_size - 1] |= UINT8_C(0x80);
+                if (quantize_unpack(scales, scale_count, packed, packed_size,
+                                    rows, cols, bits, granularities[g],
+                                    reconstructed) != -1) {
+                    fail("non-zero packed padding was accepted");
+                }
+            }
+            free(scales);
+            free(packed);
+        }
+    }
+}
+
 static void check_rejects_invalid(void) {
     float values[16];
     fill(values, 16, 1);
@@ -389,6 +450,7 @@ int main(void) {
     check_grid_properties();
     check_monotonic_in_bits();
     check_zero_group();
+    check_packed_storage();
     check_rejects_invalid();
     check_name_round_trip();
     check_accumulate_weighting();

@@ -15,6 +15,7 @@
 #define LAYERS 1
 #define MAX_SEQUENCE 8
 #define BUNDLE_HEADER_SIZE 152
+#define QUANTIZED_HEADER_SIZE 184
 
 static int write_blob(const char *path, const uint8_t *data, size_t size) {
     FILE *file = fopen(path, "wb");
@@ -54,16 +55,34 @@ static void put_u32(uint8_t bytes[4], uint32_t value) {
     for (size_t i = 0; i < 4; i++) bytes[i] = (uint8_t)(value >> (8 * i));
 }
 
-static void refresh_header_checksum(uint8_t *header) {
+static uint64_t get_u64(const uint8_t bytes[8]) {
+    uint64_t value = 0;
+    for (size_t i = 0; i < 8; i++) value |= (uint64_t)bytes[i] << (8 * i);
+    return value;
+}
+
+static uint64_t checksum_bytes(const uint8_t *bytes, size_t size) {
     uint64_t checksum = UINT64_C(14695981039346656037);
-    memset(header + 76, 0, 4);
-    memset(header + 84, 0, 4);
-    for (size_t i = 0; i < BUNDLE_HEADER_SIZE; i++) {
-        checksum ^= header[i];
+    for (size_t i = 0; i < size; i++) {
+        checksum ^= bytes[i];
         checksum *= UINT64_C(1099511628211);
     }
+    return checksum;
+}
+
+static void refresh_header_checksum(uint8_t *header, size_t header_size) {
+    memset(header + 76, 0, 4);
+    memset(header + 84, 0, 4);
+    uint64_t checksum = checksum_bytes(header, header_size);
     put_u32(header + 76, (uint32_t)checksum);
     put_u32(header + 84, (uint32_t)(checksum >> 32));
+}
+
+static void refresh_weight_checksum(uint8_t *bundle, size_t header_size) {
+    size_t weight_size = (size_t)get_u64(bundle + 120);
+    uint64_t checksum = checksum_bytes(bundle + header_size, weight_size);
+    put_u64(bundle + 136, checksum);
+    refresh_header_checksum(bundle, header_size);
 }
 
 static bundle_errors_t load_and_release(const char *path) {
@@ -80,8 +99,10 @@ static bundle_errors_t load_and_release(const char *path) {
 }
 
 int main(void) {
-    char bundle_path[160], corrupt_path[160], legacy_path[160];
+    char bundle_path[160], quantized_path[160], corrupt_path[160], legacy_path[160];
     snprintf(bundle_path, sizeof(bundle_path), "/tmp/dranzer-bundle-%ld.bin", (long)getpid());
+    snprintf(quantized_path, sizeof(quantized_path),
+             "/tmp/dranzer-bundle-quantized-%ld.bin", (long)getpid());
     snprintf(corrupt_path, sizeof(corrupt_path), "/tmp/dranzer-corrupt-%ld.bin", (long)getpid());
     snprintf(legacy_path, sizeof(legacy_path), "/tmp/dranzer-legacy-%ld.pth", (long)getpid());
     int failed = 0;
@@ -162,6 +183,87 @@ int main(void) {
         goto cleanup;
     }
 
+    /* Version 2 stores only policy-selected tensors as packed codes. Loading
+     * reconstructs the same float grid as the part-1 simulated quantizer, and
+     * the report ties the measured artifact size to that accuracy policy. */
+    model_quant_config_t quant_config;
+    model_quantize_default_config(&quant_config);
+    quant_config.bits = 4;
+    neural_model_t expected_quantized = {0};
+    model_quant_report_t accuracy_report = {0};
+    model_bundle_storage_report_t storage_report = {0};
+    if (model_new(&expected_quantized, VOCAB, EMBEDDING, HEADS, LAYERS,
+                  MAX_SEQUENCE) != MODEL_SUCCESS) {
+        fprintf(stderr, "quantized bundle reference allocation failed\n");
+        failed = 1;
+        goto cleanup;
+    }
+    memcpy(expected_quantized.params, model.params,
+           model.total_param_count * sizeof(float));
+    if (model_quantize_weights(&expected_quantized, &quant_config,
+                               &accuracy_report) != 0 ||
+        model_bundle_save_quantized(&model, &encoder, &metadata, &quant_config,
+                                    &storage_report, quantized_path) != BUNDLE_SUCCESS) {
+        fprintf(stderr, "quantized bundle save failed\n");
+        model_free(&expected_quantized);
+        failed = 1;
+        goto cleanup;
+    }
+    size_t quantized_size = 0;
+    uint8_t *quantized_blob = read_blob(quantized_path, &quantized_size);
+    neural_model_t quantized_loaded = {0};
+    bpe_encoder_t *quantized_encoder = NULL;
+    model_bundle_metadata_t quantized_metadata = {0};
+    if (!quantized_blob || quantized_size <= QUANTIZED_HEADER_SIZE + 8 ||
+        storage_report.artifact_bytes != quantized_size ||
+        storage_report.weight_payload_bytes >= weights_size ||
+        quantized_size >= baseline_size ||
+        storage_report.values_quantized != accuracy_report.values_quantized ||
+        storage_report.tensors_quantized != accuracy_report.tensors_quantized ||
+        model_bundle_load(&quantized_loaded, &quantized_encoder,
+                          &quantized_metadata, quantized_path) != BUNDLE_SUCCESS ||
+        memcmp(quantized_loaded.params, expected_quantized.params,
+               model.total_param_count * sizeof(float)) != 0 ||
+        quantized_loaded.training_steps != model.training_steps ||
+        quantized_metadata.seed != metadata.seed ||
+        !quantized_encoder || !bpe_encoder_is_frozen(quantized_encoder)) {
+        fprintf(stderr, "quantized bundle roundtrip or size accounting failed\n");
+        failed = 1;
+    }
+    model_free(&expected_quantized);
+    model_free(&quantized_loaded);
+    if (quantized_encoder) {
+        bpe_encoder_free(quantized_encoder);
+        free(quantized_encoder);
+    }
+    if (failed) {
+        free(quantized_blob);
+        goto cleanup;
+    }
+
+    quantized_blob[QUANTIZED_HEADER_SIZE + 7] ^= UINT8_C(0x20);
+    if (!write_blob(corrupt_path, quantized_blob, quantized_size) ||
+        load_and_release(corrupt_path) != BUNDLE_CHECKSUM_ERROR) {
+        fprintf(stderr, "corrupt quantized payload was not rejected by checksum\n");
+        free(quantized_blob);
+        failed = 1;
+        goto cleanup;
+    }
+    quantized_blob[QUANTIZED_HEADER_SIZE + 7] ^= UINT8_C(0x20);
+
+    /* A forged-but-checksummed tensor shape must not redirect bytes into a
+     * different parameter view. */
+    quantized_blob[QUANTIZED_HEADER_SIZE + 8] ^= UINT8_C(1);
+    refresh_weight_checksum(quantized_blob, QUANTIZED_HEADER_SIZE);
+    if (!write_blob(corrupt_path, quantized_blob, quantized_size) ||
+        load_and_release(corrupt_path) != BUNDLE_FORMAT_ERROR) {
+        fprintf(stderr, "quantized tensor shape mismatch was not rejected\n");
+        free(quantized_blob);
+        failed = 1;
+        goto cleanup;
+    }
+    free(quantized_blob);
+
     /* Weight and tokenizer payloads have independent checksums. */
     baseline[BUNDLE_HEADER_SIZE + 3] ^= UINT8_C(0x40);
     if (!write_blob(corrupt_path, baseline, baseline_size) ||
@@ -187,7 +289,7 @@ int main(void) {
         goto cleanup;
     }
     baseline[8] = 2;
-    refresh_header_checksum(baseline);
+    refresh_header_checksum(baseline, BUNDLE_HEADER_SIZE);
     if (!write_blob(corrupt_path, baseline, baseline_size) ||
         load_and_release(corrupt_path) != BUNDLE_UNSUPPORTED) {
         fprintf(stderr, "unknown bundle version was not rejected\n");
@@ -195,12 +297,12 @@ int main(void) {
         goto cleanup;
     }
     baseline[8] = 1;
-    refresh_header_checksum(baseline);
+    refresh_header_checksum(baseline, BUNDLE_HEADER_SIZE);
 
     /* A corrupted max-sequence header must fail shape validation before it
      * can request a huge quadratic attention cache. */
     memset(baseline + 56, 0xff, 8);
-    refresh_header_checksum(baseline);
+    refresh_header_checksum(baseline, BUNDLE_HEADER_SIZE);
     if (!write_blob(corrupt_path, baseline, baseline_size) ||
         load_and_release(corrupt_path) != BUNDLE_FORMAT_ERROR) {
         fprintf(stderr, "unsafe model shape was not rejected\n");
@@ -297,6 +399,7 @@ cleanup:
     bpe_encoder_free(&encoder);
     model_free(&model);
     remove(bundle_path);
+    remove(quantized_path);
     remove(corrupt_path);
     remove(legacy_path);
     printf("\n%s\n", failed ? "MODEL BUNDLE CHECK FAILED" : "MODEL BUNDLE CHECK PASSED");

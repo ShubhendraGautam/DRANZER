@@ -4,7 +4,9 @@
  */
 
 #include "core/quantize.h"
+#include "common/fp_bits.h"
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Levels for a b-bit symmetric grid: [-qmax, qmax] with qmax = 2^(b-1) - 1.
@@ -176,6 +178,128 @@ int quantize_dequantize(float *values, size_t rows, size_t cols,
                         quant_error_t *error_out) {
     return quantize_dequantize_into(values, values, rows, cols, bits,
                                     granularity, error_out);
+}
+
+int quantized_scale_count(size_t rows, size_t cols,
+                          quant_granularity_t granularity,
+                          size_t *out_count) {
+    if (!out_count || rows == 0 || cols == 0 ||
+        !granularity_in_range(granularity)) return -1;
+    switch (granularity) {
+        case QUANT_GRANULARITY_TENSOR: *out_count = 1; break;
+        case QUANT_GRANULARITY_ROW: *out_count = rows; break;
+        case QUANT_GRANULARITY_COLUMN: *out_count = cols; break;
+        default: return -1;
+    }
+    return 0;
+}
+
+int quantized_packed_size(size_t value_count, int bits, size_t *out_size) {
+    if (!out_size || value_count == 0 || bits < QUANT_MIN_BITS ||
+        bits > QUANT_MAX_BITS || value_count > (SIZE_MAX - 7) / (size_t)bits) {
+        return -1;
+    }
+    *out_size = (value_count * (size_t)bits + 7) / 8;
+    return 0;
+}
+
+static size_t scale_index(size_t index, size_t cols,
+                          quant_granularity_t granularity) {
+    if (granularity == QUANT_GRANULARITY_ROW) return index / cols;
+    if (granularity == QUANT_GRANULARITY_COLUMN) return index % cols;
+    return 0;
+}
+
+static void packed_code_set(uint8_t *packed, size_t bit_offset,
+                            int bits, uint32_t code) {
+    for (int bit = 0; bit < bits; bit++) {
+        if ((code & (UINT32_C(1) << bit)) != 0) {
+            size_t position = bit_offset + (size_t)bit;
+            packed[position / 8] |= (uint8_t)(UINT32_C(1) << (position % 8));
+        }
+    }
+}
+
+static uint32_t packed_code_get(const uint8_t *packed, size_t bit_offset,
+                                int bits) {
+    uint32_t code = 0;
+    for (int bit = 0; bit < bits; bit++) {
+        size_t position = bit_offset + (size_t)bit;
+        if ((packed[position / 8] & (uint8_t)(UINT32_C(1) << (position % 8))) != 0) {
+            code |= UINT32_C(1) << bit;
+        }
+    }
+    return code;
+}
+
+int quantize_pack(const float *src, size_t rows, size_t cols,
+                  int bits, quant_granularity_t granularity,
+                  float *scales, size_t scales_count,
+                  uint8_t *packed, size_t packed_size) {
+    size_t required_scales = 0, required_bytes = 0;
+    if (!arguments_valid(src, rows, cols, bits, granularity) || !scales ||
+        !packed || rows > SIZE_MAX / cols ||
+        quantized_scale_count(rows, cols, granularity, &required_scales) != 0 ||
+        quantized_packed_size(rows * cols, bits, &required_bytes) != 0 ||
+        scales_count != required_scales || packed_size != required_bytes) return -1;
+
+    const size_t total = rows * cols;
+    const int qmax = quant_levels(bits);
+    memset(scales, 0, scales_count * sizeof(*scales));
+    memset(packed, 0, packed_size);
+
+    for (size_t i = 0; i < total; i++) {
+        if (!dranzer_float_is_finite(src[i])) return -1;
+        size_t group = scale_index(i, cols, granularity);
+        float magnitude = fabsf(src[i]);
+        if (magnitude > scales[group]) scales[group] = magnitude;
+    }
+    for (size_t i = 0; i < total; i++) {
+        const float peak = scales[scale_index(i, cols, granularity)];
+        float level = peak > 0.0f
+                    ? round_half_away(src[i] * ((float)qmax / peak)) : 0.0f;
+        if (level > (float)qmax) level = (float)qmax;
+        if (level < -(float)qmax) level = -(float)qmax;
+        uint32_t code = (uint32_t)((int)level + qmax);
+        packed_code_set(packed, i * (size_t)bits, bits, code);
+    }
+    for (size_t group = 0; group < scales_count; group++) {
+        if (scales[group] > 0.0f) scales[group] /= (float)qmax;
+    }
+    return 0;
+}
+
+int quantize_unpack(const float *scales, size_t scales_count,
+                    const uint8_t *packed, size_t packed_size,
+                    size_t rows, size_t cols, int bits,
+                    quant_granularity_t granularity, float *dst) {
+    size_t required_scales = 0, required_bytes = 0;
+    if (!scales || !packed || !dst || rows == 0 || cols == 0 ||
+        rows > SIZE_MAX / cols || bits < QUANT_MIN_BITS ||
+        bits > QUANT_MAX_BITS ||
+        quantized_scale_count(rows, cols, granularity, &required_scales) != 0 ||
+        quantized_packed_size(rows * cols, bits, &required_bytes) != 0 ||
+        scales_count != required_scales || packed_size != required_bytes) return -1;
+
+    for (size_t i = 0; i < scales_count; i++) {
+        if (!dranzer_float_is_finite(scales[i]) || scales[i] < 0.0f) return -1;
+    }
+    const size_t total = rows * cols;
+    const int qmax = quant_levels(bits);
+    const uint32_t largest_code = (uint32_t)(2 * qmax);
+    for (size_t i = 0; i < total; i++) {
+        uint32_t code = packed_code_get(packed, i * (size_t)bits, bits);
+        if (code > largest_code) return -1;
+        int level = (int)code - qmax;
+        dst[i] = scales[scale_index(i, cols, granularity)] * (float)level;
+    }
+
+    size_t used_bits = total * (size_t)bits;
+    if (used_bits % 8 != 0) {
+        uint8_t padding_mask = (uint8_t)(UINT8_MAX << (used_bits % 8));
+        if ((packed[packed_size - 1] & padding_mask) != 0) return -1;
+    }
+    return 0;
 }
 
 void quant_error_accumulate(quant_error_t *total, const quant_error_t *tensor) {

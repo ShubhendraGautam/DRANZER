@@ -7,15 +7,18 @@ three benefits at once — smaller files, less memory bandwidth, and "negligible
 that bundling is the problem. When a speedup and an accuracy change arrive in the same commit,
 neither can be attributed, and the accuracy claim becomes unfalsifiable.
 
-So this stage does only the accuracy question, and does it with no storage change and no kernel
-change. Weights are quantized to the grid and mapped straight back to float, in place. Every kernel
-downstream runs exactly as before. What changes is the *values*, and what is measured is what that
-costs. Storage and bandwidth are separate goals in
-[the checklist](design-checklist.md), deliberately after this one.
+Part 1 therefore did only the accuracy question, with no storage or kernel change: weights were
+quantized to the grid and mapped straight back to float in place. Part 2 now provides an opt-in
+versioned bundle representation for the same grid. It bit-packs codes and stores their float32
+scales, then dequantizes while loading, so every runtime kernel still receives the same float
+representation. Bandwidth kernels remain a separate goal in
+[the checklist](design-checklist.md).
 
 The grid lives in `src/core/quantize.c` behind `src/include/core/quantize.h`; the policy over which
 tensors it applies to is `src/core/model_quantize.c`; the tensor inventory both depend on is
-`src/core/model_params.c`. The measurement tool is `src/tools/bench_quant.c`.
+`src/core/model_params.c`. The storage path is `src/core/bundle.c`, and its version 2 contract is
+documented in [model-bundle.md](model-bundle.md). The measurement tool is
+`src/tools/bench_quant.c`.
 
 ## The scheme
 
