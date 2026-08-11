@@ -78,6 +78,7 @@ make -C src bench && ./src/bench.out     # model benchmarks
 make -C src bench-bundle-load            # copied vs mmap bundle startup/RSS
 make -C src public-api-check             # static/shared embedding artifacts
 make -C src release-repro-check          # clean GCC/Clang reproducibility gate
+make -C src release-package-check        # reproducible source/SDK archives
 make -C src profile CC=gcc               # frame-pointer build for perf
 make -C src gpu-probe && ./src/gpu_probe.out
 make -C src gpu-latency && ./src/gpu_latency.out  # GPU per-call cost
@@ -100,6 +101,7 @@ GPU tests compile on every machine and self-skip when CUDA hardware is unavailab
 | [GPU backend](docs/gpu.md) | PTX execution, capability probing, caching, limitations, and measurements |
 | [Development](docs/development.md) | Tests, CI/nightly jobs, sanitizers, benchmarks, and contribution workflow |
 | [Public C API](docs/public-api.md) | Opaque model/tokenizer/cache/generation handles and ownership rules |
+| [Migration notes](docs/migrations.md) | Moving legacy/internal integrations to the supported API and bundle contracts |
 | [Results](docs/results.md) | Every measured finding, with its method, its uncertainty, and what reproduces it |
 | [Reproducibility](docs/reproducibility.md) | What a seed guarantees, per axis, and how each cell was established |
 | [Corpus manifests](data/corpora/README.md) | The rule that a reported result may not name a corpus a reader cannot obtain |
@@ -118,4 +120,4 @@ between operations, so a training step is not GPU-resident.
 
 ## License
 
-MIT License. Built for learning, experimentation, and research.
+[MIT License](LICENSE). Built for learning, experimentation, and research.

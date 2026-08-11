@@ -177,6 +177,17 @@ requires compiler-independent initial weights, and runs the same-seed training-a
 under each rebuilt CLI. It intentionally does not compare trained weights across compilers, which
 the floating-point reproducibility contract does not promise.
 
+After those jobs pass, the workflow builds the public SDK and runs `release-package-check`, which
+packages the same commit twice with normalized paths, ownership, modes, mtimes, tar order, and gzip
+headers. Byte-identical source/SDK archives and `SHA256SUMS` are then uploaded. Locally, use:
+
+```bash
+make -C src release-package-check release-package CC=gcc
+```
+
+`VERSION` is canonical. `version-check` requires valid SemVer, matching public-header macros, a
+dated changelog entry, migration notes, a license, and—on tag workflows—an exact `v$VERSION` tag.
+
 `.github/workflows/performance.yml` runs nightly at 03:41 UTC and is manually dispatchable with
 custom tiers and repeat counts. It exists because a developer machine is a poor measurement
 instrument - on the project's own 2-core WSL2 workstation, repeating one unchanged benchmark six

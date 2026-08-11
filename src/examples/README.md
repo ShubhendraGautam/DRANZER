@@ -13,5 +13,6 @@ make -C src public-libs examples
 ./src/examples/embed_generate.out model.bin "hello" 20
 ```
 
-The generated shared-library example carries a relative runtime search path,
-so it finds `src/libdranzer.so` without changing `LD_LIBRARY_PATH`.
+The generated shared-library example carries relative development and SDK
+runtime search paths, so it finds either `src/libdranzer.so` or an installed
+adjacent `lib/libdranzer.so` without changing `LD_LIBRARY_PATH`.

@@ -7,7 +7,8 @@ headers and exposes opaque `dranzer_model_t`, `dranzer_tokenizer_t`, `dranzer_ca
 `dranzer_generation_t` handles. Applications do not depend on the layout of `neural_model_t`, the
 BPE hash maps, activation caches, or CLI configuration structures.
 
-The first contract version is `DRANZER_API_VERSION == 1`; `dranzer_api_version()` lets an
+The project release is reported by `DRANZER_VERSION_STRING` and `dranzer_version_string()`. The
+first independent API contract version is `DRANZER_API_VERSION == 1`; `dranzer_api_version()` lets an
 application compare its header with the loaded library. Every fallible call returns one
 `dranzer_status_t`; `dranzer_status_string()` supplies a stable diagnostic phrase without printing
 from the wrapper. Handles are stateful and are not safe for concurrent calls. Separate handles may

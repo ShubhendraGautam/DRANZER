@@ -1,6 +1,7 @@
 # Frozen DRANZER public ABI version 1. Additive API-1 releases append symbols;
 # removal or signature changes require API version 2.
 dranzer_api_version
+dranzer_version_string
 dranzer_bundle_load
 dranzer_model_free
 dranzer_tokenizer_free

@@ -13,6 +13,11 @@ extern "C" {
 #endif
 
 #define DRANZER_API_VERSION UINT32_C(1)
+#define DRANZER_VERSION_MAJOR UINT32_C(0)
+#define DRANZER_VERSION_MINOR UINT32_C(5)
+#define DRANZER_VERSION_PATCH UINT32_C(0)
+#define DRANZER_VERSION_PRERELEASE "dev"
+#define DRANZER_VERSION_STRING "0.5.0-dev"
 #define DRANZER_BUNDLE_FORMAT_OLDEST_SUPPORTED UINT32_C(1)
 #define DRANZER_BUNDLE_FORMAT_CURRENT UINT32_C(2)
 #define DRANZER_BUNDLE_INFO_V1_SIZE UINT32_C(64)
@@ -56,6 +61,7 @@ typedef struct {
 /* Runtime/header compatibility check. API version 1 remains source- and
  * ABI-compatible until the next major API version. */
 uint32_t dranzer_api_version(void);
+const char *dranzer_version_string(void);
 
 /* Load one bundle into separately owned opaque model and tokenizer handles.
  * On failure both outputs are NULL. MMAP accepts version-1 float bundles and

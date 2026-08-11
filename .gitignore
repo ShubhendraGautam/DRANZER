@@ -13,10 +13,15 @@ src/bench_quant.out
 src/bench_attention.out
 src/fingerprint_model.out
 src/app.out
+src/libdranzer.a
+src/libdranzer.so
+src/.public-build/
+src/examples/*.out
 libs/src/*.o
 libs/src/*.d
 libs/libattention.a
 build/
+dist/
 
 # Top-level corpus data only - NOT src/tests/ (test source code, tracked).
 # Anchored with a leading slash so it doesn't also match src/tests/.

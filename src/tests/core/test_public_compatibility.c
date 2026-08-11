@@ -44,6 +44,7 @@ static dranzer_status_t (*const bundle_load_v1)(
     const char *, dranzer_load_mode_t, dranzer_model_t **,
     dranzer_tokenizer_t **, dranzer_bundle_info_t *) = dranzer_bundle_load;
 static uint32_t (*const api_version_v1)(void) = dranzer_api_version;
+static const char *(*const version_string_v1)(void) = dranzer_version_string;
 static void (*const model_free_v1)(dranzer_model_t *) = dranzer_model_free;
 static void (*const tokenizer_free_v1)(dranzer_tokenizer_t *) =
     dranzer_tokenizer_free;
@@ -85,7 +86,8 @@ int main(void) {
         "checksum mismatch", "unsupported", "out of memory",
         "buffer too small", "model error", "generation finished",
     };
-    int failed = api_version_v1() != DRANZER_API_VERSION;
+    int failed = api_version_v1() != DRANZER_API_VERSION ||
+                 strcmp(version_string_v1(), DRANZER_VERSION_STRING) != 0;
     for (int i = DRANZER_OK; i <= DRANZER_FINISHED; i++) {
         if (strcmp(dranzer_status_string((dranzer_status_t)i),
                    status_text[i]) != 0) failed = 1;

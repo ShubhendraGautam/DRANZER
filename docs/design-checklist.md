@@ -788,7 +788,12 @@ the CLI is a client of the same supported API available to external programs.
   runners, and compares two clean builds under each compiler. GCC and Clang must each reproduce
   their own CLI/static/shared binaries and same-seed training artifacts; compiler-independent
   initial weights are compared across them. Execution is deferred to the final bundled pass.
-- [ ] Maintain semantic versions, a changelog, reproducible release artifacts, and migration notes.
+- [~] Maintain semantic versions, a changelog, reproducible release artifacts, and migration notes.
+  `VERSION` now defines project SemVer `0.5.0-dev`, mirrored by the public runtime version query and
+  checked against the dated changelog. Migration notes separate project/API/bundle versioning and
+  cover the pre-0.5 embedding changes. The release workflow normalizes and packages source plus a
+  Linux C SDK twice, requires byte-identical archives/checksums, and uploads only after all release
+  gates pass. Packaging execution remains deferred to the bundled validation pass.
 - [ ] Document supported operating systems, CPU features, and optional GPU behavior precisely.
 
 Acceptance gate: a new user can reproduce a reference result, embed the library, upgrade within the

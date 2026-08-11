@@ -35,6 +35,10 @@ uint32_t dranzer_api_version(void) {
     return DRANZER_API_VERSION;
 }
 
+const char *dranzer_version_string(void) {
+    return DRANZER_VERSION_STRING;
+}
+
 static void model_retain(dranzer_model_t *model) {
     model->references++;
 }

@@ -225,12 +225,21 @@ $(EXAMPLE_STATIC): $(PUBLIC_BUILD_DIR)/examples/embed_infer.o $(PUBLIC_STATIC)
 
 $(EXAMPLE_SHARED): $(PUBLIC_BUILD_DIR)/examples/embed_generate.o $(PUBLIC_SHARED)
 	$(CC) $< -L. -ldranzer $(CFLAGS) $(LDFLAGS) -ldl \
-		-Wl,-rpath,'$$ORIGIN/..' -o $@
+		-Wl,-rpath,'$$ORIGIN/..:$$ORIGIN/../lib' -o $@
 
 # Build/link both consumption modes and verify that the shared ABI exports
 # exactly the documented version-1 surface.
 public-api-check: public-libs examples
 	@bash tools/check_public_artifacts.sh
+
+version-check:
+	@bash ../scripts/release/check_version.sh
+
+release-package: public-api-check version-check
+	@DRANZER_RELEASE_CC="$(CC)" bash ../scripts/release/package.sh ../dist
+
+release-package-check: public-api-check version-check
+	@DRANZER_RELEASE_CC="$(CC)" bash ../scripts/release/check_packages.sh
 
 # Step 1: Build library first
 $(LIB):
@@ -474,7 +483,7 @@ else
     GPU_TEST_ENV = ASAN_OPTIONS=detect_leaks=0
 endif
 
-test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ) public-api-check
+test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ) public-api-check version-check
 	@failed=0; \
 	for src in $(TEST_SRCS); do \
 		bin=$${src%.c}.out; \
@@ -519,4 +528,4 @@ clean:
 # .d (first build, or straight after clean) from being an error.
 -include $(DEPS)
 
-.PHONY: all clean public-libs examples public-api-check release-repro-check bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention
+.PHONY: all clean public-libs examples public-api-check version-check release-package release-package-check release-repro-check bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention
