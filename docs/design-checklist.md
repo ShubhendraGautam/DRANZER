@@ -765,7 +765,11 @@ speed/memory improvement is reproducible on identified hardware.
   removes their beta tensors from the flat layout, and supplies cached full-sequence and decode math
   plus a closed-form backward. Its test covers the equation, numerical input gradients, gamma gradients,
   layout reduction, parameter tiling, cached/full equivalence, training accumulation, and pure
-  RMSNorm copy/mmap persistence. GELU is independently enabled by `--gelu`, uses the exact erf form
+  RMSNorm copy/mmap persistence; that test now passes under Clang. The small tier removes 512 beta
+  parameters (327,912 to 327,400). Four ABBA samples did not resolve full-context, growing-decode,
+  or training speed. Prefill and sliding decode were consistently slower in this implementation,
+  but the absolute intervals are only 0.053--0.094 and 0.077--0.096 ms/token respectively, so this
+  is recorded as a tuning lead rather than a broad performance claim. GELU is independently enabled by `--gelu`, uses the exact erf form
   in full-prefix and cached decoding, and allocates its pre-activation cache only for GELU models.
   Its focused test covers scalar and end-to-end numerical gradients, cached/full equivalence, flat
   layout stability, and pure-GELU copy/mmap persistence. SwiGLU is independently enabled by
