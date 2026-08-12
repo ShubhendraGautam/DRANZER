@@ -781,7 +781,11 @@ speed/memory improvement is reproducible on identified hardware.
   SwiGLU are mutually exclusive. Its focused test covers scalar SiLU derivatives, the integrated
   gate equation, numerical gradients for both projections, parameter layout/inventory, cached/full
   equivalence, invalid flag combinations, checkpoint continuation, and pure-SwiGLU copy/mmap
-  plus quantized persistence. No build, test, or ablation has run before review.
+  plus quantized persistence; that test now passes under Clang. Retaining the 4D inner width adds
+  66,560 small-tier parameters (327,912 to 394,472, or 20.30%). A two-sample ABBA run measured
+  56% more full-context inference time, 24% more growing decode, 20% more sliding decode, and 21%
+  more training time; every interval was disjoint from baseline. Quality measurement still decides
+  whether that explicit capacity/runtime trade is worthwhile.
 - [~] Add padding and general attention masks before variable-length batching.
   `model_attention_mask_t` now combines a per-position padding mask with an optional general
   row-major edge mask, always intersected with causality. Mask-aware forward and all-position

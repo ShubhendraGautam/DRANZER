@@ -34,7 +34,7 @@ static int check_scalar_math(void) {
 }
 
 static int check_activation_contract(neural_model_t *model) {
-    const uint32_t tokens[3] = {1, 4, 7};
+    uint32_t tokens[3] = {1, 4, 7};
     if (model_forward_hidden(model, tokens, 3) != MODEL_SUCCESS) return 0;
     transformer_layer_t *layer = &model->layers[0];
     for (size_t row = 0; row < 3; row++) {
