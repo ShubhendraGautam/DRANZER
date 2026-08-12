@@ -755,7 +755,10 @@ speed/memory improvement is reproducible on identified hardware.
   test now passes under Clang. On the small benchmark tier it removes exactly one 1000x64 matrix:
   327,912 to 263,912 parameters (19.52%, 1.25 to 1.01 MiB of weights). Two ABBA samples on an
   i5-11320H overlap the host's runtime spread, so no speed difference is claimed. This is a
-  correctness/resource result only; held-out quality still waits on the seed floor below. RoPE is
+  correctness/resource result. The 10-seed paired quality run resolved a regression: tied loss was
+  higher in 10/10 pairs by mean 0.05286 nats, with 95% bootstrap interval [0.03675, 0.07324], wholly
+  above the 0.03297 seed floor (mean loss ratio 1.02236). At this small-tier recipe, the parameter
+  saving therefore has a measurable held-out quality cost. RoPE is
   independently enabled by `--rope`, removes additive positions, rotates
   Q/K per head in full and cached attention, inverse-rotates gradients, and rejects odd head widths.
   Its focused source test covers rotation/inversion, pair-norm preservation, no-additive-position
