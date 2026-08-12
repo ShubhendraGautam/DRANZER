@@ -730,15 +730,18 @@ speed/memory improvement is reproducible on identified hardware.
   at this project's model sizes the floor may well be larger than the effects being chased. Finding
   that out first is cheap; finding it out after publishing a ranking is not.
 
-  **Implementation is ready; measurement is deferred to the bundled run.** The earlier corpus
-  blocker is removed by the verified Project Gutenberg ebook 100 manifest. The pre-registered
+  **Measured and ready.** The earlier corpus blocker is removed by the verified Project Gutenberg
+  ebook 100 manifest. The pre-registered
   `experiments/seed-floor-small/recipe.env` varies only the seed, requires 8–20 samples, and chooses
   N from a deterministic bootstrap precision criterion instead of fixing it after seeing a result.
   `seed_floor.out` emits the machine-readable sample standard deviation used as the comparison floor,
   and `scripts/research/measure_seed_floor.sh` preserves every seed/loss/model hash plus the recipe,
   corpus, compiler, and source identities. The shared comparison API still returns "unresolvable at
-  this N" when an interval clears zero but sits inside that floor. No floor number is claimed until
-  the reviewed source is built and the sweep runs in the final validation pass.
+  this N" when an interval clears zero but sits inside that floor. A GCC 11.4 release build on an
+  i5-11320H reached the preregistered precision target at 10 seeds: mean held-out cross-entropy
+  2.3704542 nats, 95% bootstrap interval [2.3521771, 2.3903358], sample standard deviation/noise
+  floor 0.0329741, and precision ratio 0.5786 against the required maximum 0.60. Every training-time
+  loss matched an independent bundle replay within 1e-6 and every model hash was retained.
 - [~] Evaluate tied embeddings, RoPE, RMSNorm, and GELU/SwiGLU one change at a time, each against
   the floor above, reporting "no resolvable difference" where that is the honest answer.
 
