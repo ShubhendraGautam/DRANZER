@@ -772,7 +772,10 @@ speed/memory improvement is reproducible on identified hardware.
   is recorded as a tuning lead rather than a broad performance claim. GELU is independently enabled by `--gelu`, uses the exact erf form
   in full-prefix and cached decoding, and allocates its pre-activation cache only for GELU models.
   Its focused test covers scalar and end-to-end numerical gradients, cached/full equivalence, flat
-  layout stability, and pure-GELU copy/mmap persistence. SwiGLU is independently enabled by
+  layout stability, and pure-GELU copy/mmap persistence; that test now passes under Clang. GELU
+  keeps the baseline's 327,912 small-tier parameters. A two-sample ABBA run measured its exact
+  `erf` activation at 37% more full-context inference time and 14% more training time; cached-decode
+  samples overlapped and do not support a claim. SwiGLU is independently enabled by
   `--swiglu` and implements `SiLU(xW₁+b₁) ⊙ (xW_gate+b_gate)` with a second projection,
   bias, activation cache, cached-decode scratch, and matched gradients for both branches. GELU and
   SwiGLU are mutually exclusive. Its focused test covers scalar SiLU derivatives, the integrated
