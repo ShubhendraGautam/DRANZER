@@ -190,6 +190,8 @@ GPU_PROBE_TARGET = gpu_probe.out
 LIB_DIR = ../libs
 LIB_NAME = attention
 LIB = $(LIB_DIR)/lib$(LIB_NAME).a
+LIB_INPUTS = $(wildcard $(LIB_DIR)/src/*.c $(LIB_DIR)/include/*.h) \
+             $(LIB_DIR)/Makefile
 
 all: $(LIB) $(TARGET)
 
@@ -242,7 +244,7 @@ release-package-check: public-api-check version-check
 	@DRANZER_RELEASE_CC="$(CC)" bash ../scripts/release/check_packages.sh
 
 # Step 1: Build library first
-$(LIB):
+$(LIB): $(LIB_INPUTS)
 	$(MAKE) DEBUG=$(DEBUG) ASAN=$(ASAN) -C $(LIB_DIR)
 
 # Step 2: Link everything

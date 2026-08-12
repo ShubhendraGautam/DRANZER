@@ -3,7 +3,7 @@ AR = ar
 # -O2 (not -O0/-g by default): the tokenizer/hashmap library was previously
 # built unoptimized, which hurts on slow/low-end CPUs. No -march here, so
 # the archive stays portable across machines.
-CFLAGS = -I include/ -O2
+CFLAGS = -I include/ -O2 -MMD -MP
 
 # Enable debug output with: make DEBUG=1
 ifdef DEBUG
@@ -20,6 +20,7 @@ endif
 # Only compile the core utility libraries
 SRC = src/hashmap.c src/byte_pair_encoding.c
 OBJ = $(SRC:.c=.o)
+DEPS = $(OBJ:.o=.d)
 
 TARGET = libattention.a
 
@@ -32,6 +33,8 @@ $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(DEPS) $(TARGET)
+
+-include $(DEPS)
 
 .PHONY: all clean
