@@ -277,6 +277,19 @@ compiler, OS/kernel/architecture, CPU model, detected SIMD instruction set, onli
 OpenMP version, and maximum thread
 count alongside its measurements.
 
+Architecture variants can be compared end to end under the same benchmark conditions. The
+architecture name is included in the CSV `mode` field so baseline and feature rows cannot be
+mistaken for one another:
+
+```bash
+./bench.out --tier small --cpu-only --architecture baseline
+./bench.out --tier small --cpu-only --architecture tied
+./bench.out --tier small --cpu-only --architecture rope
+./bench.out --tier small --cpu-only --architecture rmsnorm
+./bench.out --tier small --cpu-only --architecture gelu
+./bench.out --tier small --cpu-only --architecture swiglu
+```
+
 Bundle startup and resident memory have a focused two-process comparison. It accepts version-1
 float bundles because those can be mapped without representation conversion:
 

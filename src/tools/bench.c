@@ -216,7 +216,9 @@ static void csv_log(FILE *csv, const char *timestamp, const bench_config_t *cfg,
 static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
                        int use_gpu, int use_scalar, int infer_iters,
                        int train_iters, FILE *csv, const char *timestamp,
-                       const bench_metadata_t *metadata) {
+                       const bench_metadata_t *metadata,
+                       const char *architecture_name,
+                       uint32_t architecture_flags) {
     if (use_gpu && !gpu_matmul_available()) {
         printf("--- %s: GPU requested but not available - skipping GPU run ---\n\n", cfg->name);
         return;
@@ -225,9 +227,12 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
     neural_model_t model = {0};
     long rss_before = bench_peak_rss_kb();
 
-    if (model_new(&model, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads,
-                  cfg->num_layers, cfg->max_seq_len) != MODEL_SUCCESS) {
-        fprintf(stderr, "model_new failed for config %s\n", cfg->name);
+    if (model_new_seeded_architecture(
+            &model, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads,
+            cfg->num_layers, cfg->max_seq_len, MODEL_DEFAULT_SEED,
+            architecture_flags) != MODEL_SUCCESS) {
+        fprintf(stderr, "model_new failed for config %s architecture %s\n",
+                cfg->name, architecture_name);
         return;
     }
     model.optimizer_type = optimizer;
@@ -235,9 +240,9 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
     model.use_scalar_matmul = use_scalar;
 
     const char *optimizer_name = (optimizer == OPTIMIZER_ADAM) ? "adam" : "sgd";
-    printf("--- %s (vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu) optimizer=%s mode=%s ---\n",
+    printf("--- %s (vocab=%zu emb=%zu heads=%zu layers=%zu max_seq=%zu) architecture=%s optimizer=%s mode=%s ---\n",
            cfg->name, cfg->vocab_size, cfg->embedding_dim, cfg->num_heads, cfg->num_layers,
-           cfg->max_seq_len, optimizer_name,
+           cfg->max_seq_len, architecture_name, optimizer_name,
            use_gpu ? "GPU" : use_scalar ? "CPU scalar reference"
                                         : matmul_kernel_name(matmul_get_kernel()));
 
@@ -258,14 +263,15 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
     /* Encode the CPU kernel and tile into the existing `mode` column rather
      * than adding columns: a v2 results file written by an older build stays
      * readable, and a row still says exactly which kernel produced it. */
-    char mode[64];
+    char mode[96];
     if (use_gpu) {
-        snprintf(mode, sizeof(mode), "gpu");
+        snprintf(mode, sizeof(mode), "gpu-arch-%s", architecture_name);
     } else if (use_scalar) {
-        snprintf(mode, sizeof(mode), "cpu-scalar");
+        snprintf(mode, sizeof(mode), "cpu-scalar-arch-%s", architecture_name);
     } else {
-        snprintf(mode, sizeof(mode), "cpu-%s-tile%zu",
-                 matmul_kernel_name(matmul_get_kernel()), matmul_tile_size());
+        snprintf(mode, sizeof(mode), "cpu-%s-tile%zu-arch-%s",
+                 matmul_kernel_name(matmul_get_kernel()), matmul_tile_size(),
+                 architecture_name);
     }
     csv_log(csv, timestamp, cfg, optimizer_name, mode, (long)param_floats,
             &r, rss_after - rss_before, metadata);
@@ -275,6 +281,7 @@ static void run_config(const bench_config_t *cfg, optimizer_type_t optimizer,
 
 static void print_usage(const char *program) {
     printf("Usage: %s [--tier tiny|small|medium] [--scalar] [--quick]\n"
+           "          [--architecture baseline|tied|rope|rmsnorm|gelu|swiglu]\n"
            "          [--kernel auto|scalar|rowwise|tiled|tiled_mr4|avx2_mr4|\n"
            "                    avx512_mr4|neon_mr4] [--tile N]\n"
            "          [--cpu-only] [--matmul-only [--sweep] [--repeats N] [--csv-path FILE]]\n\n"
@@ -282,11 +289,32 @@ static void print_usage(const char *program) {
            "                    A SIMD kernel this CPU cannot run falls back to\n"
            "                    tiled_mr4 rather than failing.\n"
            "  --cpu-only        skip the GPU pass even when a CUDA device is present\n"
+           "  --architecture    instantiate one model architecture for an end-to-end\n"
+           "                    baseline/feature comparison (default: baseline)\n"
            "  --matmul-only     compare kernels on isolated shapes instead of whole models\n"
            "  --sweep           with --matmul-only: measure every kernel and tile candidate\n"
            "  --repeats N       with --matmul-only: timing rounds per candidate (median wins)\n"
            "  --csv-path FILE   with --matmul-only: results file to append to\n",
            program);
+}
+
+static int parse_architecture(const char *name, uint32_t *flags_out) {
+    if (strcmp(name, "baseline") == 0) {
+        *flags_out = 0;
+    } else if (strcmp(name, "tied") == 0) {
+        *flags_out = MODEL_ARCH_TIED_EMBEDDINGS;
+    } else if (strcmp(name, "rope") == 0) {
+        *flags_out = MODEL_ARCH_ROPE;
+    } else if (strcmp(name, "rmsnorm") == 0) {
+        *flags_out = MODEL_ARCH_RMSNORM;
+    } else if (strcmp(name, "gelu") == 0) {
+        *flags_out = MODEL_ARCH_GELU;
+    } else if (strcmp(name, "swiglu") == 0) {
+        *flags_out = MODEL_ARCH_SWIGLU;
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
 /* Strict positive-integer parsing, matching the CLI's own contract: no
@@ -306,6 +334,8 @@ static int parse_positive(const char *text, size_t *value_out) {
 
 int main(int argc, char **argv) {
     const char *selected_tier = NULL;
+    const char *architecture_name = "baseline";
+    uint32_t architecture_flags = 0;
     int use_scalar = 0;
     int quick = 0;
     int matmul_only = 0;
@@ -320,6 +350,13 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--tier") == 0 && i + 1 < argc) {
             selected_tier = argv[++i];
+        } else if (strcmp(argv[i], "--architecture") == 0 && i + 1 < argc) {
+            architecture_name = argv[++i];
+            if (parse_architecture(architecture_name, &architecture_flags) != 0) {
+                fprintf(stderr, "Error: unknown architecture '%s'\n",
+                        architecture_name);
+                return 2;
+            }
         } else if (strcmp(argv[i], "--scalar") == 0) {
             use_scalar = 1;
         } else if (strcmp(argv[i], "--quick") == 0) {
@@ -371,6 +408,10 @@ int main(int argc, char **argv) {
     }
     if (matmul_only && use_scalar) {
         fprintf(stderr, "Error: --matmul-only already compares scalar and dispatch paths\n");
+        return 2;
+    }
+    if (matmul_only && architecture_flags != 0) {
+        fprintf(stderr, "Error: --architecture only applies to full-model runs\n");
         return 2;
     }
     if (sweep && !matmul_only) {
@@ -501,7 +542,8 @@ int main(int argc, char **argv) {
         int infer_iters = quick ? 5 : 50;
         int train_iters = quick ? 2 : 20;
         run_config(&configs[i], OPTIMIZER_ADAM, 0, use_scalar,
-                   infer_iters, train_iters, csv, timestamp, &metadata);
+                   infer_iters, train_iters, csv, timestamp, &metadata,
+                   architecture_name, architecture_flags);
         /* GPU runs use fewer iterations to keep total benchmark time
          * bounded. Device buffers are not the reason: gpu_matmul.c holds
          * weights in a generation-keyed cache and reuses grown-on-demand
@@ -513,7 +555,8 @@ int main(int argc, char **argv) {
         if (gpu_available && !use_scalar) {
             run_config(&configs[i], OPTIMIZER_ADAM, 1, 0,
                        quick ? 2 : 10, quick ? 1 : 5,
-                       csv, timestamp, &metadata);
+                       csv, timestamp, &metadata,
+                       architecture_name, architecture_flags);
         }
     }
 
