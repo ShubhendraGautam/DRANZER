@@ -141,7 +141,8 @@ require_file "$corpus"
 compiler="$(recipe_get compiler)"
 if [ -z "$app" ]; then
     echo "building reviewed app and analyzer with $compiler" >&2
-    make -C "$repo_root/src" clean all seed-floor-tool CC="$compiler"
+    make -C "$repo_root/src" clean all seed-floor-tool CC="$compiler" \
+        DEBUG= ASAN= UBSAN= OMP=
     app="$repo_root/src/app.out"
     analyzer="$repo_root/src/seed_floor.out"
 else

@@ -6,7 +6,7 @@ AR = ar
 CFLAGS = -I include/ -O2 -MMD -MP
 
 # Enable debug output with: make DEBUG=1
-ifdef DEBUG
+ifeq ($(DEBUG),1)
     CFLAGS += -g -DDEBUG
     $(info DEBUG mode enabled)
 endif

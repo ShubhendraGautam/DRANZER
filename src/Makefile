@@ -61,7 +61,7 @@ ifdef SIZE
 endif
 
 # Enable debug output with: make DEBUG=1
-ifdef DEBUG
+ifeq ($(DEBUG),1)
     CFLAGS += -g -DDEBUG
     $(info DEBUG mode enabled)
 endif
