@@ -756,10 +756,14 @@ speed/memory improvement is reproducible on identified hardware.
   independently enabled by `--rope`, removes additive positions, rotates
   Q/K per head in full and cached attention, inverse-rotates gradients, and rejects odd head widths.
   Its focused source test covers rotation/inversion, pair-norm preservation, no-additive-position
-  input, cached/full equivalence, a numerical Q-gradient, and pure-RoPE copy/mmap bundle persistence.
-  RMSNorm is independently enabled by `--rmsnorm`; it replaces both LayerNorm sites, removes their
-  beta tensors from the flat layout, and supplies cached full-sequence and decode math plus a
-  closed-form backward. Its test covers the equation, numerical input gradients, gamma gradients,
+  input, cached/full equivalence, a numerical Q-gradient, and pure-RoPE copy/mmap bundle persistence;
+  that test now passes under Clang. A two-sample ABBA run on the same small tier found the expected
+  trigonometric work costs 29% in full-context inference and 18% in both growing and sliding cached
+  decode; all three sample distributions were disjoint. Training timings overlapped, so no training
+  cost is claimed. Held-out quality remains pending rather than treating runtime as an architecture
+  verdict. RMSNorm is independently enabled by `--rmsnorm`; it replaces both LayerNorm sites,
+  removes their beta tensors from the flat layout, and supplies cached full-sequence and decode math
+  plus a closed-form backward. Its test covers the equation, numerical input gradients, gamma gradients,
   layout reduction, parameter tiling, cached/full equivalence, training accumulation, and pure
   RMSNorm copy/mmap persistence. GELU is independently enabled by `--gelu`, uses the exact erf form
   in full-prefix and cached decoding, and allocates its pre-activation cache only for GELU models.
