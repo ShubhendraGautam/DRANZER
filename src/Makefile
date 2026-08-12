@@ -319,6 +319,15 @@ seed-floor-tool: $(SEED_FLOOR_TARGET)
 $(SEED_FLOOR_TARGET): $(SEED_FLOOR_OBJ)
 	$(CC) $(SEED_FLOOR_OBJ) $(CFLAGS) $(LDFLAGS) -o $(SEED_FLOOR_TARGET)
 
+ARCHITECTURE_COMPARE_SRC = tools/architecture_compare.c tools/statistics.c core/rng.c
+ARCHITECTURE_COMPARE_OBJ = $(ARCHITECTURE_COMPARE_SRC:.c=.o)
+ARCHITECTURE_COMPARE_TARGET = architecture_compare.out
+
+architecture-compare-tool: $(ARCHITECTURE_COMPARE_TARGET)
+
+$(ARCHITECTURE_COMPARE_TARGET): $(ARCHITECTURE_COMPARE_OBJ)
+	$(CC) $(ARCHITECTURE_COMPARE_OBJ) $(CFLAGS) $(LDFLAGS) -o $@
+
 # Weight bandwidth in isolation: identical float32 accumulation with B kept as
 # fp32, bf16, INT8, or packed INT4. Every narrow kernel is validated against a
 # dequantized reference before timing.
@@ -495,7 +504,8 @@ else
     GPU_TEST_ENV = ASAN_OPTIONS=detect_leaks=0
 endif
 
-test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ) $(SEED_FLOOR_TARGET) public-api-check version-check
+test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ) $(SEED_FLOOR_TARGET) \
+      $(ARCHITECTURE_COMPARE_TARGET) public-api-check version-check
 	@failed=0; \
 	for src in $(TEST_SRCS); do \
 		bin=$${src%.c}.out; \
@@ -513,6 +523,7 @@ test: $(LIB) $(TARGET) $(TEST_MODEL_OBJ) $(SEED_FLOOR_TARGET) public-api-check v
 	@bash tests/integration/test_resume_cli.sh ./$(TARGET)
 	@bash tests/integration/test_determinism.sh ./$(TARGET)
 	@bash tests/integration/test_seed_floor_cli.sh ./$(SEED_FLOOR_TARGET)
+	@bash tests/integration/test_architecture_compare.sh ./$(ARCHITECTURE_COMPARE_TARGET)
 	@bash tools/check_library_silence.sh
 	@$(MAKE) --no-print-directory $(FINGERPRINT_TARGET)
 	@bash tests/integration/test_libc_independence.sh
@@ -561,11 +572,12 @@ DEPS = $(OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(BENCH_PARALLEL_OBJ:.o=.d) \
        $(FINGERPRINT_OBJ:.o=.d) $(BENCH_ATTENTION_OBJ:.o=.d) \
        $(BENCH_BUNDLE_LOAD_OBJ:.o=.d) \
        $(SEED_FLOOR_OBJ:.o=.d) \
+       $(ARCHITECTURE_COMPARE_OBJ:.o=.d) \
        $(TEST_MODEL_OBJ:.o=.d) \
        $(PUBLIC_ALL_OBJ:.o=.d) $(EXAMPLE_OBJ:.o=.d)
 
 clean:
-	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(BENCH_BUNDLE_LOAD_OBJ) $(SEED_FLOOR_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(BENCH_BUNDLE_LOAD_TARGET) $(SEED_FLOOR_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS) $(PUBLIC_STATIC) $(PUBLIC_SHARED) $(EXAMPLE_BINS)
+	rm -f $(OBJ) $(BENCH_OBJ) $(BENCH_PARALLEL_OBJ) $(BENCH_QUANT_OBJ) $(BENCH_QUANT_MATMUL_OBJ) $(BENCH_BUNDLE_LOAD_OBJ) $(SEED_FLOOR_OBJ) $(ARCHITECTURE_COMPARE_OBJ) $(GPU_PROBE_OBJ) $(GPU_LATENCY_OBJ) $(TARGET) $(BENCH_TARGET) $(BENCH_PARALLEL_TARGET) $(BENCH_QUANT_TARGET) $(BENCH_QUANT_MATMUL_TARGET) $(BENCH_BUNDLE_LOAD_TARGET) $(SEED_FLOOR_TARGET) $(ARCHITECTURE_COMPARE_TARGET) $(PROFILE_TARGET) $(GPU_PROBE_TARGET) $(GPU_LATENCY_TARGET) $(FINGERPRINT_TARGET) $(BENCH_ATTENTION_TARGET) $(TEST_BINS) $(PUBLIC_STATIC) $(PUBLIC_SHARED) $(EXAMPLE_BINS)
 	rm -f $(DEPS)
 	rm -rf $(PUBLIC_BUILD_DIR)
 	$(MAKE) -C $(LIB_DIR) clean
@@ -574,4 +586,4 @@ clean:
 # .d (first build, or straight after clean) from being an error.
 -include $(DEPS)
 
-.PHONY: all clean public-libs examples public-api-check version-check release-package release-package-check release-repro-check reference-model reference-model-check seed-floor seed-floor-tool bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention
+.PHONY: all clean public-libs examples public-api-check version-check release-package release-package-check release-repro-check reference-model reference-model-check seed-floor seed-floor-tool architecture-compare-tool bench bench-parallel bench-quant bench-quantized-matmul bench-bundle-load profile test gpu-probe gpu-latency arm-check finite-math-check library-silence-check fingerprint bench-attention
