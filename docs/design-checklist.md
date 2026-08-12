@@ -748,8 +748,12 @@ speed/memory improvement is reproducible on identified hardware.
   the one shared parameter slice. Architecture flags persist through exact checkpoints, immutable
   manifests/config, and lossless or quantized bundle version 3; unflagged writers retain exact v1/v2
   behavior. Focused tests cover layout reduction, forward/backward math, parameter-inventory tiling,
-  checkpoint resume, CLI parsing, and copy/mmap/quantized persistence. No build, test, or ablation has
-  run before review. RoPE is independently enabled by `--rope`, removes additive positions, rotates
+  checkpoint resume, CLI parsing, and copy/mmap/quantized persistence. The focused tied-embedding
+  test now passes under Clang. On the small benchmark tier it removes exactly one 1000x64 matrix:
+  327,912 to 263,912 parameters (19.52%, 1.25 to 1.01 MiB of weights). Two ABBA samples on an
+  i5-11320H overlap the host's runtime spread, so no speed difference is claimed. This is a
+  correctness/resource result only; held-out quality still waits on the seed floor below. RoPE is
+  independently enabled by `--rope`, removes additive positions, rotates
   Q/K per head in full and cached attention, inverse-rotates gradients, and rejects odd head widths.
   Its focused source test covers rotation/inversion, pair-norm preservation, no-additive-position
   input, cached/full equivalence, a numerical Q-gradient, and pure-RoPE copy/mmap bundle persistence.
